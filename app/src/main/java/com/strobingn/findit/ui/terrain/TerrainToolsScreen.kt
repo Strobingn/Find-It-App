@@ -22,20 +22,33 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.strobingn.findit.data.HuntRepository
+import com.strobingn.findit.data.backend.SharedBackendClient
+import com.strobingn.findit.data.backend.toFloatRaster
 import com.strobingn.findit.data.power.BatteryOptimizer
 import com.strobingn.findit.data.terrain.TerrainAnalyzer
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 private enum class TerrainMode { HILLSHADE, SVF, OPENNESS, DISTURBANCE }
+
+private data class RasterMaps(
+  val hillshade: FloatArray,
+  val skyViewFactor: FloatArray,
+  val openness: FloatArray,
+  val disturbance: FloatArray,
+  val width: Int,
+  val height: Int,
+  val source: String,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,23 +57,84 @@ fun TerrainToolsScreen(
   onBack: () -> Unit,
 ) {
   val settings by repository.settings.collectAsStateWithLifecycle()
+  val team by repository.team.collectAsStateWithLifecycle()
   var mode by remember { mutableStateOf(TerrainMode.DISTURBANCE) }
+  var status by remember { mutableStateOf("Loading terrain…") }
+  var maps by remember { mutableStateOf<RasterMaps?>(null) }
+
   val side = BatteryOptimizer.maxTerrainGridSide(settings)
-  val maps =
-    remember(side) {
+  val center =
+    team.find { it.name.equals("You", ignoreCase = true) }?.location
+      ?: com.strobingn.findit.data.model.GeoPoint(41.503, -74.01)
+
+  LaunchedEffect(settings.useCloudBackend, settings.backendUrl, settings.lowPowerMode, center.lat, center.lng) {
+    val local: () -> RasterMaps = {
       val dem = TerrainAnalyzer.demoDem(side, side)
-      TerrainAnalyzer.analyze(dem, side, side)
+      val a = TerrainAnalyzer.analyze(dem, side, side)
+      RasterMaps(
+        hillshade = a.hillshade,
+        skyViewFactor = a.skyViewFactor,
+        openness = a.openness,
+        disturbance = a.disturbance,
+        width = a.width,
+        height = a.height,
+        source = "local-demo",
+      )
     }
+    if (!settings.useCloudBackend) {
+      maps = local()
+      status = "Local demo DEM (${side}×${side})"
+      return@LaunchedEffect
+    }
+    status = "Cloud: ${settings.backendUrl}…"
+    try {
+      val client = SharedBackendClient(settings.backendUrl)
+      val cell = if (settings.lowPowerMode) 30.0 else 20.0
+      val half = if (settings.lowPowerMode) 400.0 else 600.0
+      val remote =
+        client.analyzeTerrain(
+          centerLat = center.lat,
+          centerLon = center.lng,
+          halfSizeM = half,
+          cellSizeM = cell,
+          mode = "all",
+        )
+      val w = remote.width
+      val h = remote.height
+      val hs = remote.hillshade?.toFloatRaster() ?: FloatArray(w * h)
+      val svf = remote.svf?.toFloatRaster() ?: FloatArray(w * h) { 1f }
+      val dist = remote.disturbance?.toFloatRaster() ?: FloatArray(w * h) { 0.5f }
+      // Openness not on backend yet — derive from SVF
+      val open = FloatArray(svf.size) { i -> (svf[i] * 1.15f - 0.05f).coerceIn(0f, 1f) }
+      maps =
+        RasterMaps(
+          hillshade = hs,
+          skyViewFactor = svf,
+          openness = open,
+          disturbance = dist,
+          width = w,
+          height = h,
+          source = remote.source,
+        )
+      status = "Cloud terrain · ${remote.source} · ${w}×${h} @ ${"%.4f".format(center.lat)}, ${"%.4f".format(center.lng)}"
+    } catch (e: Exception) {
+      maps = local()
+      status = "Cloud failed (${e.message?.take(40)}) — local demo"
+    }
+  }
+
   val bitmap =
     remember(maps, mode) {
+      val m = maps ?: return@remember null
       val data =
         when (mode) {
-          TerrainMode.HILLSHADE -> maps.hillshade
-          TerrainMode.SVF -> maps.skyViewFactor
-          TerrainMode.OPENNESS -> maps.openness
-          TerrainMode.DISTURBANCE -> maps.disturbance
+          TerrainMode.HILLSHADE -> m.hillshade
+          TerrainMode.SVF -> m.skyViewFactor
+          TerrainMode.OPENNESS -> m.openness
+          TerrainMode.DISTURBANCE -> m.disturbance
         }
-      rasterToBitmap(data, maps.width, maps.height)
+      if (data.isEmpty() || m.width <= 0) null
+      else rasterToBitmap(data, m.width, m.height)
     }
 
   Scaffold(
@@ -84,12 +158,12 @@ fun TerrainToolsScreen(
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       Text(
-        "Priority #2 & #8 — Sky View Factor, Openness, multi-style hillshade, and auto " +
-          "ground-disturbance highlight pits/mounds better than plain basemap shading. " +
-          "Fully offline on a local DEM (demo DEM until LiDAR import).",
+        "SVF, Openness, hillshade, and ground-disturbance for spotting pits/mounds. " +
+          "Uses shared Oracle backend when enabled (same host as Viewshade).",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
+      Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         TerrainMode.entries.forEach { m ->
           FilterChip(
@@ -108,37 +182,35 @@ fun TerrainToolsScreen(
           )
         }
       }
-      Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = mode.name,
-        contentScale = ContentScale.FillBounds,
-        modifier = Modifier.fillMaxWidth().aspectRatio(1f),
-      )
+      if (bitmap != null) {
+        Image(
+          bitmap = bitmap.asImageBitmap(),
+          contentDescription = mode.name,
+          contentScale = ContentScale.FillBounds,
+          modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+        )
+      } else {
+        Text("Rendering…", style = MaterialTheme.typography.bodySmall)
+      }
       Text(
         when (mode) {
-          TerrainMode.HILLSHADE -> "Hillshade — rotate light later for multi-style relief."
+          TerrainMode.HILLSHADE -> "Hillshade — relief under light from NW."
           TerrainMode.SVF -> "Low SVF (dark) = depressions: privies, cellars, hollows."
-          TerrainMode.OPENNESS -> "Openness — banks, berms, and free sky ridges pop."
-          TerrainMode.DISTURBANCE -> "Disturbance — residual highs/lows vs local mean (foundations)."
+          TerrainMode.OPENNESS -> "Openness — banks, berms, free sky (from SVF on cloud)."
+          TerrainMode.DISTURBANCE -> "Disturbance — residual highs/lows (foundations)."
         },
         style = MaterialTheme.typography.bodySmall,
       )
-      if (settings.lowPowerMode) {
-        Text(
-          "Low power: ${side}×${side} DEM · refresh ${BatteryOptimizer.refreshIntervalMs(settings)} ms",
-          color = MaterialTheme.colorScheme.tertiary,
-        )
-      }
     }
   }
 }
 
 private fun rasterToBitmap(data: FloatArray, width: Int, height: Int): Bitmap {
   val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-  val pixels = IntArray(data.size)
-  for (i in data.indices) {
+  val pixels = IntArray(data.size.coerceAtMost(width * height))
+  val n = minOf(data.size, width * height)
+  for (i in 0 until n) {
     val v = (data[i].coerceIn(0f, 1f) * 255).toInt()
-    // warm metal-detector palette: dark pits → bright mounds
     val r = (40 + v * 0.85).toInt().coerceIn(0, 255)
     val g = (30 + v * 0.7).toInt().coerceIn(0, 255)
     val b = (20 + v * 0.35).toInt().coerceIn(0, 255)

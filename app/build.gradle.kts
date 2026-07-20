@@ -11,9 +11,11 @@ android {
         applicationId = "com.strobingn.findit"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0-metal"
+        versionCode = 3
+        versionName = "0.3.0-metal"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Same Oracle Cloud host as Viewshade
+        buildConfigField("String", "DEFAULT_BACKEND_URL", "\"http://129.80.174.236:8000\"")
     }
 
     buildTypes {
@@ -86,4 +88,5 @@ dependencies {
   implementation(libs.androidx.datastore.preferences)
   implementation(libs.play.services.location)
   implementation(libs.coil.compose)
+  implementation(libs.okhttp)
 }

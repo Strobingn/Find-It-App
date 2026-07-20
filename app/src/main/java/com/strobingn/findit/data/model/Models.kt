@@ -107,6 +107,9 @@ data class AppSettings(
   /** Current hunt session id stamped onto new finds. */
   val activeHuntSessionId: String? = null,
   val activeHuntSessionName: String? = null,
+  /** Shared Oracle backend (same host as Viewshade). */
+  val useCloudBackend: Boolean = true,
+  val backendUrl: String = "http://129.80.174.236:8000",
 )
 
 /** Optional hunt session wrapper (groups finds from one outing). */
