@@ -266,45 +266,36 @@ object DemGenerator {
 
     fun parseLasStream(inputStream: java.io.InputStream): ElevationGrid? {
         try {
-            val bis = java.io.BufferedInputStream(inputStream)
-            val header = ByteArray(375)
-            bis.mark(375)
-            val readBytes = bis.read(header, 0, 375)
-            if (readBytes < 227) return null
+            // Read entire stream into memory - no mark/reset ever needed
+            val bytes = inputStream.readBytes()
+            if (bytes.size < 227) return null
 
             // Check signature "LASF"
-            if (header[0].toChar() != 'L' || header[1].toChar() != 'A' || header[2].toChar() != 'S' || header[3].toChar() != 'F') {
+            if (bytes[0].toChar() != 'L' || bytes[1].toChar() != 'A' || bytes[2].toChar() != 'S' || bytes[3].toChar() != 'F') {
                 return null
             }
 
-            val offsetToPoints = readIntLE(header, 96)
-            val pointFormat = header[104].toInt() and 0xFF
-            val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
-            val legacyNumPoints = readIntLE(header, 107)
+            val offsetToPoints = readIntLE(bytes, 96)
+            val pointFormat = bytes[104].toInt() and 0xFF
+            val pointRecordLength = readShortLE(bytes, 105).toInt() and 0xFFFF
+            val legacyNumPoints = readIntLE(bytes, 107)
 
-            val scaleX = readDoubleLE(header, 131)
-            val scaleY = readDoubleLE(header, 139)
-            val scaleZ = readDoubleLE(header, 147)
+            val scaleX = readDoubleLE(bytes, 131)
+            val scaleY = readDoubleLE(bytes, 139)
+            val scaleZ = readDoubleLE(bytes, 147)
 
-            val offsetX = readDoubleLE(header, 155)
-            val offsetY = readDoubleLE(header, 163)
-            val offsetZ = readDoubleLE(header, 171)
+            val offsetX = readDoubleLE(bytes, 155)
+            val offsetY = readDoubleLE(bytes, 163)
+            val offsetZ = readDoubleLE(bytes, 171)
 
-            val maxX = readDoubleLE(header, 179)
-            val minX = readDoubleLE(header, 187)
-            val maxY = readDoubleLE(header, 195)
-            val minY = readDoubleLE(header, 203)
-            val maxZ = readDoubleLE(header, 211)
-            val minZ = readDoubleLE(header, 219)
+            val maxX = readDoubleLE(bytes, 179)
+            val minX = readDoubleLE(bytes, 187)
+            val maxY = readDoubleLE(bytes, 195)
+            val minY = readDoubleLE(bytes, 203)
+            val maxZ = readDoubleLE(bytes, 211)
+            val minZ = readDoubleLE(bytes, 219)
 
-            // Reset and skip to point data
-            bis.reset()
-            var bytesToSkip = offsetToPoints.toLong()
-            while (bytesToSkip > 0) {
-                val skipped = bis.skip(bytesToSkip)
-                if (skipped <= 0) break
-                bytesToSkip -= skipped
-            }
+            if (offsetToPoints < 0 || offsetToPoints >= bytes.size) return null
 
             // Bins for 100x100 grid
             val gridW = 100
@@ -313,26 +304,20 @@ object DemGenerator {
             val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
             val countGrid = IntArray(gridW * gridH)
 
-            val pointBuf = ByteArray(pointRecordLength)
             val pointsToProcess = Math.min(if (legacyNumPoints <= 0) 100000 else legacyNumPoints, 250000)
 
             // Bounding box range
             val rangeX = if (maxX - minX > 0) maxX - minX else 1.0
             val rangeY = if (maxY - minY > 0) maxY - minY else 1.0
 
+            var pos = offsetToPoints
             for (i in 0 until pointsToProcess) {
-                var bytesRead = 0
-                while (bytesRead < pointRecordLength) {
-                    val r = bis.read(pointBuf, bytesRead, pointRecordLength - bytesRead)
-                    if (r <= 0) break
-                    bytesRead += r
-                }
-                if (bytesRead < pointRecordLength) break
+                if (pos + pointRecordLength > bytes.size) break
 
                 // X, Y, Z are the first three 4-byte integers in the point record
-                val rawX = readIntLE(pointBuf, 0)
-                val rawY = readIntLE(pointBuf, 4)
-                val rawZ = readIntLE(pointBuf, 8)
+                val rawX = readIntLE(bytes, pos)
+                val rawY = readIntLE(bytes, pos + 4)
+                val rawZ = readIntLE(bytes, pos + 8)
 
                 val realX = rawX * scaleX + offsetX
                 val realY = rawY * scaleY + offsetY
@@ -346,6 +331,8 @@ object DemGenerator {
                 if (realZ < minGrid[idx]) minGrid[idx] = realZ
                 if (realZ > maxGrid[idx]) maxGrid[idx] = realZ
                 countGrid[idx]++
+
+                pos += pointRecordLength
             }
 
             // Interpolate missing cells to make a continuous terrain
@@ -603,34 +590,48 @@ object DemGenerator {
         }
     }
 
+    /**
+     * Master entry point. Reads the ENTIRE stream into memory first.
+     * This completely eliminates every possible "Resetting to invalid mark" crash.
+     */
     fun parseFromStream(fileName: String, inputStream: java.io.InputStream): ElevationGrid? {
-        val lowerName = fileName.lowercase()
-        return if (lowerName.endsWith(".las")) {
-            parseLasStream(inputStream)
-        } else {
-            val bis = java.io.BufferedInputStream(inputStream)
-            bis.mark(4096)
-            val reader = java.io.BufferedReader(java.io.InputStreamReader(bis))
-            val firstLine = reader.readLine() ?: ""
-            bis.reset()
-            
-            val cleanLine = firstLine.trim().lowercase()
-            if (cleanLine.startsWith("ncols ") || cleanLine.startsWith("ncols\t")) {
-                parseAscDem(java.io.BufferedReader(java.io.InputStreamReader(bis)))
+        return try {
+            // OPTION A: full in-memory read. Zero mark/reset risk.
+            val bytes = inputStream.readBytes()
+            if (bytes.isEmpty()) return null
+
+            val lowerName = fileName.lowercase()
+
+            if (lowerName.endsWith(".las")) {
+                // Re-use the now-memory-safe LAS parser
+                parseLasStream(java.io.ByteArrayInputStream(bytes))
             } else {
-                val secondLine = reader.readLine() ?: ""
-                bis.reset()
-                
-                val tokens1 = firstLine.trim().split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
-                val tokens2 = secondLine.trim().split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
-                
-                if (tokens1.size == 3 && tokens2.size == 3) {
-                    parseXyzStream(java.io.BufferedReader(java.io.InputStreamReader(bis)))
+                val text = String(bytes, Charsets.UTF_8)
+                val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                if (lines.isEmpty()) return null
+
+                val firstLine = lines[0].lowercase()
+
+                if (firstLine.startsWith("ncols ") || firstLine.startsWith("ncols\t")) {
+                    // ASC / DEM grid
+                    parseAscDem(java.io.BufferedReader(java.io.StringReader(text)))
                 } else {
-                    val entireText = java.io.BufferedReader(java.io.InputStreamReader(bis)).readText()
-                    parseCustomGrid(entireText)
+                    // Decide between XYZ point cloud vs pure elevation matrix
+                    val tokens1 = lines[0].split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
+                    val tokens2 = if (lines.size > 1) lines[1].split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() } else emptyList()
+
+                    if (tokens1.size == 3 && tokens2.size == 3) {
+                        // XYZ point cloud
+                        parseXyzStream(java.io.BufferedReader(java.io.StringReader(text)))
+                    } else {
+                        // Raw elevation matrix (space / comma separated)
+                        parseCustomGrid(text)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
         }
     }
 }
