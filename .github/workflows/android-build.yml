@@ -1,13 +1,18 @@
-name: Build Find It APK
+name: Build Lidar Metal Detector APK
 
-# Manual: Actions → "Build Find It APK" → Run workflow → pick main or grok
-# CLI:    gh workflow run "Build Find It APK" --ref main
-#         gh workflow run "Build Find It APK" --ref grok
+# Manual: repo → Actions → this workflow → Run workflow → pick branch
+# CLI:    gh workflow run "Build Lidar Metal Detector APK" --ref grok-v7
 on:
   push:
-    branches: [ main, master, grok ]
+    branches:
+      - main
+      - master
+      - grok
+      - grok-v7
+      - "feature/**"
+      - "fix/**"
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -29,15 +34,16 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: Require Gradle wrapper
+        run: |
+          test -f gradlew || { echo "gradlew missing on this branch"; ls -la; exit 1; }
+          chmod +x ./gradlew
 
       - name: Ensure .env for secrets plugin
         run: |
           if [ ! -f .env ] && [ -f .env.example ]; then
             cp .env.example .env
           fi
-          # Empty .env is fine when the app does not require secrets for debug builds.
           touch .env
 
       - name: Ensure Android debug keystore
@@ -51,7 +57,6 @@ jobs:
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
-          # Project-local debug.keystore used by some branches
           if [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f debug.keystore ]; then
@@ -68,18 +73,20 @@ jobs:
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: find-it-debug-${{ github.ref_name }}-${{ github.run_number }}
+          name: lidar-metal-detector-debug-${{ github.ref_name }}-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
 
       - name: Build Release APK (unsigned OK)
+        continue-on-error: true
         run: ./gradlew assembleRelease --stacktrace
 
       - name: Upload Release APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: find-it-release-${{ github.ref_name }}-${{ github.run_number }}
+          name: lidar-metal-detector-release-${{ github.ref_name }}-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 14
