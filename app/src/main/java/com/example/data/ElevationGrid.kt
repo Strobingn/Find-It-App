@@ -51,15 +51,18 @@ class ElevationGrid(
         sunAltitude: Float,
         vegetationFilter: Float,
         palette: Int,
-        contrast: Float = 1.5f
+        contrast: Float = 1.5f,
+        visualizationMode: Int = 0, // 0 = Standard, 1 = Multi-Directional Relief, 2 = Slope Map
+        overlayType: Int = 0, // 0 = None, 1 = 1880s Homestead Plat, 2 = 1940s Contour Lines
+        overlayOpacity: Float = 0.5f
     ): Bitmap {
         val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
 
         // Convert sun angles to radians
-        // GIS Azimuth starts at North (0 deg) and goes clockwise.
-        // Trig angles start at East (0 rad) and go counter-clockwise.
-        val sunAzRad = Math.toRadians((360.0 - sunAzimuth + 90.0) % 360.0).toFloat()
+        val sunAzRad1 = Math.toRadians((360.0 - sunAzimuth + 90.0) % 360.0).toFloat()
+        // Opposite sun angle for secondary direction in Multi-Directional Relief
+        val sunAzRad2 = Math.toRadians((360.0 - ((sunAzimuth + 180f) % 360f) + 90.0) % 360.0).toFloat()
         val sunAltRad = Math.toRadians(sunAltitude.toDouble()).toFloat()
 
         val cosSunAlt = cos(sunAltRad)
@@ -107,15 +110,6 @@ class ElevationGrid(
                     if (dz_dy > 0) Math.PI.toFloat() / 2f else -Math.PI.toFloat() / 2f
                 }
 
-                // Hillshade illumination (0.0 to 1.0)
-                var hillshade = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad - aspect)
-                hillshade = hillshade.coerceIn(0f, 1f)
-
-                // Apply adjustable contrast/intensity to shadow relief
-                if (contrast != 1.0f) {
-                    hillshade = ((hillshade - 0.5f) * contrast + 0.5f).coerceIn(0f, 1f)
-                }
-
                 // Elevation percentage for color tinting
                 val currentElev = filteredElevations[y * width + x]
                 val elevPct = ((currentElev - minElev) / elevRange).coerceIn(0f, 1f)
@@ -123,13 +117,105 @@ class ElevationGrid(
                 // Determine base color based on palette
                 val baseColor = getPaletteColor(palette, elevPct)
 
-                // Blend base color with the hillshade illumination
-                // Low hillshade (0.0) -> dark shadow, High hillshade (1.0) -> fully lit highlight
-                val r = (Color.red(baseColor) * hillshade).toInt().coerceIn(0, 255)
-                val g = (Color.green(baseColor) * hillshade).toInt().coerceIn(0, 255)
-                val b = (Color.blue(baseColor) * hillshade).toInt().coerceIn(0, 255)
+                var finalColor = baseColor
 
-                pixels[y * width + x] = Color.rgb(r, g, b)
+                if (visualizationMode == 2) {
+                    // STYLE 2: Slope Map (Neon Orange/Red highlighting steep gradients, otherwise dark steel clay)
+                    val slopePct = (slope / 0.4f).coerceIn(0f, 1f)
+                    
+                    // High-contrast slope coloring: blend the base color into red-orange based on slope
+                    val rSlope = (255 * slopePct + Color.red(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
+                    val gSlope = (70 * slopePct + Color.green(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
+                    val bSlope = (0 * slopePct + Color.blue(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
+                    finalColor = Color.rgb(rSlope, gSlope, bSlope)
+                } else {
+                    // STYLE 0 & 1: Hillshading calculations
+                    var hillshade = if (visualizationMode == 1) {
+                        // Multi-directional relief: combine primary (NW) and secondary (SE) shadow shading
+                        val h1 = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad1 - aspect)
+                        val h2 = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad2 - aspect)
+                        ((h1.coerceIn(0f, 1f) + h2.coerceIn(0f, 1f)) / 2f)
+                    } else {
+                        // Standard Hillshade
+                        val h = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad1 - aspect)
+                        h.coerceIn(0f, 1f)
+                    }
+
+                    // Apply contrast/intensity to shadow relief
+                    if (contrast != 1.0f) {
+                        hillshade = ((hillshade - 0.5f) * contrast + 0.5f).coerceIn(0f, 1f)
+                    }
+
+                    // Blend base color with hillshade
+                    val r = (Color.red(baseColor) * hillshade).toInt().coerceIn(0, 255)
+                    val g = (Color.green(baseColor) * hillshade).toInt().coerceIn(0, 255)
+                    val b = (Color.blue(baseColor) * hillshade).toInt().coerceIn(0, 255)
+                    finalColor = Color.rgb(r, g, b)
+                }
+
+                // Blend Historical Overlay if requested
+                if (overlayType > 0 && overlayOpacity > 0f) {
+                    var isOverlayPixel = false
+                    var overlayColor = Color.BLACK
+
+                    if (overlayType == 1) {
+                        // OVERLAY 1: 1880s Homestead Plat Overlay (Vintage Sepia boundaries, structures, and roads)
+                        // A. Plat grid line divisions (e.g. sections every 50 grid lines)
+                        val isSectionLine = (x % 50 == 0) || (y % 50 == 0)
+                        
+                        // B. Old Homestead Carriage Road (Wavy path crossing screen)
+                        val roadY = height * 0.65f + sin(x * 0.08f) * 12f
+                        val isRoad = Math.abs(y - roadY) < 1.5f
+                        
+                        // C. Property boundary fences (rectangular layout at center)
+                        val isFence = (x in 20..80 && (y == 25 || y == 75)) || (y in 25..75 && (x == 20 || x == 80))
+
+                        // D. Old ruined Homestead structure plots (small squares representing cellar holes)
+                        val isHomesteadPlot = (x in 40..45 && y in 41..44) || (x in 24..27 && y in 63..66)
+
+                        if (isSectionLine) {
+                            isOverlayPixel = true
+                            overlayColor = Color.rgb(180, 150, 110) // Light vintage sepia
+                        } else if (isFence) {
+                            isOverlayPixel = true
+                            overlayColor = Color.rgb(139, 90, 43) // Dark vintage brown
+                        } else if (isRoad) {
+                            isOverlayPixel = true
+                            overlayColor = Color.rgb(160, 130, 90) // Medium sepia dashed carriage road
+                        } else if (isHomesteadPlot) {
+                            isOverlayPixel = true
+                            overlayColor = Color.rgb(200, 50, 50) // Red warning foundation overlay
+                        }
+                    } else if (overlayType == 2) {
+                        // OVERLAY 2: 1940s Vintage Topographic Contour Lines (Brown hand-styled contours)
+                        val elevInt = currentElev.toInt()
+                        val isContour = (elevInt % 12 == 0) && (filteredElevations[coerceIndex(x - 1, y)].toInt() % 12 != 0 || filteredElevations[coerceIndex(x, y - 1)].toInt() % 12 != 0)
+                        
+                        // Old coordinate meridian line
+                        val isGridMeridian = (x == width / 2) || (y == height / 2)
+
+                        if (isContour) {
+                            isOverlayPixel = true
+                            overlayColor = Color.rgb(115, 80, 50) // Vintage Topographic Brown
+                        } else if (isGridMeridian) {
+                            isOverlayPixel = true
+                            overlayColor = Color.rgb(50, 80, 115) // Deep ocean surveyor grid blue
+                        }
+                    }
+
+                    if (isOverlayPixel) {
+                        val ro = Color.red(overlayColor)
+                        val go = Color.green(overlayColor)
+                        val bo = Color.blue(overlayColor)
+
+                        val rf = (ro * overlayOpacity + Color.red(finalColor) * (1f - overlayOpacity)).toInt().coerceIn(0, 255)
+                        val gf = (go * overlayOpacity + Color.green(finalColor) * (1f - overlayOpacity)).toInt().coerceIn(0, 255)
+                        val bf = (bo * overlayOpacity + Color.blue(finalColor) * (1f - overlayOpacity)).toInt().coerceIn(0, 255)
+                        finalColor = Color.rgb(rf, gf, bf)
+                    }
+                }
+
+                pixels[y * width + x] = finalColor
             }
         }
 

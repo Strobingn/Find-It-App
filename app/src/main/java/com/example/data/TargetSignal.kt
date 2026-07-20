@@ -12,7 +12,9 @@ data class TargetSignal(
     val metalType: MetalType,
     val signalStrength: Float, // percentage (0f to 100f)
     val depthCm: Int, // Calculated approximate depth (e.g., 5 to 50 cm)
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val notes: String = "",
+    val status: String = "Logged" // "Logged", "Excavated", "Anomalous", "Trash"
 ) : Serializable
 
 enum class MetalType(val label: String, val colorHex: Long) {

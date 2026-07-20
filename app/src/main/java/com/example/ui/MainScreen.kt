@@ -68,6 +68,10 @@ fun MainScreen(
     val vegetationFilter by viewModel.vegetationFilter.collectAsState()
     val paletteType by viewModel.paletteType.collectAsState()
     val contrast by viewModel.contrast.collectAsState()
+    val visualizationMode by viewModel.visualizationMode.collectAsState()
+    val overlayType by viewModel.overlayType.collectAsState()
+    val overlayOpacity by viewModel.overlayOpacity.collectAsState()
+    val gridSpacing by viewModel.gridSpacing.collectAsState()
     val hillshadeBitmap by viewModel.hillshadeBitmap.collectAsState()
     val isRendering by viewModel.isRendering.collectAsState()
 
@@ -201,6 +205,7 @@ fun MainScreen(
                 loggedSignals = loggedSignals,
                 onSweepPositionChanged = { x, y -> viewModel.setSweepPosition(x, y) },
                 onStopSweeping = { viewModel.stopSweeping() },
+                gridSpacing = gridSpacing,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(300.dp)
@@ -359,6 +364,14 @@ fun MainScreen(
                 onPaletteTypeChanged = { viewModel.updatePalette(it) },
                 contrast = contrast,
                 onContrastChanged = { viewModel.updateContrast(it) },
+                visualizationMode = visualizationMode,
+                onVisualizationModeChanged = { viewModel.updateVisualizationMode(it) },
+                overlayType = overlayType,
+                onOverlayTypeChanged = { viewModel.updateOverlayType(it) },
+                overlayOpacity = overlayOpacity,
+                onOverlayOpacityChanged = { viewModel.updateOverlayOpacity(it) },
+                gridSpacing = gridSpacing,
+                onGridSpacingChanged = { viewModel.updateGridSpacing(it) },
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -377,10 +390,8 @@ fun MainScreen(
                 currentSweepY = sweepY,
                 onLogSignal = { viewModel.logCurrentSignal() },
                 onDeleteSignal = { viewModel.deleteLoggedSignal(it) },
+                onUpdateSignal = { viewModel.updateLoggedSignal(it) },
                 onClearAll = { viewModel.clearLoggedSignals() },
-                onExportCsv = {
-                    // Export simulation popup or trigger
-                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(260.dp)

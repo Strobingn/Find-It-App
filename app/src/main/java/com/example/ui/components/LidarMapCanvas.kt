@@ -40,6 +40,7 @@ fun LidarMapCanvas(
     loggedSignals: List<TargetSignal>,
     onSweepPositionChanged: (Float, Float) -> Unit,
     onStopSweeping: () -> Unit,
+    gridSpacing: Float = 0f,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -61,7 +62,7 @@ fun LidarMapCanvas(
                                 onSweepPositionChanged(xPct, yPct)
                                 tryAwaitRelease()
                                 onStopSweeping()
-                            }
+                             }
                         )
                     }
                     .pointerInput(Unit) {
@@ -94,6 +95,36 @@ fun LidarMapCanvas(
                     dstOffset = IntOffset(0, 0),
                     dstSize = IntSize(canvasWidth.toInt(), canvasHeight.toInt())
                 )
+
+                // Draw Search Grid Planner (Priority 4)
+                if (gridSpacing > 0f) {
+                    val cols = (100f / gridSpacing).toInt()
+                    val rows = (100f / gridSpacing).toInt()
+
+                    // Vertical lines
+                    for (i in 1 until cols) {
+                        val px = (i * gridSpacing / 100f) * canvasWidth
+                        drawLine(
+                            color = Color(0xFF29B6F6),
+                            start = Offset(px, 0f),
+                            end = Offset(px, canvasHeight),
+                            strokeWidth = 1f,
+                            alpha = 0.35f
+                        )
+                    }
+
+                    // Horizontal lines
+                    for (i in 1 until rows) {
+                        val py = (i * gridSpacing / 100f) * canvasHeight
+                        drawLine(
+                            color = Color(0xFF29B6F6),
+                            start = Offset(0f, py),
+                            end = Offset(canvasWidth, py),
+                            strokeWidth = 1f,
+                            alpha = 0.35f
+                        )
+                    }
+                }
 
                 // 2. Draw logged signals (archeological target pins)
                 for (sig in loggedSignals) {

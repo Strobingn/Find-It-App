@@ -55,6 +55,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isRendering = MutableStateFlow(false)
     val isRendering: StateFlow<Boolean> = _isRendering.asStateFlow()
 
+    private val _visualizationMode = MutableStateFlow(0) // 0 = Standard, 1 = Multi-Directional, 2 = Slope Map
+    val visualizationMode: StateFlow<Int> = _visualizationMode.asStateFlow()
+
+    private val _overlayType = MutableStateFlow(0) // 0 = None, 1 = 1880s Plat, 2 = 1940s Contours
+    val overlayType: StateFlow<Int> = _overlayType.asStateFlow()
+
+    private val _overlayOpacity = MutableStateFlow(0.4f)
+    val overlayOpacity: StateFlow<Float> = _overlayOpacity.asStateFlow()
+
+    private val _gridSpacing = MutableStateFlow(0f) // 0 = disabled, else grid cell %
+    val gridSpacing: StateFlow<Float> = _gridSpacing.asStateFlow()
+
     // 2. Simulated/Physical Metal Detecting Sweeper State
     private val _sweepX = MutableStateFlow(50f) // Current scan head coordinate (0 to 100)
     val sweepX: StateFlow<Float> = _sweepX.asStateFlow()
@@ -139,6 +151,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { _vegetationFilter.collectLatest { triggerRender() } }
         viewModelScope.launch { _paletteType.collectLatest { triggerRender() } }
         viewModelScope.launch { _contrast.collectLatest { triggerRender() } }
+        viewModelScope.launch { _visualizationMode.collectLatest { triggerRender() } }
+        viewModelScope.launch { _overlayType.collectLatest { triggerRender() } }
+        viewModelScope.launch { _overlayOpacity.collectLatest { triggerRender() } }
 
         // Core background sweep loop to handle sensor simulation & continuous sound pings
         startDetectorLoop()
@@ -161,13 +176,19 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             val veg = _vegetationFilter.value
             val pal = _paletteType.value
             val ct = _contrast.value
+            val vis = _visualizationMode.value
+            val over = _overlayType.value
+            val opac = _overlayOpacity.value
 
             val bmp = grid.renderHillshade(
                 sunAzimuth = az,
                 sunAltitude = alt,
                 vegetationFilter = veg,
                 palette = pal,
-                contrast = ct
+                contrast = ct,
+                visualizationMode = vis,
+                overlayType = over,
+                overlayOpacity = opac
             )
 
             withContext(Dispatchers.Main) {
@@ -181,6 +202,28 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     fun selectSite(index: Int) {
         if (index in 0..3) {
             _currentSiteIndex.value = index
+        }
+    }
+
+    fun updateVisualizationMode(mode: Int) {
+        _visualizationMode.value = mode
+    }
+
+    fun updateOverlayType(type: Int) {
+        _overlayType.value = type
+    }
+
+    fun updateOverlayOpacity(opacity: Float) {
+        _overlayOpacity.value = opacity
+    }
+
+    fun updateGridSpacing(spacing: Float) {
+        _gridSpacing.value = spacing
+    }
+
+    fun updateLoggedSignal(updatedSignal: TargetSignal) {
+        _loggedSignals.value = _loggedSignals.value.map {
+            if (it.id == updatedSignal.id) updatedSignal else it
         }
     }
 

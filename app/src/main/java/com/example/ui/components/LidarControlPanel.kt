@@ -20,8 +20,6 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Landscape
 import androidx.compose.material.icons.filled.Map
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -52,6 +50,14 @@ fun LidarControlPanel(
     onPaletteTypeChanged: (Int) -> Unit,
     contrast: Float,
     onContrastChanged: (Float) -> Unit,
+    visualizationMode: Int,
+    onVisualizationModeChanged: (Int) -> Unit,
+    overlayType: Int,
+    onOverlayTypeChanged: (Int) -> Unit,
+    overlayOpacity: Float,
+    onOverlayOpacityChanged: (Float) -> Unit,
+    gridSpacing: Float,
+    onGridSpacingChanged: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -179,7 +185,195 @@ fun LidarControlPanel(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // --- SECTION 3: HILLSHADE CONTROLS ---
+        // --- SECTION 3: ADVANCED TERRAIN VISUALIZATION (Priority 2) ---
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                imageVector = Icons.Default.Landscape,
+                contentDescription = null,
+                tint = Color(0xFFFFD700),
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "ADVANCED SHADOW RELIEF STYLE",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.LightGray,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val visualizerStyles = listOf("Standard NW", "Multi-Vector", "Slope Profiler")
+            visualizerStyles.forEachIndexed { index, name ->
+                val isSelected = visualizationMode == index
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) Color(0xFFFFD700).copy(alpha = 0.15f) else Color(0xFF1E2026))
+                        .border(
+                            1.dp,
+                            if (isSelected) Color(0xFFFFD700) else Color(0xFF2E313D),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onVisualizationModeChanged(index) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = name,
+                        color = if (isSelected) Color.White else Color.Gray,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- SECTION 4: HISTORICAL MAP OVERLAYS (Priority 1) ---
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                imageVector = Icons.Default.Map,
+                contentDescription = null,
+                tint = Color(0xFF00E676),
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "HISTORICAL GEOSPATIAL MAP OVERLAYS",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.LightGray,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val overlays = listOf("Disabled", "1880s Homestead Plat", "1940s Vintage Contours")
+            overlays.forEachIndexed { index, name ->
+                val isSelected = overlayType == index
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) Color(0xFF00E676).copy(alpha = 0.15f) else Color(0xFF1E2026))
+                        .border(
+                            1.dp,
+                            if (isSelected) Color(0xFF00E676) else Color(0xFF2E313D),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onOverlayTypeChanged(index) }
+                        .padding(vertical = 10.dp, horizontal = 2.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = name,
+                        color = if (isSelected) Color.White else Color.Gray,
+                        fontSize = 10.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+
+        if (overlayType > 0) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                Text(text = "Overlay Opacity Blend", color = Color.Gray, fontSize = 11.sp)
+                Text(text = "${(overlayOpacity * 100).toInt()}%", color = Color(0xFF00E676), fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            }
+            Slider(
+                value = overlayOpacity,
+                onValueChange = onOverlayOpacityChanged,
+                valueRange = 0.1f..0.9f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color(0xFF00E676),
+                    activeTrackColor = Color(0xFF00E676),
+                    inactiveTrackColor = Color(0xFF1E2026)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- SECTION 5: COIL SEARCH GRID PLANNER (Priority 4) ---
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                imageVector = Icons.Default.Map,
+                contentDescription = null,
+                tint = Color(0xFF29B6F6),
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "SURVEY SEARCH GRID PLANNER",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.LightGray,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val gridOptions = listOf(0f to "Disabled", 20f to "5x5 Cells", 10f to "10x10 Cells", 5f to "20x20 Cells")
+            gridOptions.forEach { (spacing, label) ->
+                val isSelected = gridSpacing == spacing
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) Color(0xFF29B6F6).copy(alpha = 0.15f) else Color(0xFF1E2026))
+                        .border(
+                            1.dp,
+                            if (isSelected) Color(0xFF29B6F6) else Color(0xFF2E313D),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onGridSpacingChanged(spacing) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color.White else Color.Gray,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- SECTION 6: HILLSHADE GEOMETRY CONTROLS ---
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
@@ -265,7 +459,7 @@ fun LidarControlPanel(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // --- SECTION 4: COLOR PALETTE ---
+        // --- SECTION 7: COLOR PALETTE ---
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
