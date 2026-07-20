@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <files-path name="offline" path="offline/" />
+    <files-path name="photos" path="offline/photos/" />
     <cache-path name="cache" path="." />
+    <external-cache-path name="ext_cache" path="." />
 </paths>

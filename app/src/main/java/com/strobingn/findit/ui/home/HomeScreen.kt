@@ -21,26 +21,36 @@ import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Terrain
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation3.runtime.NavKey
 import com.strobingn.findit.ArOverlay
 import com.strobingn.findit.Export
 import com.strobingn.findit.Finds
@@ -51,8 +61,11 @@ import com.strobingn.findit.Settings
 import com.strobingn.findit.TeamVisibility
 import com.strobingn.findit.TerrainTools
 import com.strobingn.findit.data.HuntRepository
+import com.strobingn.findit.data.location.LocationTracker
+import com.strobingn.findit.data.model.GeoPoint
+import com.strobingn.findit.ui.common.rememberLocationPermissionState
 import com.strobingn.findit.ui.map.HuntMapCanvas
-import androidx.navigation3.runtime.NavKey
+import kotlinx.coroutines.launch
 
 private data class Tool(
   val title: String,
@@ -68,10 +81,37 @@ fun HomeScreen(
   onNavigate: (NavKey) -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val tracker = remember { LocationTracker.get(context) }
   val finds by repository.finds.collectAsStateWithLifecycle()
   val grids by repository.grids.collectAsStateWithLifecycle()
   val team by repository.team.collectAsStateWithLifecycle()
   val settings by repository.settings.collectAsStateWithLifecycle()
+  val locPerm = rememberLocationPermissionState(requestOnLaunch = true)
+
+  var myLocation by remember { mutableStateOf<GeoPoint?>(null) }
+  var accuracyM by remember { mutableStateOf<Float?>(null) }
+  var gpsLabel by remember { mutableStateOf("GPS off") }
+
+  LaunchedEffect(locPerm.granted, settings.lowPowerMode) {
+    if (!locPerm.granted) {
+      gpsLabel = "Tap pin for location"
+      return@LaunchedEffect
+    }
+    tracker.lastKnownOrNull()?.let { fix ->
+      myLocation = fix.point
+      accuracyM = fix.accuracyM
+      gpsLabel = fix.accuracyM?.let { "GPS ±${it.toInt()} m" } ?: "GPS"
+      repository.updateSelfLocation(fix.point)
+    }
+    tracker.updates(lowPower = settings.lowPowerMode).collect { fix ->
+      myLocation = fix.point
+      accuracyM = fix.accuracyM
+      gpsLabel = fix.accuracyM?.let { "GPS ±${it.toInt()} m" } ?: "GPS"
+      repository.updateSelfLocation(fix.point)
+    }
+  }
 
   val tools =
     listOf(
@@ -82,7 +122,12 @@ fun HomeScreen(
       Tool("Team LOS", "${team.size} hunters", Icons.Default.Groups, TeamVisibility),
       Tool("AR overlay", "Live ground cues", Icons.Default.CameraAlt, ArOverlay),
       Tool("Export", "GPX · KML · CSV", Icons.Default.Share, Export),
-      Tool("Settings", if (settings.lowPowerMode) "Low power ON" else "Power · units", Icons.Default.Settings, Settings),
+      Tool(
+        "Settings",
+        if (settings.lowPowerMode) "Low power ON" else "Power · GPS · session",
+        Icons.Default.Settings,
+        Settings,
+      ),
     )
 
   Scaffold(
@@ -93,10 +138,29 @@ fun HomeScreen(
           Column {
             Text("Find It", fontWeight = FontWeight.Bold)
             Text(
-              "Metal detecting field kit",
+              settings.activeHuntSessionName?.let { "Hunt: $it · $gpsLabel" }
+                ?: "Metal detecting · $gpsLabel",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+          }
+        },
+        actions = {
+          IconButton(
+            onClick = {
+              if (!locPerm.granted) locPerm.request()
+              else {
+                scope.launch {
+                  tracker.lastKnownOrNull()?.let {
+                    myLocation = it.point
+                    accuracyM = it.accuracyM
+                    repository.updateSelfLocation(it.point)
+                  }
+                }
+              }
+            },
+          ) {
+            Icon(Icons.Default.MyLocation, contentDescription = "Center GPS")
           }
         },
       )
@@ -113,10 +177,25 @@ fun HomeScreen(
         .padding(padding)
         .padding(horizontal = 16.dp),
     ) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Default.Map, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.size(8.dp))
-        Text("Hunt map", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Icon(Icons.Default.Map, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+          Spacer(Modifier.size(8.dp))
+          Text("Hunt map", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        }
+        FilterChip(
+          selected = settings.followMeOnMap,
+          onClick = {
+            scope.launch {
+              repository.updateSettings { it.copy(followMeOnMap = !it.followMeOnMap) }
+            }
+          },
+          label = { Text(if (settings.followMeOnMap) "Follow me" else "Overview") },
+        )
       }
       Spacer(Modifier.height(8.dp))
       Card(
@@ -128,6 +207,9 @@ fun HomeScreen(
           grids = grids,
           team = team,
           showTeam = settings.showTeamOnMap,
+          myLocation = myLocation,
+          followMe = settings.followMeOnMap && myLocation != null,
+          accuracyM = accuracyM,
           modifier = Modifier.fillMaxSize(),
         )
       }

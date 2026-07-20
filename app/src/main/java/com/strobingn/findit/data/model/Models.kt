@@ -102,6 +102,20 @@ data class AppSettings(
   val cacheTiles: Boolean = true,
   val preferImperial: Boolean = true,
   val showTeamOnMap: Boolean = true,
+  /** Keep map bounds around the live GPS fix. */
+  val followMeOnMap: Boolean = true,
+  /** Current hunt session id stamped onto new finds. */
+  val activeHuntSessionId: String? = null,
+  val activeHuntSessionName: String? = null,
+)
+
+/** Optional hunt session wrapper (groups finds from one outing). */
+@Serializable
+data class HuntSession(
+  val id: String = java.util.UUID.randomUUID().toString(),
+  val name: String,
+  val startedAtEpochMs: Long = System.currentTimeMillis(),
+  val endedAtEpochMs: Long? = null,
 )
 
 /** Haversine distance in meters. */

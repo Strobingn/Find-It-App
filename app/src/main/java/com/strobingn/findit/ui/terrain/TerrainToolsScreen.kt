@@ -84,17 +84,27 @@ fun TerrainToolsScreen(
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       Text(
-        "Sky View Factor, Openness, multi-style hillshade, and auto ground-disturbance " +
-          "highlight pits/mounds better than plain basemap shading. Runs fully offline on a local DEM.",
+        "Priority #2 & #8 — Sky View Factor, Openness, multi-style hillshade, and auto " +
+          "ground-disturbance highlight pits/mounds better than plain basemap shading. " +
+          "Fully offline on a local DEM (demo DEM until LiDAR import).",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         TerrainMode.entries.forEach { m ->
           FilterChip(
             selected = mode == m,
             onClick = { mode = m },
-            label = { Text(m.name.lowercase().replaceFirstChar { it.titlecase() }) },
+            label = {
+              Text(
+                when (m) {
+                  TerrainMode.HILLSHADE -> "Hillshade"
+                  TerrainMode.SVF -> "SVF"
+                  TerrainMode.OPENNESS -> "Openness"
+                  TerrainMode.DISTURBANCE -> "Disturb"
+                },
+              )
+            },
           )
         }
       }

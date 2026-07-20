@@ -133,6 +133,33 @@ class HuntRepository(context: Context) {
       persistTeam()
     }
 
+  /** Update live "You" marker from GPS (creates the member if missing). */
+  suspend fun updateSelfLocation(point: GeoPoint) =
+    mutex.withLock {
+      val existing = _team.value.find { it.name.equals("You", ignoreCase = true) }
+      val updated =
+        existing?.copy(location = point)
+          ?: TeamMember(name = "You", location = point)
+      _team.update { list ->
+        list.filterNot { it.name.equals("You", ignoreCase = true) } + updated
+      }
+      persistTeam()
+    }
+
+  suspend fun startHuntSession(name: String) {
+    val session =
+      com.strobingn.findit.data.model.HuntSession(
+        name = name.ifBlank { "Hunt ${java.text.SimpleDateFormat("MMM d HH:mm", java.util.Locale.US).format(java.util.Date())}" },
+      )
+    updateSettings {
+      it.copy(activeHuntSessionId = session.id, activeHuntSessionName = session.name)
+    }
+  }
+
+  suspend fun endHuntSession() {
+    updateSettings { it.copy(activeHuntSessionId = null, activeHuntSessionName = null) }
+  }
+
   suspend fun setOverlayEnabled(id: String, enabled: Boolean) {
     _overlays.update { layers -> layers.map { if (it.id == id) it.copy(enabled = enabled) else it } }
   }

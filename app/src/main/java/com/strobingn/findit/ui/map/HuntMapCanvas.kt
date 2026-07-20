@@ -17,12 +17,13 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.sp
 import com.strobingn.findit.data.model.FindRecord
+import com.strobingn.findit.data.model.GeoPoint
 import com.strobingn.findit.data.model.SearchGrid
 import com.strobingn.findit.data.model.TeamMember
 
 /**
  * Offline hunt map: projects lat/lng into a local canvas (no Maps key required).
- * Grids, finds, and team members all render for field use.
+ * Grids, finds, team, and live GPS all render for field use.
  */
 @Composable
 fun HuntMapCanvas(
@@ -31,6 +32,9 @@ fun HuntMapCanvas(
   team: List<TeamMember>,
   showTeam: Boolean,
   modifier: Modifier = Modifier,
+  myLocation: GeoPoint? = null,
+  followMe: Boolean = false,
+  accuracyM: Float? = null,
 ) {
   val measurer = rememberTextMeasurer()
   val surface = MaterialTheme.colorScheme.surfaceVariant
@@ -41,14 +45,13 @@ fun HuntMapCanvas(
 
   Box(modifier.background(surface)) {
     Canvas(Modifier.fillMaxSize()) {
-      val bounds = boundsOf(finds, grids, team)
+      val bounds = boundsOf(finds, grids, team, myLocation, followMe)
       fun project(lat: Double, lng: Double): Offset {
         val x = ((lng - bounds.minLng) / bounds.lngSpan).toFloat() * size.width
         val y = (1f - ((lat - bounds.minLat) / bounds.latSpan).toFloat()) * size.height
         return Offset(x, y)
       }
 
-      // grid cells
       grids.forEach { g ->
         val sw = project(g.sw.lat, g.sw.lng)
         val ne = project(g.ne.lat, g.ne.lng)
@@ -84,7 +87,6 @@ fun HuntMapCanvas(
               }
             }
           }
-          // light grid lines
           for (c in 1 until cols) {
             val x = left + c * cellW
             drawLine(primary.copy(alpha = 0.25f), Offset(x, top), Offset(x, top + h), strokeWidth = 1f)
@@ -96,7 +98,6 @@ fun HuntMapCanvas(
         }
       }
 
-      // finds
       finds.forEach { f ->
         val p = project(f.location.lat, f.location.lng)
         drawCircle(color = tertiary, radius = 14f, center = p)
@@ -109,7 +110,6 @@ fun HuntMapCanvas(
         drawText(label, topLeft = Offset(p.x + 16f, p.y - 8f))
       }
 
-      // team
       if (showTeam) {
         team.forEach { m ->
           val p = project(m.location.lat, m.location.lng)
@@ -127,7 +127,6 @@ fun HuntMapCanvas(
             )
           drawText(label, topLeft = Offset(p.x + 14f, p.y + 10f))
         }
-        // visibility links
         for (i in team.indices) {
           for (j in i + 1 until team.size) {
             val a = project(team[i].location.lat, team[i].location.lng)
@@ -135,6 +134,25 @@ fun HuntMapCanvas(
             drawLine(primary.copy(alpha = 0.4f), a, b, strokeWidth = 2f)
           }
         }
+      }
+
+      // Live GPS (blue pulse) — distinct from team "You" if both present
+      myLocation?.let { me ->
+        val p = project(me.lat, me.lng)
+        val accRadius =
+          accuracyM?.let { acc ->
+            // rough: ~1m ≈ fraction of span; keep visual ring modest
+            (acc / (bounds.latSpan * 111_000.0).toFloat() * size.height).coerceIn(18f, 80f)
+          } ?: 36f
+        drawCircle(color = Color(0x334CAF50), radius = accRadius, center = p)
+        drawCircle(color = Color(0xFF2196F3), radius = 12f, center = p)
+        drawCircle(color = Color.White, radius = 12f, center = p, style = Stroke(3f))
+        val label =
+          measurer.measure(
+            text = "GPS",
+            style = TextStyle(color = onSurface, fontSize = 11.sp),
+          )
+        drawText(label, topLeft = Offset(p.x + 14f, p.y - 18f))
       }
     }
   }
@@ -154,7 +172,19 @@ private fun boundsOf(
   finds: List<FindRecord>,
   grids: List<SearchGrid>,
   team: List<TeamMember>,
+  myLocation: GeoPoint?,
+  followMe: Boolean,
 ): Bounds {
+  if (followMe && myLocation != null) {
+    // ~150 m box around GPS for field orientation
+    val d = 0.0014
+    return Bounds(
+      minLat = myLocation.lat - d,
+      maxLat = myLocation.lat + d,
+      minLng = myLocation.lng - d,
+      maxLng = myLocation.lng + d,
+    )
+  }
   val lats = mutableListOf<Double>()
   val lngs = mutableListOf<Double>()
   finds.forEach {
@@ -170,6 +200,10 @@ private fun boundsOf(
   team.forEach {
     lats += it.location.lat
     lngs += it.location.lng
+  }
+  myLocation?.let {
+    lats += it.lat
+    lngs += it.lng
   }
   if (lats.isEmpty()) {
     return Bounds(39.827, 39.830, -98.581, -98.578)

@@ -47,8 +47,9 @@ fun HistoricalMapsScreen(
   ) { padding ->
     Column(Modifier.padding(padding).fillMaxSize()) {
       Text(
-        "Toggle layers to plan digs over vanished houses, roads, and foundations. " +
-          "Tile downloads cache offline when a source URL is available.",
+        "Priority #1 — Toggle historical topo, Sanborn, and old imagery to spot vanished " +
+          "houses, roads, privies, and foundations. Enabled layers are remembered for the hunt map; " +
+          "tile download/caching lands next (offline DEM relief already works under Terrain).",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(16.dp),
