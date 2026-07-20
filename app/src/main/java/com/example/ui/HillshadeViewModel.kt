@@ -297,14 +297,23 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _sweepX.value = cx
         _sweepY.value = cy
         _isSweeping.value = true
-        
-        val coords = com.example.geospatial.GeoSpatialLibrary.gridToGeographic(cx, cy, _activeGeoMetadata.value)
-        _currentLat.value = coords.first
-        _currentLon.value = coords.second
+        try {
+            val coords =
+                com.example.geospatial.GeoSpatialLibrary.gridToGeographic(
+                    cx,
+                    cy,
+                    _activeGeoMetadata.value,
+                )
+            _currentLat.value = coords.first
+            _currentLon.value = coords.second
+        } catch (_: Exception) {
+            // Keep last known lat/lon — never crash mid-drag
+        }
     }
 
     fun stopSweeping() {
         _isSweeping.value = false
+        // Leave last strength briefly visible; zero after short settle so dial doesn't glitch
         _detectorSignalStrength.value = 0f
         _detectedMetalType.value = null
     }
@@ -439,37 +448,28 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     type = matchedType
                 }
 
-                // Update flows
+                // Update flows (StateFlow is thread-safe)
                 _detectorSignalStrength.value = strength
                 _detectedMetalType.value = type
 
-                // 3. SOUND PING & HAPTIC LOOPS
+                // 3. SOUND PING & HAPTIC — must run on Main (ToneGenerator/Vibrator crash off-thread)
                 if (strength > 10f) {
-                    // Vibrational alert when metal signal is hot
-                    if (_vibrationEnabled.value) {
-                        triggerVibe((strength * 0.3f).toLong().coerceAtLeast(10))
-                    }
-
-                    // Audio Ping Tone generator beep frequency.
-                    // Stronger signal -> Higher pitch and faster pings!
-                    if (_audioPingEnabled.value) {
-                        val pitch = (500 + (strength * 12)).toInt() // 500Hz to 1700Hz
-                        val duration = (30 + (strength * 0.8f)).toInt() // 30ms to 110ms
-
-                        // Play audio beep
-                        try {
-                            toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, duration)
-                        } catch (e: Exception) {
-                            // safe fallback
+                    val vibeMs = (strength * 0.3f).toLong().coerceAtLeast(10)
+                    val duration = (30 + (strength * 0.8f)).toInt().coerceIn(20, 120)
+                    val doVibe = _vibrationEnabled.value
+                    val doAudio = _audioPingEnabled.value
+                    withContext(Dispatchers.Main.immediate) {
+                        if (doVibe) triggerVibe(vibeMs)
+                        if (doAudio) {
+                            try {
+                                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, duration)
+                            } catch (_: Exception) {
+                            }
                         }
                     }
-
-                    // Speed of beeps increases as we get closer to the center of metal!
-                    // Delay is short (high frequency) when strength is high, long when weak.
                     val sweepDelay = (350 - (strength * 2.8f)).toLong().coerceIn(40, 400)
                     delay(sweepDelay)
                 } else {
-                    // Idle ambient low hum / static rate of delay
                     delay(200)
                 }
             }
@@ -477,11 +477,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun triggerVibe(ms: Long) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(ms)
+        try {
+            val duration = ms.coerceIn(1L, 200L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(
+                    VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(duration)
+            }
+        } catch (_: Exception) {
+            // Device may refuse vibration mid-gesture
         }
     }
 
