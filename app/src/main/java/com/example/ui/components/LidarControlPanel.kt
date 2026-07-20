@@ -223,7 +223,8 @@ fun LidarControlPanel(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            val visualizerStyles = listOf("Standard NW", "Multi-Vector", "Slope Profiler")
+            val visualizerStyles =
+                listOf("Standard", "Multi-Vec", "Slope", "Foundations")
             visualizerStyles.forEachIndexed { index, name ->
                 val isSelected = visualizationMode == index
                 Box(
@@ -243,7 +244,7 @@ fun LidarControlPanel(
                     Text(
                         text = name,
                         color = if (isSelected) Color.White else Color.Gray,
-                        fontSize = 11.sp,
+                        fontSize = 9.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                     )
                 }

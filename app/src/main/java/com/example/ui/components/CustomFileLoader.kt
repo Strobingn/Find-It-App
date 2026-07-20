@@ -88,15 +88,29 @@ fun CustomFileLoader(
         uri?.let {
             try {
                 val fileName = getFileName(context, it)
+                if (fileName.lowercase().endsWith(".laz")) {
+                    errorMessage =
+                        "LAZ (compressed) not supported yet. Convert to .las (e.g. laszip) and re-upload."
+                    successMessage = null
+                    return@let
+                }
                 val inputStream = context.contentResolver.openInputStream(it)
                 if (inputStream != null) {
-                    val grid = DemGenerator.parseFromStream(fileName, inputStream)
-                    if (grid != null) {
-                        onCustomGridLoaded(grid)
-                        successMessage = "File '$fileName' loaded successfully! ${grid.width}x${grid.height} grid processed."
+                    // Ground-classified points only for LAS (ASPRS class 2 / 8)
+                    val result =
+                        DemGenerator.parseFromStreamDetailed(
+                            fileName,
+                            inputStream,
+                            groundOnly = true,
+                        )
+                    if (result != null) {
+                        onCustomGridLoaded(result.grid)
+                        successMessage =
+                            "✓ $fileName → ${result.grid.width}×${result.grid.height}\n${result.summary}"
                         errorMessage = null
                     } else {
-                        errorMessage = "Failed to parse '$fileName'. Verify it's a valid LAS, ASC, XYZ, or direct elevation grid text file."
+                        errorMessage =
+                            "Failed to parse '$fileName'. Use classified .las (ground class 2), .asc, .xyz, or elevation CSV."
                         successMessage = null
                     }
                 } else {
@@ -166,7 +180,7 @@ fun CustomFileLoader(
 
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Load custom LiDAR layers by pasting a space/comma-separated grid matrix of elevations (X x Y ground points). The hillshading engine will automatically process it.",
+            text = "Upload classified .las — app keeps ASPRS ground (class 2) + key-point (8) only, builds bare-earth DEM, then hillshades for pre-1900 foundations (cellars, walls). Also: .asc DEM, .xyz, CSV grid. Not .laz.",
             color = Color.Gray,
             fontSize = 11.sp,
             lineHeight = 15.sp
@@ -191,7 +205,11 @@ fun CustomFileLoader(
         ) {
             Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(8.dp))
-            Text(text = "UPLOAD LIDAR OR DEM FILE (.las, .asc, .xyz, .csv, .txt)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(
+                text = "UPLOAD .LAS (GROUND ONLY) / .ASC / .XYZ / CSV",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
 
         Spacer(modifier = Modifier.height(12.dp))

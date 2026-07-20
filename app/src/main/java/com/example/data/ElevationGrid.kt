@@ -52,7 +52,7 @@ class ElevationGrid(
         vegetationFilter: Float,
         palette: Int,
         contrast: Float = 1.5f,
-        visualizationMode: Int = 0, // 0 = Standard, 1 = Multi-Directional Relief, 2 = Slope Map
+        visualizationMode: Int = 0, // 0 = Standard, 1 = Multi-Directional, 2 = Slope, 3 = Foundation local-relief
         overlayType: Int = 0, // 0 = None, 1 = 1880s Homestead Plat, 2 = 1940s Contour Lines
         overlayOpacity: Float = 0.5f
     ): Bitmap {
@@ -72,10 +72,17 @@ class ElevationGrid(
         val cellDistance = 1.0f
 
         // Precompute elevations with vegetation filter applied to speed up loops
-        val filteredElevations = FloatArray(width * height)
+        // For foundation mode, force bare earth (veg off) then high-pass residual.
+        val baseElevations = FloatArray(width * height)
         for (i in 0 until width * height) {
-            filteredElevations[i] = bareEarth[i] + canopySpikes[i] * (1.0f - vegetationFilter)
+            baseElevations[i] = bareEarth[i] + canopySpikes[i] * (1.0f - vegetationFilter)
         }
+        val filteredElevations =
+            if (visualizationMode == 3) {
+                localReliefResidual(baseElevations, width, height, window = 7)
+            } else {
+                baseElevations
+            }
 
         // Find min and max elevations for hypsometric tinting
         var minElev = Float.MAX_VALUE
@@ -128,6 +135,23 @@ class ElevationGrid(
                     val gSlope = (70 * slopePct + Color.green(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
                     val bSlope = (0 * slopePct + Color.blue(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
                     finalColor = Color.rgb(rSlope, gSlope, bSlope)
+                } else if (visualizationMode == 3) {
+                    // STYLE 3: Foundation local-relief — residual DEM hillshade (cellars/walls pop)
+                    // elevPct is already residual 0..1; use low sun multi-light
+                    val h1 = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad1 - aspect)
+                    val h2 = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad2 - aspect)
+                    var hillshade = ((h1.coerceIn(0f, 1f) * 0.65f + h2.coerceIn(0f, 1f) * 0.35f))
+                    hillshade = ((hillshade - 0.5f) * (contrast * 1.35f) + 0.5f).coerceIn(0f, 1f)
+                    // Emphasize depressions (cellars) in cool blue, mounds (chimney/wall) warm
+                    val residual = elevPct // 0 low 1 high after residual normalize
+                    val r0 = (40 + residual * 180).toInt()
+                    val g0 = (35 + residual * 120).toInt()
+                    val b0 = (55 + (1f - residual) * 100).toInt()
+                    finalColor = Color.rgb(
+                        (r0 * hillshade).toInt().coerceIn(0, 255),
+                        (g0 * hillshade).toInt().coerceIn(0, 255),
+                        (b0 * hillshade).toInt().coerceIn(0, 255),
+                    )
                 } else {
                     // STYLE 0 & 1: Hillshading calculations
                     var hillshade = if (visualizationMode == 1) {
@@ -227,6 +251,49 @@ class ElevationGrid(
         val cx = x.coerceIn(0, width - 1)
         val cy = y.coerceIn(0, height - 1)
         return cy * width + cx
+    }
+
+    /**
+     * High-pass residual vs local mean — makes 1800s cellar holes / foundation walls
+     * readable under modern plow / gentle slope.
+     * Output normalized roughly 0..1 for palette use.
+     */
+    private fun localReliefResidual(
+        elev: FloatArray,
+        w: Int,
+        h: Int,
+        window: Int,
+    ): FloatArray {
+        val half = window / 2
+        val residual = FloatArray(elev.size)
+        var maxAbs = 1e-4f
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var sum = 0.0
+                var n = 0
+                for (yy in (y - half).coerceAtLeast(0)..(y + half).coerceAtMost(h - 1)) {
+                    for (xx in (x - half).coerceAtLeast(0)..(x + half).coerceAtMost(w - 1)) {
+                        sum += elev[yy * w + xx]
+                        n++
+                    }
+                }
+                val mean = (sum / n).toFloat()
+                val r = elev[y * w + x] - mean
+                residual[y * w + x] = r
+                val a = kotlin.math.abs(r)
+                if (a > maxAbs) maxAbs = a
+            }
+        }
+        for (i in residual.indices) {
+            residual[i] = ((residual[i] / maxAbs) * 0.5f + 0.5f).coerceIn(0f, 1f)
+        }
+        // Scale residual map into a fake elevation range so slope calc still works
+        // Map 0..1 → meters-ish spread for Horn gradient
+        val out = FloatArray(residual.size)
+        for (i in residual.indices) {
+            out[i] = residual[i] * 10f
+        }
+        return out
     }
 
     /**

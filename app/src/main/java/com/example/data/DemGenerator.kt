@@ -264,155 +264,269 @@ object DemGenerator {
         return Double.fromBits(bits)
     }
 
-    fun parseLasStream(inputStream: java.io.InputStream): ElevationGrid? {
-        try {
-            // Read entire stream into memory - no mark/reset ever needed
+    /**
+     * Parse LAS with ASPRS ground classification.
+     *
+     * @param groundOnly keep class 2 (Ground) and 8 (Model Key-Point) only.
+     *        Falls back to min-Z binning if the file has almost no ground classes
+     *        (unclassified vendor clouds).
+     */
+    fun parseLasStream(
+        inputStream: java.io.InputStream,
+        groundOnly: Boolean = true,
+    ): ElevationGrid? {
+        return try {
             val bytes = inputStream.readBytes()
+            parseLasBytes(bytes, groundOnly)?.grid
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Full LAS load result with stats for the UI (ground counts, method used).
+     */
+    data class LasLoadResult(
+        val grid: ElevationGrid,
+        val totalPointsRead: Int,
+        val groundPointsUsed: Int,
+        val usedClassificationFilter: Boolean,
+        val pointFormat: Int,
+        val note: String,
+    )
+
+    fun parseLasBytes(bytes: ByteArray, groundOnly: Boolean = true): LasLoadResult? {
+        try {
             if (bytes.size < 227) return null
 
-            // Check signature "LASF"
-            if (bytes[0].toChar() != 'L' || bytes[1].toChar() != 'A' || bytes[2].toChar() != 'S' || bytes[3].toChar() != 'F') {
+            // Signature "LASF"
+            if (bytes[0] != 'L'.code.toByte() || bytes[1] != 'A'.code.toByte() ||
+                bytes[2] != 'S'.code.toByte() || bytes[3] != 'F'.code.toByte()
+            ) {
                 return null
             }
 
+            val versionMajor = bytes[24].toInt() and 0xFF
+            val versionMinor = bytes[25].toInt() and 0xFF
             val offsetToPoints = readIntLE(bytes, 96)
             val pointFormat = bytes[104].toInt() and 0xFF
             val pointRecordLength = readShortLE(bytes, 105).toInt() and 0xFFFF
-            val legacyNumPoints = readIntLE(bytes, 107)
+            val legacyNumPoints = readIntLE(bytes, 107).toLong() and 0xFFFFFFFFL
+
+            // LAS 1.4+ may store extended point count at offset 247
+            var numPoints = legacyNumPoints
+            if (versionMajor == 1 && versionMinor >= 4 && bytes.size >= 255) {
+                val ext = readLongLE(bytes, 247)
+                if (ext > 0) numPoints = ext
+            }
+            if (numPoints <= 0) {
+                // Estimate from file size
+                val body = (bytes.size - offsetToPoints).coerceAtLeast(0)
+                numPoints = if (pointRecordLength > 0) (body / pointRecordLength).toLong() else 0L
+            }
 
             val scaleX = readDoubleLE(bytes, 131)
             val scaleY = readDoubleLE(bytes, 139)
             val scaleZ = readDoubleLE(bytes, 147)
-
             val offsetX = readDoubleLE(bytes, 155)
             val offsetY = readDoubleLE(bytes, 163)
             val offsetZ = readDoubleLE(bytes, 171)
-
             val maxX = readDoubleLE(bytes, 179)
             val minX = readDoubleLE(bytes, 187)
             val maxY = readDoubleLE(bytes, 195)
             val minY = readDoubleLE(bytes, 203)
-            val maxZ = readDoubleLE(bytes, 211)
-            val minZ = readDoubleLE(bytes, 219)
 
             if (offsetToPoints < 0 || offsetToPoints >= bytes.size) return null
+            if (pointRecordLength < 20) return null
 
-            // Bins for 100x100 grid
-            val gridW = 100
-            val gridH = 100
-            val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
-            val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
-            val countGrid = IntArray(gridW * gridH)
+            // Classification byte offset depends on point data record format
+            // Formats 0–5: classification at offset 15 (lower 5 bits = class)
+            // Formats 6–10: classification at offset 16 (full byte)
+            val classOffset = if (pointFormat >= 6) 16 else 15
+            val classMask = if (pointFormat >= 6) 0xFF else 0x1F
 
-            val pointsToProcess = Math.min(if (legacyNumPoints <= 0) 100000 else legacyNumPoints, 250000)
+            val gridW = 128
+            val gridH = 128
+            val groundMin = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+            val groundCnt = IntArray(gridW * gridH)
+            val allMin = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+            val allMax = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
+            val allCnt = IntArray(gridW * gridH)
 
-            // Bounding box range
             val rangeX = if (maxX - minX > 0) maxX - minX else 1.0
             val rangeY = if (maxY - minY > 0) maxY - minY else 1.0
 
+            // Cap for mobile memory/CPU (still plenty for a 128² DEM)
+            val maxProcess = minOf(numPoints, 2_000_000L).toInt()
             var pos = offsetToPoints
-            for (i in 0 until pointsToProcess) {
-                if (pos + pointRecordLength > bytes.size) break
+            var read = 0
+            var groundUsed = 0
+            val classHistogram = IntArray(32)
 
-                // X, Y, Z are the first three 4-byte integers in the point record
+            while (read < maxProcess && pos + pointRecordLength <= bytes.size) {
                 val rawX = readIntLE(bytes, pos)
                 val rawY = readIntLE(bytes, pos + 4)
                 val rawZ = readIntLE(bytes, pos + 8)
-
                 val realX = rawX * scaleX + offsetX
                 val realY = rawY * scaleY + offsetY
                 val realZ = (rawZ * scaleZ + offsetZ).toFloat()
 
-                val gx = (((realX - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
-                // LAS coords have Y pointing North, so we invert Y for standard image row coords
-                val gy = ((1.0 - (realY - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
+                val classification =
+                    if (pos + classOffset < bytes.size) {
+                        bytes[pos + classOffset].toInt() and classMask
+                    } else {
+                        0
+                    }
+                if (classification in 0..31) classHistogram[classification]++
 
+                val gx = (((realX - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
+                val gy = ((1.0 - (realY - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
                 val idx = gy * gridW + gx
-                if (realZ < minGrid[idx]) minGrid[idx] = realZ
-                if (realZ > maxGrid[idx]) maxGrid[idx] = realZ
-                countGrid[idx]++
+
+                // Always track all returns for fallback / canopy estimate
+                if (realZ < allMin[idx]) allMin[idx] = realZ
+                if (realZ > allMax[idx]) allMax[idx] = realZ
+                allCnt[idx]++
+
+                // ASPRS: 2 = Ground, 8 = Model Key-Point (often bare earth)
+                // Skip noise (7), water (9), reserved, high veg, buildings for ground DEM
+                val isGround = classification == 2 || classification == 8
+                if (isGround) {
+                    if (realZ < groundMin[idx]) groundMin[idx] = realZ
+                    groundCnt[idx]++
+                    groundUsed++
+                }
 
                 pos += pointRecordLength
+                read++
             }
 
-            // Interpolate missing cells to make a continuous terrain
+            val groundCells = groundCnt.count { it > 0 }
+            val allCells = allCnt.count { it > 0 }
+            // Use classification filter if we got a usable ground surface
+            val useClassFilter =
+                groundOnly && groundUsed >= 500 && groundCells >= (allCells * 0.15).toInt().coerceAtLeast(20)
+
             val bareEarth = FloatArray(gridW * gridH)
             val canopySpikes = FloatArray(gridW * gridH)
+            val sourceMin = if (useClassFilter) groundMin else allMin
+            val sourceCnt = if (useClassFilter) groundCnt else allCnt
 
             for (y in 0 until gridH) {
                 for (x in 0 until gridW) {
                     val idx = y * gridW + x
-                    if (countGrid[idx] > 0) {
-                        bareEarth[idx] = minGrid[idx]
-                        canopySpikes[idx] = (maxGrid[idx] - minGrid[idx]).coerceAtLeast(0f)
+                    if (sourceCnt[idx] > 0) {
+                        bareEarth[idx] = sourceMin[idx]
+                        // Canopy residual only meaningful when we have all-return max
+                        canopySpikes[idx] =
+                            if (allCnt[idx] > 0) {
+                                (allMax[idx] - sourceMin[idx]).coerceAtLeast(0f)
+                            } else {
+                                0f
+                            }
                     } else {
-                        // Find nearest non-empty cell to interpolate
-                        var nearestVal = 0f
-                        var nearestCanopy = 0f
-                        var found = false
-                        // Spiral search or radial search up to 10 cells
-                        for (r in 1..10) {
-                            for (dy in -r..r) {
-                                for (dx in -r..r) {
-                                    if (Math.abs(dx) != r && Math.abs(dy) != r) continue
-                                    val nx = x + dx
-                                    val ny = y + dy
-                                    if (nx in 0 until gridW && ny in 0 until gridH) {
-                                        val nidx = ny * gridW + nx
-                                        if (countGrid[nidx] > 0) {
-                                            nearestVal = minGrid[nidx]
-                                            nearestCanopy = (maxGrid[nidx] - minGrid[nidx]).coerceAtLeast(0f)
-                                            found = true
-                                            break
-                                        }
-                                    }
-                                }
-                                if (found) break
-                            }
-                            if (found) break
-                        }
-                        if (found) {
-                            bareEarth[idx] = nearestVal
-                            canopySpikes[idx] = nearestCanopy
-                        } else {
-                            // Fallback
-                            bareEarth[idx] = 10f
-                            canopySpikes[idx] = 0f
-                        }
+                        bareEarth[idx] = Float.NaN
+                        canopySpikes[idx] = 0f
                     }
                 }
             }
 
-            // Apply smooth pass over bareEarth and canopy to reduce binning/sampling noise
-            val smoothBare = FloatArray(gridW * gridH)
-            val smoothCanopy = FloatArray(gridW * gridH)
-            for (y in 0 until gridH) {
-                for (x in 0 until gridW) {
-                    var sumB = 0f
-                    var sumC = 0f
-                    var count = 0
-                    for (dy in -1..1) {
-                        for (dx in -1..1) {
-                            val nx = x + dx
-                            val ny = y + dy
-                            if (nx in 0 until gridW && ny in 0 until gridH) {
-                                val nidx = ny * gridW + nx
-                                sumB += bareEarth[nidx]
-                                sumC += canopySpikes[nidx]
-                                count++
-                            }
-                        }
-                    }
-                    smoothBare[y * gridW + x] = sumB / count
-                    smoothCanopy[y * gridW + x] = sumC / count
+            fillNaNNearest(bareEarth, gridW, gridH)
+            // Light smooth preserves cellar walls better than heavy blur
+            val smoothBare = boxSmooth(bareEarth, gridW, gridH, radius = 1)
+            val smoothCanopy =
+                if (useClassFilter) {
+                    // Ground-only DEM: no canopy layer
+                    FloatArray(gridW * gridH)
+                } else {
+                    boxSmooth(canopySpikes, gridW, gridH, radius = 1)
                 }
-            }
 
-            return ElevationGrid(gridW, gridH, smoothBare, smoothCanopy)
+            val note =
+                if (useClassFilter) {
+                    "Ground-class only (ASPRS 2/8): $groundUsed / $read pts · LAS $versionMajor.$versionMinor fmt $pointFormat"
+                } else if (groundOnly && groundUsed < 500) {
+                    "Few class-2 ground pts ($groundUsed) — used min-Z bare-earth fallback on $read pts"
+                } else {
+                    "Min-Z bare-earth (all returns) · $read pts"
+                }
+
+            return LasLoadResult(
+                grid = ElevationGrid(gridW, gridH, smoothBare, smoothCanopy),
+                totalPointsRead = read,
+                groundPointsUsed = if (useClassFilter) groundUsed else read,
+                usedClassificationFilter = useClassFilter,
+                pointFormat = pointFormat,
+                note = note,
+            )
         } catch (e: Exception) {
             e.printStackTrace()
             return null
         }
+    }
+
+    private fun readLongLE(bytes: ByteArray, offset: Int): Long {
+        var v = 0L
+        for (i in 0..7) {
+            v = v or ((bytes[offset + i].toLong() and 0xFF) shl (8 * i))
+        }
+        return v
+    }
+
+    private fun fillNaNNearest(grid: FloatArray, w: Int, h: Int) {
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val idx = y * w + x
+                if (!grid[idx].isNaN()) continue
+                var found = false
+                var nearest = 0f
+                for (r in 1..16) {
+                    for (dy in -r..r) {
+                        for (dx in -r..r) {
+                            if (kotlin.math.abs(dx) != r && kotlin.math.abs(dy) != r) continue
+                            val nx = x + dx
+                            val ny = y + dy
+                            if (nx !in 0 until w || ny !in 0 until h) continue
+                            val v = grid[ny * w + nx]
+                            if (!v.isNaN()) {
+                                nearest = v
+                                found = true
+                                break
+                            }
+                        }
+                        if (found) break
+                    }
+                    if (found) break
+                }
+                grid[idx] = if (found) nearest else 0f
+            }
+        }
+    }
+
+    private fun boxSmooth(src: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+        val out = FloatArray(src.size)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var sum = 0f
+                var n = 0
+                for (dy in -radius..radius) {
+                    for (dx in -radius..radius) {
+                        val nx = x + dx
+                        val ny = y + dy
+                        if (nx in 0 until w && ny in 0 until h) {
+                            val v = src[ny * w + nx]
+                            if (!v.isNaN()) {
+                                sum += v
+                                n++
+                            }
+                        }
+                    }
+                }
+                out[y * w + x] = if (n > 0) sum / n else 0f
+            }
+        }
+        return out
     }
 
     fun parseAscDem(reader: java.io.BufferedReader): ElevationGrid? {
@@ -591,44 +705,90 @@ object DemGenerator {
     }
 
     /**
-     * Master entry point. Reads the ENTIRE stream into memory first.
-     * This completely eliminates every possible "Resetting to invalid mark" crash.
+     * Load result for any supported terrain source (LAS/ASC/XYZ/CSV).
      */
-    fun parseFromStream(fileName: String, inputStream: java.io.InputStream): ElevationGrid? {
+    data class TerrainLoadResult(
+        val grid: ElevationGrid,
+        val summary: String,
+        val isBareEarth: Boolean,
+    )
+
+    /**
+     * Master entry point. Reads the ENTIRE stream into memory first.
+     * LAS defaults to ground-classified points only (ASPRS class 2 / 8).
+     */
+    fun parseFromStream(
+        fileName: String,
+        inputStream: java.io.InputStream,
+        groundOnly: Boolean = true,
+    ): ElevationGrid? = parseFromStreamDetailed(fileName, inputStream, groundOnly)?.grid
+
+    fun parseFromStreamDetailed(
+        fileName: String,
+        inputStream: java.io.InputStream,
+        groundOnly: Boolean = true,
+    ): TerrainLoadResult? {
         return try {
-            // OPTION A: full in-memory read. Zero mark/reset risk.
             val bytes = inputStream.readBytes()
             if (bytes.isEmpty()) return null
 
             val lowerName = fileName.lowercase()
 
+            if (lowerName.endsWith(".laz")) {
+                return null // compressed LAZ needs a native decoder — use .las
+            }
+
             if (lowerName.endsWith(".las")) {
-                // Re-use the now-memory-safe LAS parser
-                parseLasStream(java.io.ByteArrayInputStream(bytes))
-            } else {
-                val text = String(bytes, Charsets.UTF_8)
-                val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                if (lines.isEmpty()) return null
+                val las = parseLasBytes(bytes, groundOnly = groundOnly) ?: return null
+                return TerrainLoadResult(
+                    grid = las.grid,
+                    summary = las.note,
+                    isBareEarth = las.usedClassificationFilter || groundOnly,
+                )
+            }
 
-                val firstLine = lines[0].lowercase()
+            // Also detect LAS by signature even if extension wrong
+            if (bytes.size > 4 &&
+                bytes[0] == 'L'.code.toByte() && bytes[1] == 'A'.code.toByte() &&
+                bytes[2] == 'S'.code.toByte() && bytes[3] == 'F'.code.toByte()
+            ) {
+                val las = parseLasBytes(bytes, groundOnly = groundOnly) ?: return null
+                return TerrainLoadResult(
+                    grid = las.grid,
+                    summary = las.note,
+                    isBareEarth = las.usedClassificationFilter || groundOnly,
+                )
+            }
 
+            val text = String(bytes, Charsets.UTF_8)
+            val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (lines.isEmpty()) return null
+
+            val firstLine = lines[0].lowercase()
+
+            val grid =
                 if (firstLine.startsWith("ncols ") || firstLine.startsWith("ncols\t")) {
-                    // ASC / DEM grid
                     parseAscDem(java.io.BufferedReader(java.io.StringReader(text)))
                 } else {
-                    // Decide between XYZ point cloud vs pure elevation matrix
                     val tokens1 = lines[0].split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
-                    val tokens2 = if (lines.size > 1) lines[1].split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() } else emptyList()
-
+                    val tokens2 =
+                        if (lines.size > 1) {
+                            lines[1].split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
+                        } else {
+                            emptyList()
+                        }
                     if (tokens1.size == 3 && tokens2.size == 3) {
-                        // XYZ point cloud
                         parseXyzStream(java.io.BufferedReader(java.io.StringReader(text)))
                     } else {
-                        // Raw elevation matrix (space / comma separated)
                         parseCustomGrid(text)
                     }
-                }
-            }
+                } ?: return null
+
+            TerrainLoadResult(
+                grid = grid,
+                summary = "Loaded $fileName → ${grid.width}×${grid.height} DEM (already bare-earth / grid)",
+                isBareEarth = true,
+            )
         } catch (e: Exception) {
             e.printStackTrace()
             null

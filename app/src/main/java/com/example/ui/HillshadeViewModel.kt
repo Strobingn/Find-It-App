@@ -227,9 +227,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun setCustomGrid(grid: ElevationGrid) {
+    fun setCustomGrid(grid: ElevationGrid, fromGroundClassifiedLas: Boolean = true) {
         _elevationGrid.value = grid
         _currentSiteIndex.value = 3 // custom
+        // Bare-earth / foundation hunting defaults after LiDAR load
+        if (fromGroundClassifiedLas) {
+            _vegetationFilter.value = 1.0f // full bare earth
+            _visualizationMode.value = 3 // Foundation local-relief
+            _contrast.value = 1.85f
+            _paletteType.value = 0 // clay greyscale — classic archaeology hillshade
+            _sunAltitude.value = 28f // low sun exaggerates cellar walls
+            _sunAzimuth.value = 315f
+        }
         triggerRender()
     }
 
