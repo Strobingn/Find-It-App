@@ -239,4 +239,398 @@ object DemGenerator {
             return null
         }
     }
+
+    private fun readIntLE(bytes: ByteArray, offset: Int): Int {
+        return (bytes[offset].toInt() and 0xFF) or
+               ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+               ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+               ((bytes[offset + 3].toInt() and 0xFF) shl 24)
+    }
+
+    private fun readShortLE(bytes: ByteArray, offset: Int): Short {
+        return ((bytes[offset].toInt() and 0xFF) or
+                ((bytes[offset + 1].toInt() and 0xFF) shl 8)).toShort()
+    }
+
+    private fun readDoubleLE(bytes: ByteArray, offset: Int): Double {
+        val bits = (bytes[offset].toLong() and 0xFF) or
+                   ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
+                   ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
+                   ((bytes[offset + 3].toLong() and 0xFF) shl 24) or
+                   ((bytes[offset + 4].toLong() and 0xFF) shl 32) or
+                   ((bytes[offset + 5].toLong() and 0xFF) shl 40) or
+                   ((bytes[offset + 6].toLong() and 0xFF) shl 48) or
+                   ((bytes[offset + 7].toLong() and 0xFF) shl 56)
+        return Double.fromBits(bits)
+    }
+
+    fun parseLasStream(inputStream: java.io.InputStream): ElevationGrid? {
+        try {
+            val bis = java.io.BufferedInputStream(inputStream)
+            val header = ByteArray(375)
+            bis.mark(375)
+            val readBytes = bis.read(header, 0, 375)
+            if (readBytes < 227) return null
+
+            // Check signature "LASF"
+            if (header[0].toChar() != 'L' || header[1].toChar() != 'A' || header[2].toChar() != 'S' || header[3].toChar() != 'F') {
+                return null
+            }
+
+            val offsetToPoints = readIntLE(header, 96)
+            val pointFormat = header[104].toInt() and 0xFF
+            val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
+            val legacyNumPoints = readIntLE(header, 107)
+
+            val scaleX = readDoubleLE(header, 131)
+            val scaleY = readDoubleLE(header, 139)
+            val scaleZ = readDoubleLE(header, 147)
+
+            val offsetX = readDoubleLE(header, 155)
+            val offsetY = readDoubleLE(header, 163)
+            val offsetZ = readDoubleLE(header, 171)
+
+            val maxX = readDoubleLE(header, 179)
+            val minX = readDoubleLE(header, 187)
+            val maxY = readDoubleLE(header, 195)
+            val minY = readDoubleLE(header, 203)
+            val maxZ = readDoubleLE(header, 211)
+            val minZ = readDoubleLE(header, 219)
+
+            // Reset and skip to point data
+            bis.reset()
+            var bytesToSkip = offsetToPoints.toLong()
+            while (bytesToSkip > 0) {
+                val skipped = bis.skip(bytesToSkip)
+                if (skipped <= 0) break
+                bytesToSkip -= skipped
+            }
+
+            // Bins for 100x100 grid
+            val gridW = 100
+            val gridH = 100
+            val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+            val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
+            val countGrid = IntArray(gridW * gridH)
+
+            val pointBuf = ByteArray(pointRecordLength)
+            val pointsToProcess = Math.min(if (legacyNumPoints <= 0) 100000 else legacyNumPoints, 250000)
+
+            // Bounding box range
+            val rangeX = if (maxX - minX > 0) maxX - minX else 1.0
+            val rangeY = if (maxY - minY > 0) maxY - minY else 1.0
+
+            for (i in 0 until pointsToProcess) {
+                var bytesRead = 0
+                while (bytesRead < pointRecordLength) {
+                    val r = bis.read(pointBuf, bytesRead, pointRecordLength - bytesRead)
+                    if (r <= 0) break
+                    bytesRead += r
+                }
+                if (bytesRead < pointRecordLength) break
+
+                // X, Y, Z are the first three 4-byte integers in the point record
+                val rawX = readIntLE(pointBuf, 0)
+                val rawY = readIntLE(pointBuf, 4)
+                val rawZ = readIntLE(pointBuf, 8)
+
+                val realX = rawX * scaleX + offsetX
+                val realY = rawY * scaleY + offsetY
+                val realZ = (rawZ * scaleZ + offsetZ).toFloat()
+
+                val gx = (((realX - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
+                // LAS coords have Y pointing North, so we invert Y for standard image row coords
+                val gy = ((1.0 - (realY - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
+
+                val idx = gy * gridW + gx
+                if (realZ < minGrid[idx]) minGrid[idx] = realZ
+                if (realZ > maxGrid[idx]) maxGrid[idx] = realZ
+                countGrid[idx]++
+            }
+
+            // Interpolate missing cells to make a continuous terrain
+            val bareEarth = FloatArray(gridW * gridH)
+            val canopySpikes = FloatArray(gridW * gridH)
+
+            for (y in 0 until gridH) {
+                for (x in 0 until gridW) {
+                    val idx = y * gridW + x
+                    if (countGrid[idx] > 0) {
+                        bareEarth[idx] = minGrid[idx]
+                        canopySpikes[idx] = (maxGrid[idx] - minGrid[idx]).coerceAtLeast(0f)
+                    } else {
+                        // Find nearest non-empty cell to interpolate
+                        var nearestVal = 0f
+                        var nearestCanopy = 0f
+                        var found = false
+                        // Spiral search or radial search up to 10 cells
+                        for (r in 1..10) {
+                            for (dy in -r..r) {
+                                for (dx in -r..r) {
+                                    if (Math.abs(dx) != r && Math.abs(dy) != r) continue
+                                    val nx = x + dx
+                                    val ny = y + dy
+                                    if (nx in 0 until gridW && ny in 0 until gridH) {
+                                        val nidx = ny * gridW + nx
+                                        if (countGrid[nidx] > 0) {
+                                            nearestVal = minGrid[nidx]
+                                            nearestCanopy = (maxGrid[nidx] - minGrid[nidx]).coerceAtLeast(0f)
+                                            found = true
+                                            break
+                                        }
+                                    }
+                                }
+                                if (found) break
+                            }
+                            if (found) break
+                        }
+                        if (found) {
+                            bareEarth[idx] = nearestVal
+                            canopySpikes[idx] = nearestCanopy
+                        } else {
+                            // Fallback
+                            bareEarth[idx] = 10f
+                            canopySpikes[idx] = 0f
+                        }
+                    }
+                }
+            }
+
+            // Apply smooth pass over bareEarth and canopy to reduce binning/sampling noise
+            val smoothBare = FloatArray(gridW * gridH)
+            val smoothCanopy = FloatArray(gridW * gridH)
+            for (y in 0 until gridH) {
+                for (x in 0 until gridW) {
+                    var sumB = 0f
+                    var sumC = 0f
+                    var count = 0
+                    for (dy in -1..1) {
+                        for (dx in -1..1) {
+                            val nx = x + dx
+                            val ny = y + dy
+                            if (nx in 0 until gridW && ny in 0 until gridH) {
+                                val nidx = ny * gridW + nx
+                                sumB += bareEarth[nidx]
+                                sumC += canopySpikes[nidx]
+                                count++
+                            }
+                        }
+                    }
+                    smoothBare[y * gridW + x] = sumB / count
+                    smoothCanopy[y * gridW + x] = sumC / count
+                }
+            }
+
+            return ElevationGrid(gridW, gridH, smoothBare, smoothCanopy)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    fun parseAscDem(reader: java.io.BufferedReader): ElevationGrid? {
+        try {
+            var ncols = 0
+            var nrows = 0
+            var nodata = -9999f
+            var headerLines = 0
+            
+            val headerMap = HashMap<String, String>()
+            
+            // Read header (usually 6 lines, sometimes 5 or more)
+            var line: String? = null
+            while (headerLines < 10) {
+                line = reader.readLine() ?: break
+                val parts = line.trim().split(Regex("\\s+"))
+                if (parts.size >= 2) {
+                    val key = parts[0].lowercase()
+                    val value = parts[1]
+                    if (key == "ncols" || key == "nrows" || key == "xllcorner" || key == "yllcorner" || key == "cellsize" || key == "nodata_value") {
+                        headerMap[key] = value
+                        headerLines++
+                    } else {
+                        // Start of data! Break out of header parsing.
+                        break
+                    }
+                } else {
+                    break
+                }
+            }
+            
+            ncols = headerMap["ncols"]?.toInt() ?: 0
+            nrows = headerMap["nrows"]?.toInt() ?: 0
+            nodata = headerMap["nodata_value"]?.toFloat() ?: -9999f
+            
+            if (ncols <= 0 || nrows <= 0) return null
+            
+            val tempGrid = FloatArray(ncols * nrows)
+            var index = 0
+            
+            // If we broke on a data line, we need to process it first
+            var dataLine = line
+            while (dataLine != null) {
+                val tokens = dataLine.trim().split(Regex("\\s+"))
+                for (token in tokens) {
+                    if (token.isNotEmpty() && index < tempGrid.size) {
+                        val v = token.toFloatOrNull() ?: 0f
+                        tempGrid[index++] = if (v == nodata) 0f else v
+                    }
+                }
+                dataLine = reader.readLine()
+            }
+            
+            val gridW = 100
+            val gridH = 100
+            val bareEarth = FloatArray(gridW * gridH)
+            val canopySpikes = FloatArray(gridW * gridH) // ASC typically doesn't have canopy
+            
+            for (y in 0 until gridH) {
+                for (x in 0 until gridW) {
+                    val srcX = (x.toFloat() / (gridW - 1) * (ncols - 1)).toInt().coerceIn(0, ncols - 1)
+                    val srcY = (y.toFloat() / (gridH - 1) * (nrows - 1)).toInt().coerceIn(0, nrows - 1)
+                    bareEarth[y * gridW + x] = tempGrid[srcY * ncols + srcX]
+                }
+            }
+            
+            return ElevationGrid(gridW, gridH, bareEarth, canopySpikes)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    fun parseXyzStream(reader: java.io.BufferedReader): ElevationGrid? {
+        try {
+            val points = ArrayList<FloatArray>()
+            var minX = Float.MAX_VALUE
+            var maxX = Float.MIN_VALUE
+            var minY = Float.MAX_VALUE
+            var maxY = Float.MIN_VALUE
+            
+            var lineCount = 0
+            reader.forEachLine { line ->
+                if (lineCount < 300000) { // Limit to 300k points
+                    val tokens = line.trim().split(Regex("[,\\s\\t]+"))
+                    if (tokens.size >= 3) {
+                        val x = tokens[0].toFloatOrNull()
+                        val y = tokens[1].toFloatOrNull()
+                        val z = tokens[2].toFloatOrNull()
+                        if (x != null && y != null && z != null) {
+                            points.add(floatArrayOf(x, y, z))
+                            if (x < minX) minX = x
+                            if (x > maxX) maxX = x
+                            if (y < minY) minY = y
+                            if (y > maxY) maxY = y
+                            lineCount++
+                        }
+                    }
+                }
+            }
+            
+            if (points.isEmpty()) return null
+            
+            val gridW = 100
+            val gridH = 100
+            val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+            val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
+            val countGrid = IntArray(gridW * gridH)
+            
+            val rangeX = if (maxX - minX > 0) (maxX - minX) else 1f
+            val rangeY = if (maxY - minY > 0) (maxY - minY) else 1f
+            
+            for (pt in points) {
+                val x = pt[0]
+                val y = pt[1]
+                val z = pt[2]
+                
+                val gx = (((x - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
+                val gy = ((1f - (y - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
+                
+                val idx = gy * gridW + gx
+                if (z < minGrid[idx]) minGrid[idx] = z
+                if (z > maxGrid[idx]) maxGrid[idx] = z
+                countGrid[idx]++
+            }
+            
+            val bareEarth = FloatArray(gridW * gridH)
+            val canopySpikes = FloatArray(gridW * gridH)
+            
+            for (y in 0 until gridH) {
+                for (x in 0 until gridW) {
+                    val idx = y * gridW + x
+                    if (countGrid[idx] > 0) {
+                        bareEarth[idx] = minGrid[idx]
+                        canopySpikes[idx] = (maxGrid[idx] - minGrid[idx]).coerceAtLeast(0f)
+                    } else {
+                        var nearestVal = 0f
+                        var nearestCanopy = 0f
+                        var found = false
+                        for (r in 1..10) {
+                            for (dy in -r..r) {
+                                for (dx in -r..r) {
+                                    if (Math.abs(dx) != r && Math.abs(dy) != r) continue
+                                    val nx = x + dx
+                                    val ny = y + dy
+                                    if (nx in 0 until gridW && ny in 0 until gridH) {
+                                        val nidx = ny * gridW + nx
+                                        if (countGrid[nidx] > 0) {
+                                            nearestVal = minGrid[nidx]
+                                            nearestCanopy = (maxGrid[nidx] - minGrid[nidx]).coerceAtLeast(0f)
+                                            found = true
+                                            break
+                                        }
+                                    }
+                                }
+                                if (found) break
+                            }
+                            if (found) break
+                        }
+                        if (found) {
+                            bareEarth[idx] = nearestVal
+                            canopySpikes[idx] = nearestCanopy
+                        } else {
+                            bareEarth[idx] = 10f
+                            canopySpikes[idx] = 0f
+                        }
+                    }
+                }
+            }
+            
+            return ElevationGrid(gridW, gridH, bareEarth, canopySpikes)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    fun parseFromStream(fileName: String, inputStream: java.io.InputStream): ElevationGrid? {
+        val lowerName = fileName.lowercase()
+        return if (lowerName.endsWith(".las")) {
+            parseLasStream(inputStream)
+        } else {
+            val bis = java.io.BufferedInputStream(inputStream)
+            bis.mark(4096)
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(bis))
+            val firstLine = reader.readLine() ?: ""
+            bis.reset()
+            
+            val cleanLine = firstLine.trim().lowercase()
+            if (cleanLine.startsWith("ncols ") || cleanLine.startsWith("ncols\t")) {
+                parseAscDem(java.io.BufferedReader(java.io.InputStreamReader(bis)))
+            } else {
+                val secondLine = reader.readLine() ?: ""
+                bis.reset()
+                
+                val tokens1 = firstLine.trim().split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
+                val tokens2 = secondLine.trim().split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
+                
+                if (tokens1.size == 3 && tokens2.size == 3) {
+                    parseXyzStream(java.io.BufferedReader(java.io.InputStreamReader(bis)))
+                } else {
+                    val entireText = java.io.BufferedReader(java.io.InputStreamReader(bis)).readText()
+                    parseCustomGrid(entireText)
+                }
+            }
+        }
+    }
 }

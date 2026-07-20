@@ -91,34 +91,45 @@ fun LidarControlPanel(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Site Tabs (Homestead, Fort, Roman Villa)
+        // Site Tabs (Homestead, Fort, Roman Villa, Custom Layer)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            val sites = listOf("1800s Homestead", "Civil War Fort", "Roman Villa")
+            val sites = listOf("1800s Homestead", "Civil War Fort", "Roman Villa", "Custom Layer")
             sites.forEachIndexed { index, title ->
                 val isSelected = selectedSiteIndex == index
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isSelected) Color(0xFF00E676).copy(alpha = 0.15f) else Color(0xFF1E2026))
+                        .background(
+                            if (isSelected) {
+                                if (index == 3) Color(0xFF29B6F6).copy(alpha = 0.15f) else Color(0xFF00E676).copy(alpha = 0.15f)
+                            } else {
+                                Color(0xFF1E2026)
+                            }
+                        )
                         .border(
                             1.dp,
-                            if (isSelected) Color(0xFF00E676) else Color(0xFF2E313D),
+                            if (isSelected) {
+                                if (index == 3) Color(0xFF29B6F6) else Color(0xFF00E676)
+                            } else {
+                                Color(0xFF2E313D)
+                            },
                             RoundedCornerShape(8.dp)
                         )
                         .clickable { onSiteSelected(index) }
-                        .padding(vertical = 10.dp, horizontal = 4.dp)
+                        .padding(vertical = 10.dp, horizontal = 2.dp)
                         .testTag("site_tab_$index"),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = title,
                         color = if (isSelected) Color.White else Color.Gray,
-                        fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        fontSize = 10.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1
                     )
                 }
             }

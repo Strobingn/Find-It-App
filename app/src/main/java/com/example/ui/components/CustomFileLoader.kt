@@ -3,6 +3,7 @@ package com.example.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -38,8 +39,38 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import android.net.Uri
+import android.provider.OpenableColumns
 import com.example.data.DemGenerator
 import com.example.data.ElevationGrid
+
+private fun getFileName(context: android.content.Context, uri: Uri): String {
+    var result: String? = null
+    if (uri.scheme == "content") {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        try {
+            if (cursor != null && cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index != -1) {
+                    result = cursor.getString(index)
+                }
+            }
+        } finally {
+            cursor?.close()
+        }
+    }
+    if (result == null) {
+        result = uri.path
+        val cut = result?.lastIndexOf('/') ?: -1
+        if (cut != -1) {
+            result = result?.substring(cut + 1)
+        }
+    }
+    return result ?: "Unknown_File"
+}
 
 @Composable
 fun CustomFileLoader(
@@ -49,6 +80,35 @@ fun CustomFileLoader(
     var textInput by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var successMessage by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let {
+            try {
+                val fileName = getFileName(context, it)
+                val inputStream = context.contentResolver.openInputStream(it)
+                if (inputStream != null) {
+                    val grid = DemGenerator.parseFromStream(fileName, inputStream)
+                    if (grid != null) {
+                        onCustomGridLoaded(grid)
+                        successMessage = "File '$fileName' loaded successfully! ${grid.width}x${grid.height} grid processed."
+                        errorMessage = null
+                    } else {
+                        errorMessage = "Failed to parse '$fileName'. Verify it's a valid LAS, ASC, XYZ, or direct elevation grid text file."
+                        successMessage = null
+                    }
+                } else {
+                    errorMessage = "Could not open selected file."
+                    successMessage = null
+                }
+            } catch (e: Exception) {
+                errorMessage = "Error reading file: ${e.localizedMessage}"
+                successMessage = null
+            }
+        }
+    }
 
     val sampleCellarGrid = """
         12 12 12 12 12 12 12 12 12 12
@@ -113,6 +173,46 @@ fun CustomFileLoader(
         )
 
         Spacer(modifier = Modifier.height(10.dp))
+
+        // --- File Chooser Button ---
+        Button(
+            onClick = {
+                filePickerLauncher.launch("*/*")
+            },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF00E676),
+                contentColor = Color.Black
+            ),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .testTag("choose_lidar_file_button")
+        ) {
+            Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(text = "UPLOAD LIDAR OR DEM FILE (.las, .asc, .xyz, .csv, .txt)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Divider-like helper
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f).height(1.dp).background(Color(0xFF2C2E35)))
+            Text(
+                text = " OR PASTE ELEVATION MATRIX ",
+                color = Color.Gray,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+            Box(modifier = Modifier.weight(1f).height(1.dp).background(Color(0xFF2C2E35)))
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         // --- Sample Quick Load Buttons ---
         Row(
