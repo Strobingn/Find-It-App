@@ -24,15 +24,27 @@ android {
   }
 
   signingConfigs {
+    // Release only if CI/local provides KEYSTORE_PATH (optional for unsigned CI APKs).
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val keystorePath = System.getenv("KEYSTORE_PATH")
+      if (!keystorePath.isNullOrBlank()) {
+        storeFile = file(keystorePath)
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
+    // Prefer project debug.keystore, then SDK default (CI runners generate one as needed).
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      val projectDebug = file("${rootDir}/debug.keystore")
+      val sdkDebug = file("${System.getProperty("user.home")}/.android/debug.keystore")
+      val ks =
+        when {
+          projectDebug.exists() -> projectDebug
+          sdkDebug.exists() -> sdkDebug
+          else -> sdkDebug
+        }
+      storeFile = ks
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
@@ -44,9 +56,17 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      val releaseStore = signingConfigs.getByName("release").storeFile
+      if (releaseStore != null && releaseStore.exists()) {
+        signingConfig = signingConfigs.getByName("release")
+      }
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      val debugStore = signingConfigs.getByName("debugConfig").storeFile
+      if (debugStore != null) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
