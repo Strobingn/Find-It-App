@@ -20,10 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
@@ -62,10 +62,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.NormalizedRasterBounds
 import com.example.ui.components.CustomFileLoader
+import com.example.ui.components.GoogleMapsPanel
 import com.example.ui.components.LidarControlPanel
 import com.example.ui.components.LidarCanvasMode
 import com.example.ui.components.LidarMapCanvas
-import com.example.ui.components.TargetLoggerPanel
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -73,7 +73,7 @@ private data class AppTab(val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
     AppTab("Terrain", Icons.Default.Map),
-    AppTab("Finds", Icons.Default.Flag),
+    AppTab("Maps", Icons.Default.Public),
     AppTab("Import", Icons.Default.UploadFile),
 )
 
@@ -141,7 +141,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 focusMode = terrainFocusMode.value,
                 onFocusModeChanged = { terrainFocusMode.value = it },
             )
-            1 -> FindsTab(viewModel, padding)
+            1 -> MapsTab(viewModel, padding)
             else -> ImportTab(viewModel, padding) {
                 selectedTab.intValue = 0
                 terrainFocusMode.value = true
@@ -411,19 +411,13 @@ private fun TerrainTab(
 }
 
 @Composable
-private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
-    val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
-    val x by viewModel.sweepX.collectAsStateWithLifecycle()
-    val y by viewModel.sweepY.collectAsStateWithLifecycle()
-    TargetLoggerPanel(
-        loggedSignals = signals,
-        currentSweepX = x,
-        currentSweepY = y,
-        onLogSignal = viewModel::logCurrentSignal,
-        onDeleteSignal = viewModel::deleteLoggedSignal,
-        onUpdateSignal = viewModel::updateLoggedSignal,
-        onClearAll = viewModel::clearLoggedSignals,
-        modifier = Modifier.fillMaxSize().padding(padding),
+private fun MapsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    GoogleMapsPanel(
+        metadata = metadata,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding),
     )
 }
 

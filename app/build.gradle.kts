@@ -1,3 +1,5 @@
+import java.util.Properties
+
 val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
 val releaseKeystoreFile = releaseKeystorePath?.takeIf { it.isNotBlank() }?.let { file(it) }
 val releaseStorePassword = System.getenv("STORE_PASSWORD")
@@ -27,6 +29,19 @@ android {
     versionName = "1.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Google Maps: secrets.properties / env MAPS_API_KEY or GOOGLE_MAPS_API_KEY
+    val secrets = Properties().apply {
+      rootProject.file("secrets.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+    }
+    val mapsKey = secrets.getProperty("MAPS_API_KEY")
+      ?: secrets.getProperty("GOOGLE_MAPS_API_KEY")
+      ?: System.getenv("MAPS_API_KEY")
+      ?: System.getenv("GOOGLE_MAPS_API_KEY")
+      ?: ""
+    buildConfigField("String", "MAPS_API_KEY", "\"$mapsKey\"")
+    buildConfigField("boolean", "HAS_MAPS_API_KEY", "${mapsKey.isNotBlank()}")
+    manifestPlaceholders["MAPS_API_KEY"] = mapsKey
   }
 
   signingConfigs {
@@ -86,6 +101,9 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.laszip4j)
   implementation(libs.nga.tiff)
+  implementation("com.google.android.gms:play-services-maps:19.2.0")
+  implementation("com.google.android.gms:play-services-location:21.3.0")
+  implementation("com.google.maps.android:maps-compose:6.4.1")
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
