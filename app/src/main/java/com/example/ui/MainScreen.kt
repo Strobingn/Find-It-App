@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.WbSunny
@@ -56,8 +57,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.NormalizedRasterBounds
 import com.example.data.import.SurveyImportResult
+import com.example.ui.OfflineMapsViewModel
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.LidarControlPanel
+import com.example.ui.components.OfflineMapsPanel
 import com.example.ui.components.SurveyImportPanel
 import com.example.ui.components.LidarCanvasMode
 import com.example.ui.components.LidarMapCanvas
@@ -71,6 +74,7 @@ private val tabs = listOf(
     AppTab("Terrain", Icons.Default.Map),
     AppTab("Finds", Icons.Default.Flag),
     AppTab("Survey", Icons.Default.PinDrop),
+    AppTab("Offline", Icons.Default.Layers),
     AppTab("Import", Icons.Default.UploadFile),
 )
 
@@ -120,6 +124,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
             )
             1 -> FindsTab(viewModel, padding)
             2 -> SurveyTab(viewModel, padding)
+            3 -> OfflineMapsTab(viewModel, padding)
             else -> ImportTab(viewModel, padding) {
                 selectedTab.intValue = 0
                 terrainFocusMode.value = true
@@ -374,6 +379,16 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         modifier = Modifier.fillMaxSize().padding(padding),
     )
 }
+
+@Composable
+private fun OfflineMapsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val offlineMapsViewModel: OfflineMapsViewModel = viewModel()
+    OfflineMapsPanel(
+        viewModel = offlineMapsViewModel,
+        modifier = Modifier.fillMaxSize().padding(padding)
+    )
+}
+
 
 @Composable
 private fun SurveyTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
