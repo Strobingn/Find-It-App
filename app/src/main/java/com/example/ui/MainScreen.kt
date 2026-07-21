@@ -20,8 +20,8 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.RotateLeft
-import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.automirrored.filled.RotateLeft
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.WbSunny
@@ -204,7 +204,7 @@ private fun TerrainTab(
                 modifier = Modifier.padding(horizontal = 4.dp),
             ) {
                 IconButton(onClick = { viewModel.rotateSunAzimuth(-45f) }) {
-                    Icon(Icons.Default.RotateLeft, contentDescription = "Rotate light 45 degrees left")
+                    Icon(Icons.AutoMirrored.Filled.RotateLeft, contentDescription = "Rotate light 45 degrees left")
                 }
                 Icon(
                     Icons.Default.WbSunny,
@@ -218,7 +218,7 @@ private fun TerrainTab(
                     fontWeight = FontWeight.Bold,
                 )
                 IconButton(onClick = { viewModel.rotateSunAzimuth(45f) }) {
-                    Icon(Icons.Default.RotateRight, contentDescription = "Rotate light 45 degrees right")
+                    Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = "Rotate light 45 degrees right")
                 }
                 IconButton(onClick = { viewportResetKey.intValue++ }) {
                     Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit terrain to screen")
