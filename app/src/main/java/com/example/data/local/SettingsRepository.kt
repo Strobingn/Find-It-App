@@ -23,6 +23,10 @@ class SettingsRepository(private val settingDao: SettingDao) {
         const val CURRENT_SITE_INDEX = "current_site_index"
         const val SWEEP_X = "sweep_x"
         const val SWEEP_Y = "sweep_y"
+        /** When true, zoom/pan re-rasterizes the original LAZ/LAS/GeoTIFF for the viewport. */
+        const val AUTO_REFINE_TERRAIN = "auto_refine_terrain"
+        /** Minimum map zoom before auto detail fires. */
+        const val AUTO_REFINE_MIN_ZOOM = "auto_refine_min_zoom"
     }
 
     suspend fun saveString(key: String, value: String) {

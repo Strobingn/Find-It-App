@@ -1,15 +1,18 @@
 package com.example.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,12 +35,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarDefaults
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -77,33 +83,53 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     val selectedTab = rememberSaveable { mutableIntStateOf(0) }
     val terrainFocusMode = rememberSaveable { mutableStateOf(true) }
     Scaffold(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+        // Always reserve status + nav bar space so system bars never cover UI.
+        contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            if (!terrainFocusMode.value) TopAppBar(
-                title = {
-                    Column {
-                        Text("Find It", fontWeight = FontWeight.Bold)
-                        Text(
-                            "LiDAR terrain and field survey",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-            )
+            if (!terrainFocusMode.value) {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("Find It", fontWeight = FontWeight.Bold)
+                            Text(
+                                "LiDAR terrain and field survey",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        actionIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    ),
+                    windowInsets = WindowInsets.safeDrawing,
+                )
+            }
         },
         bottomBar = {
-            if (!terrainFocusMode.value) NavigationBar {
-                tabs.forEachIndexed { index, tab ->
-                    NavigationBarItem(
-                        selected = selectedTab.intValue == index,
-                        onClick = {
-                            selectedTab.intValue = index
-                            terrainFocusMode.value = false
-                        },
-                        icon = { Icon(tab.icon, contentDescription = null) },
-                        label = { Text(tab.label) },
-                    )
+            if (!terrainFocusMode.value) {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    windowInsets = NavigationBarDefaults.windowInsets,
+                ) {
+                    tabs.forEachIndexed { index, tab ->
+                        NavigationBarItem(
+                            selected = selectedTab.intValue == index,
+                            onClick = {
+                                selectedTab.intValue = index
+                                terrainFocusMode.value = false
+                            },
+                            icon = { Icon(tab.icon, contentDescription = null) },
+                            label = { Text(tab.label) },
+                        )
+                    }
                 }
             }
         },
@@ -157,15 +183,17 @@ private fun TerrainTab(
     val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
     val isDetailed by viewModel.isDetailedTerrain.collectAsStateWithLifecycle()
     val detailMessage by viewModel.terrainDetailMessage.collectAsStateWithLifecycle()
+    val autoRefine by viewModel.autoRefineTerrain.collectAsStateWithLifecycle()
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val showControls = rememberSaveable { mutableStateOf(false) }
     val viewportResetKey = rememberSaveable { mutableIntStateOf(0) }
 
+    // Always honor Scaffold safe-drawing padding (status + nav bars), even in focus mode.
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .padding(if (focusMode) PaddingValues(0.dp) else padding),
+            .padding(padding),
     ) {
         LidarMapCanvas(
             bitmap = bitmap,
@@ -187,10 +215,12 @@ private fun TerrainTab(
             onViewportChanged = { bounds, zoom ->
                 visibleBounds.value = bounds
                 zoomLevel.value = zoom
+                // Debounced auto re-rasterize of LAZ/LAS/etc. for this viewport.
+                viewModel.onExploreViewportChanged(bounds, zoom)
             },
             modifier = Modifier
                 .fillMaxSize()
-                .padding(if (focusMode) 0.dp else 8.dp)
+                .padding(if (focusMode) 4.dp else 8.dp)
                 .testTag("terrain_workspace"),
         )
 
@@ -289,11 +319,29 @@ private fun TerrainTab(
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Auto detail",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                    Switch(
+                        checked = autoRefine,
+                        onCheckedChange = viewModel::setAutoRefineTerrain,
+                        enabled = canRefine,
+                    )
+                }
                 Button(
                     onClick = { viewModel.refineTerrain(visibleBounds.value) },
                     enabled = zoomLevel.value >= 1.5f && !isRefining,
                 ) {
-                    Text(if (isRefining) "Reading LAZ…" else "Load detail here")
+                    Text(
+                        when {
+                            isRefining -> "Reading file…"
+                            autoRefine -> "Refresh detail"
+                            else -> "Load detail here"
+                        },
+                    )
                 }
                 if (isDetailed) TextButton(onClick = viewModel::showWholeTerrain) {
                     Text("Whole file")

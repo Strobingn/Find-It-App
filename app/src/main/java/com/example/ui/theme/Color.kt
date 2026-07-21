@@ -2,41 +2,43 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Primary colors - subtle gold for accents
-val GoldAmber = Color(0xFFFFD700)
+// Neutral grey scale (light grey ↔ dark grey global theme)
+val Grey950 = Color(0xFF121212)
+val Grey900 = Color(0xFF1A1A1A)
+val Grey850 = Color(0xFF222222)
+val Grey800 = Color(0xFF2C2C2C)
+val Grey700 = Color(0xFF3D3D3D)
+val Grey600 = Color(0xFF555555)
+val Grey500 = Color(0xFF757575)
+val Grey400 = Color(0xFF9E9E9E)
+val Grey300 = Color(0xFFBDBDBD)
+val Grey200 = Color(0xFFD6D6D6)
+val Grey150 = Color(0xFFE4E4E4)
+val Grey100 = Color(0xFFEEEEEE)
+val Grey50 = Color(0xFFF5F5F5)
 
-// Neutral grey palette
-val Grey900 = Color(0xFF212121)  // Almost black
-val Grey800 = Color(0xFF424242)  // Dark grey
-val Grey700 = Color(0xFF616161)  // Medium-dark grey
-val Grey600 = Color(0xFF757575)  // Medium grey
-val Grey500 = Color(0xFF9E9E9E)  // Grey
-val Grey400 = Color(0xFFBDBDBD)  // Light grey
-val Grey300 = Color(0xFFE0E0E0)  // Lighter grey
-val Grey200 = Color(0xFFEEEEEE)  // Very light grey
-val Grey100 = Color(0xFFF5F5F5)  // Almost white
-val Grey50 = Color(0xFFFAFAFA)   // Pure white alternative
+// Soft gold reserved for sparse map/analysis accents only (not primary chrome)
+val GoldAmber = Color(0xFFD4AF37)
 
-// Background colors
-val DarkBackground = Color(0xFF121212)  // Very dark grey (near black)
-val DarkSurface = Color(0xFF1E1E1E)    // Dark grey surface
-val DarkSurfaceVariant = Color(0xFF2A2A2A)
+// Dark theme surfaces
+val DarkBackground = Grey900
+val DarkSurface = Grey800
+val DarkSurfaceVariant = Grey700
 
-// Light theme colors
-val LightBackground = Color(0xFFF5F5F5)  // Very light grey
-val LightSurface = Color(0xFFFFFFFF)    // White
-val LightSurfaceVariant = Color(0xFFE0E0E0)
+// Light theme surfaces
+val LightBackground = Grey150
+val LightSurface = Grey50
+val LightSurfaceVariant = Grey200
 
-// Accent colors for interactive elements
-val PrimaryLight = Color(0xFF6200EE)  // Subtle purple for primary actions
-val PrimaryContainerLight = Color(0xFFEADDFF)
-val OnPrimaryLight = Color(0xFFFFFFFF)
+// Grey primaries (no purple chrome)
+val PrimaryLight = Grey600
+val PrimaryContainerLight = Grey200
+val OnPrimaryLight = Color.White
 
-val PrimaryDark = Color(0xFFBB86FC)  // Lighter purple for dark theme
-val PrimaryContainerDark = Color(0xFF3700B3)
-val OnPrimaryDark = Color(0xFF000000)
+val PrimaryDark = Grey300
+val PrimaryContainerDark = Grey700
+val OnPrimaryDark = Grey900
 
-// Status colors
-val Success = Color(0xFF4CAF50)
-val Warning = Color(0xFFFFC107)
-val Error = Color(0xFFF44336)
+val Success = Color(0xFF66BB6A)
+val Warning = Color(0xFFFFB74D)
+val Error = Color(0xFFEF5350)

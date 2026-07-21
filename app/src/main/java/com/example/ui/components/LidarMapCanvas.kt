@@ -158,10 +158,11 @@ fun LidarMapCanvas(
         }
     }
 
+    val canvasBg = MaterialTheme.colorScheme.surfaceVariant
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF1C1D21))
+            .background(canvasBg)
             .shadow(4.dp, RoundedCornerShape(16.dp))
             .testTag("lidar_map_canvas_container"),
     ) {
