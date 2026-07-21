@@ -13,7 +13,6 @@ import com.example.data.NormalizedRasterBounds
 import com.example.data.TerrainImportSource
 import com.example.data.TargetSignal
 import com.example.data.local.AppDatabase
-import com.example.data.local.SettingsRepository
 import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.geospatial.GeoSpatialLibrary
@@ -33,7 +32,6 @@ import kotlinx.coroutines.withContext
 
 class HillshadeViewModel(application: Application) : AndroidViewModel(application) {
     private val signalDao = AppDatabase.get(application).targetSignalDao()
-    private val settingsRepo = SettingsRepository(AppDatabase.get(application).settingDao())
 
     private val _currentSiteIndex = MutableStateFlow(0)
     val currentSiteIndex: StateFlow<Int> = _currentSiteIndex.asStateFlow()
@@ -47,8 +45,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val sunAltitude = _sunAltitude.asStateFlow()
     private val _vegetationFilter = MutableStateFlow(0.8f)
     val vegetationFilter = _vegetationFilter.asStateFlow()
-    p
-rivate val _paletteType = MutableStateFlow(1)
+    private val _paletteType = MutableStateFlow(1)
     val paletteType = _paletteType.asStateFlow()
     private val _contrast = MutableStateFlow(1.5f)
     val contrast = _contrast.asStateFlow()
@@ -82,8 +79,7 @@ rivate val _paletteType = MutableStateFlow(1)
     private var overviewTerrain: DemGenerator.TerrainLoadResult? = null
     private var currentSourceBounds = NormalizedRasterBounds.Full
 
-    private val _hillshadeBitmap = MutableStateFlow<Bitm
-ap?>(null)
+    private val _hillshadeBitmap = MutableStateFlow<Bitmap?>(null)
     val hillshadeBitmap = _hillshadeBitmap.asStateFlow()
     private val _isRendering = MutableStateFlow(false)
     val isRendering = _isRendering.asStateFlow()
@@ -108,7 +104,6 @@ ap?>(null)
 
 
     init {
-        loadSettings()
         updateCoordinates()
         scheduleRender(immediate = true)
         viewModelScope.launch {
@@ -120,7 +115,6 @@ ap?>(null)
 
     private fun scheduleRender(immediate: Boolean = false) {
         val generation = ++renderGeneration
-        saveSettings()
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             if (!immediate) delay(80)
@@ -133,8 +127,7 @@ ap?>(null)
                             sunAzimuth = _sunAzimuth.value,
                             sunAltitude = _sunAltitude.value,
                             vegetationFilter = _vegetationFilter.value,
-                
-            palette = _paletteType.value,
+                            palette = _paletteType.value,
                             contrast = _contrast.value,
                             visualizationMode = _visualizationMode.value,
                             overlayType = _overlayType.value,
@@ -182,8 +175,7 @@ ap?>(null)
         applyCustomTerrain(result)
     }
 
-    private fun applyCustom
-Terrain(result: DemGenerator.TerrainLoadResult) {
+    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult) {
         val grid = result.grid
         customGrid = result.grid
         _elevationGrid.value = result.grid
@@ -226,8 +218,7 @@ Terrain(result: DemGenerator.TerrainLoadResult) {
                         fileName = source.displayName,
                         inputStream = input,
                         options = source.options.copy(
-                  
-          rasterResolution = 1_024,
+                            rasterResolution = 1_024,
                             focusBounds = absoluteBounds,
                         ),
                     )
@@ -276,8 +267,7 @@ Terrain(result: DemGenerator.TerrainLoadResult) {
     }
     fun updateSunAltitude(value: Float) { _sunAltitude.value = value.coerceIn(5f, 85f); scheduleRender() }
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
-    fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleR
-ender() }
+    fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateContrast(value: Float) { _contrast.value = value.coerceIn(1f, 2.5f); scheduleRender() }
     fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 8); scheduleRender() }
     fun updateOverlayType(value: Int) { _overlayType.value = value.coerceIn(0, 2); scheduleRender() }
@@ -328,8 +318,7 @@ ender() }
         viewModelScope.launch { signalDao.upsert(signal.toEntity()) }
     }
 
-    fun updateL
-oggedSignal(signal: TargetSignal) {
+    fun updateLoggedSignal(signal: TargetSignal) {
         viewModelScope.launch { signalDao.upsert(signal.toEntity()) }
     }
 
@@ -341,50 +330,6 @@ oggedSignal(signal: TargetSignal) {
         viewModelScope.launch { signalDao.deleteAll() }
     }
 
-
-    
-
-    private fun loadSettings() {
-        viewModelScope.launch {
-            _sunAzimuth.value = settingsRepo.getFloat(SettingsRepository.Keys.SUN_AZIMUTH, 315f)
-            _sunAltitude.value = settingsRepo.getFloat(SettingsRepository.Keys.SUN_ALTITUDE, 35f)
-            _vegetationFilter.value = settingsRepo.getFloat(SettingsRepository.Keys.VEGETATION_FILTER, 0.8f)
-            _paletteType.value = settingsRepo.getInt(SettingsRepository.Keys.PALETTE_TYPE, 1)
-            _contrast.value = settingsRepo.getFloat(SettingsRepository.Keys.CONTRAST, 1.5f)
-            _visualizationMode.value = settingsRepo.getInt(SettingsRepository.Keys.VISUALIZATION_MODE, 0)
-            _overlayType.value = settingsRepo.getInt(SettingsRepository.Keys.OVERLAY_TYPE, 0)
-            _overlayOpacity.value = settingsRepo.getFloat(SettingsRepository.Keys.OVERLAY_OPACITY, 0.4f)
-            _gridSpacing.value = settingsRepo.getFloat(SettingsRepository.Keys.GRID_SPACING, 0f)
-            _zScale.value = settingsRepo.getFloat(SettingsRepository.Keys.Z_SCALE, 1f)
-            _featureScaleMeters.value = settingsRepo.getFloat(SettingsRepository.Keys.FEATURE_SCALE_METERS, 6f)
-            _analysisSensitivity.value = settingsRepo.getFloat(SettingsRepository.Keys.ANALYSIS_SENSITIVITY, 1.2f)
-            _contourIntervalMeters.value = settingsRepo.getFloat(SettingsRepository.Keys.CONTOUR_INTERVAL_METERS, 0f)
-            _currentSiteIndex.value = settingsRepo.getInt(SettingsRepository.Keys.CURRENT_SITE_INDEX, 0)
-            _sweepX.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_X, 50f)
-            _sweepY.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_Y, 50f)
-        }
-    }
-
-    private fun saveSettings() {
-        viewModelScope.launch {
-            settingsRepo.saveFloat(SettingsRepository.Keys.SUN_AZIMUTH, _sunAzimuth.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.SUN_ALTITUDE, _sunAltitude.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.VEGETATION_FILTER, _vegetationFilter.value)
-            settingsRepo.saveInt(SettingsRepository.Keys.PALETTE_TYPE, _paletteType.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.CONTRAST, _contrast.value)
-            settingsRepo.saveInt(SettingsRepository.Keys.VISUALIZATION_MODE, _visualizationMode.value)
-            settingsRepo.saveInt(SettingsRepository.Keys.OVERLAY_TYPE, _overlayType.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.OVERLAY_OPACITY, _overlayOpacity.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.GRID_SPACING, _gridSpacing.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.Z_SCALE, _zScale.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.FEATURE_SCALE_METERS, _featureScaleMeters.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.ANALYSIS_SENSITIVITY, _analysisSensitivity.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.CONTOUR_INTERVAL_METERS, _contourIntervalMeters.value)
-            settingsRepo.saveInt(SettingsRepository.Keys.CURRENT_SITE_INDEX, _currentSiteIndex.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.SWEEP_X, _sweepX.value)
-            settingsRepo.saveFloat(SettingsRepository.Keys.SWEEP_Y, _sweepY.value)
-        }
-    }
 
     override fun onCleared() {
         renderJob?.cancel()

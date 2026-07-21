@@ -1,3 +1,13 @@
+import java.util.Properties
+
+val mapsProperties = Properties().apply {
+  listOf("local.defaults.properties", "secrets.properties").forEach { fileName ->
+    rootProject.file(fileName).takeIf { it.isFile }?.inputStream()?.use(::load)
+  }
+}
+val mapsApiKey = mapsProperties.getProperty("MAPS_API_KEY")
+  ?.takeIf { it.isNotBlank() }
+  ?: "DEFAULT_API_KEY"
 val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
 val releaseKeystoreFile = releaseKeystorePath?.takeIf { it.isNotBlank() }?.let { file(it) }
 val releaseStorePassword = System.getenv("STORE_PASSWORD")
@@ -13,6 +23,7 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
+  alias(libs.plugins.secrets)
 }
 
 android {
@@ -27,6 +38,7 @@ android {
     versionName = "1.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
   }
 
   signingConfigs {
@@ -38,12 +50,6 @@ android {
         keyPassword = releaseKeyPassword
       }
     }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
-    }
   }
 
   buildTypes {
@@ -53,7 +59,6 @@ android {
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -63,8 +68,7 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unit
-Tests { isIncludeAndroidResources = true } }
+  testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
 dependencies {
@@ -85,8 +89,8 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.flow)
   implementation(libs.laszip4j)
+  implementation(libs.maps.compose)
   implementation(libs.nga.tiff)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
@@ -102,4 +106,9 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
+}
+
+secrets {
+  propertiesFileName = "secrets.properties"
+  defaultPropertiesFileName = "local.defaults.properties"
 }

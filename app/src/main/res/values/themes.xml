@@ -8,8 +8,6 @@
         <item name="android:colorPrimary">@color/brand_gold</item>
         <item name="android:colorPrimaryDark">@color/splash_background</item>
         <item name="android:colorAccent">@color/brand_green</item>
-        <item name="android:textColorPrimary">@color/white</item>
-        <item name="android:textColorSecondary">@color/grey_400</item>
     </style>
 
     <!-- Android 12+ SplashScreen API + pre-12 window background -->

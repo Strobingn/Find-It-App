@@ -3,21 +3,10 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <!-- Human-friendly grey theme -->
-    <color name="splash_background">#FF121212</color>
-    <color name="ic_launcher_background">#FF121212</color>
+    <!-- Lidar Ground Stack brand -->
+    <color name="splash_background">#FF0D0E12</color>
+    <color name="ic_launcher_background">#FF0D0E12</color>
     <color name="brand_gold">#FFFFD700</color>
-    <color name="brand_green">#FF4CAF50</color>
-    <color name="brand_surface">#FF1E1E1E</color>
-    
-    <!-- Grey palette -->
-    <color name="grey_900">#FF212121</color>
-    <color name="grey_800">#FF424242</color>
-    <color name="grey_700">#FF616161</color>
-    <color name="grey_600">#FF757575</color>
-    <color name="grey_500">#FF9E9E9E</color>
-    <color name="grey_400">#FFBDBDBD</color>
-    <color name="grey_300">#FFE0E0E0</color>
-    <color name="grey_200">#FFEEEEEE</color>
-    <color name="grey_100">#FFF5F5F5</color>
+    <color name="brand_green">#FF00E676</color>
+    <color name="brand_surface">#FF141518</color>
 </resources>

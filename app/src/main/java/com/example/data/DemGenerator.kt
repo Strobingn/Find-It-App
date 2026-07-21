@@ -822,7 +822,16 @@ object DemGenerator {
                 if (parts.size >= 2) {
                     val key = parts[0].lowercase()
                     val value = parts[1]
-                    if (key == "ncols" || key == "nrows" || key == "xllcorner" || key == "yllcorner" || key == "cellsize" || key == "nodata_value") {
+                    if (
+                        key == "ncols" ||
+                        key == "nrows" ||
+                        key == "xllcorner" ||
+                        key == "yllcorner" ||
+                        key == "xllcenter" ||
+                        key == "yllcenter" ||
+                        key == "cellsize" ||
+                        key == "nodata_value"
+                    ) {
                         headerMap[key] = value
                         headerLines++
                     } else {

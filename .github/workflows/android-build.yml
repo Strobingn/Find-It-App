@@ -23,16 +23,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "17"
           distribution: "temurin"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Require Gradle wrapper
         run: |
@@ -45,6 +45,11 @@ jobs:
             cp .env.example .env
           fi
           touch .env
+
+      - name: Configure Maps API key
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        run: printf 'MAPS_API_KEY=%s\n' "${MAPS_API_KEY:-DEFAULT_API_KEY}" > secrets.properties
 
       - name: Ensure Android debug keystore
         run: |
@@ -64,29 +69,30 @@ jobs:
           fi
 
       - name: Unit tests
-        continue-on-error: true
         run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Android lint
+        run: ./gradlew lintDebug --stacktrace
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: lidar-metal-detector-debug-${{ github.ref_name }}-${{ github.run_number }}
+          name: lidar-metal-detector-debug-${{ github.run_id }}-${{ github.run_attempt }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
 
       - name: Build Release APK (unsigned OK)
-        continue-on-error: true
         run: ./gradlew assembleRelease --stacktrace
 
       - name: Upload Release APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: lidar-metal-detector-release-${{ github.ref_name }}-${{ github.run_number }}
+          name: lidar-metal-detector-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
