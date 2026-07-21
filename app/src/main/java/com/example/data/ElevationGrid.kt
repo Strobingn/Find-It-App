@@ -36,6 +36,42 @@ class ElevationGrid(
     }
 
     /**
+     * Axis-aligned normalized bounds covering measured/valid cells only.
+     * Returns null when the grid is fully valid (or empty), so the UI keeps the full footprint.
+     */
+    fun validContentBounds(paddingFraction: Double = 0.04): NormalizedRasterBounds? {
+        var minCol = width
+        var maxCol = -1
+        var minRow = height
+        var maxRow = -1
+        var validCount = 0
+        for (row in 0 until height) {
+            val rowOffset = row * width
+            for (col in 0 until width) {
+                if (!validData[rowOffset + col]) continue
+                validCount++
+                if (col < minCol) minCol = col
+                if (col > maxCol) maxCol = col
+                if (row < minRow) minRow = row
+                if (row > maxRow) maxRow = row
+            }
+        }
+        if (validCount == 0 || validCount == width * height) return null
+        // Only reframe when a large share of the footprint is empty (irregular flight strips).
+        if (validCount.toDouble() / (width * height) > 0.55) return null
+
+        val padX = ((maxCol - minCol + 1).coerceAtLeast(1) * paddingFraction)
+            .coerceAtLeast(1.0)
+        val padY = ((maxRow - minRow + 1).coerceAtLeast(1) * paddingFraction)
+            .coerceAtLeast(1.0)
+        val left = ((minCol - padX) / width).coerceIn(0.0, 0.999)
+        val top = ((minRow - padY) / height).coerceIn(0.0, 0.999)
+        val right = ((maxCol + 1 + padX) / width).coerceIn(left + 0.001, 1.0)
+        val bottom = ((maxRow + 1 + padY) / height).coerceIn(top + 0.001, 1.0)
+        return NormalizedRasterBounds(left, top, right, bottom).sanitized()
+    }
+
+    /**
      * Render a terrain-analysis bitmap.
      *
      * Modes: 0 single hillshade, 1 multi-directional hillshade, 2 slope, 3 local relief,
@@ -51,7 +87,6 @@ class ElevationGrid(
         contrast: Float = 1.5f,
         visualizationMode: Int = 0,
         overlayType: Int = 0,
-
         overlayOpacity: Float = 0.5f,
         zScale: Float = 1f,
         featureScaleMeters: Float = 6f,
@@ -97,8 +132,7 @@ class ElevationGrid(
             minElevation = 0f
             maxElevation = 1f
         }
-        val elevationRange = (maxElevation - minElevation).takeIf { 
-it > 0f } ?: 1f
+        val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
         val azimuth = normalizeDegrees(sunAzimuth)
         val altitude = sunAltitude.coerceIn(1f, 89f)
         val contrastValue = contrast.coerceIn(0.5f, 4f)
@@ -131,8 +165,7 @@ it > 0f } ?: 1f
                     5 -> {
                         val stats = requireNotNull(local)
                         val residual = abs(stats.residual[index]) / residualScale
-                        val roughness = stats.
-roughness[index] / roughnessScale
+                        val roughness = stats.roughness[index] / roughnessScale
                         val bend = abs(requireNotNull(curvature)[index]) / curvatureScale
                         val score = ((residual * 0.58f + bend * 0.27f + roughness * 0.15f) *
                             analysisSensitivity.coerceIn(0.4f, 2.5f)).coerceIn(0f, 1f)
@@ -178,8 +211,7 @@ roughness[index] / roughnessScale
         fun at(px: Int, py: Int): Float = elevations[index(px, py)]
         val z00 = at(x - 1, y - 1)
         val z01 = at(x, y - 1)
-   
-     val z02 = at(x + 1, y - 1)
+        val z02 = at(x + 1, y - 1)
         val z10 = at(x - 1, y)
         val z12 = at(x + 1, y)
         val z20 = at(x - 1, y + 1)
@@ -222,7 +254,6 @@ roughness[index] / roughnessScale
         val adjusted = ((rawShade - 0.5f) * contrast + 0.5f).coerceIn(0f, 1f)
         val illumination = 0.18f + adjusted * 0.82f
         return Color.rgb(
-
             (Color.red(baseColor) * illumination).toInt().coerceIn(0, 255),
             (Color.green(baseColor) * illumination).toInt().coerceIn(0, 255),
             (Color.blue(baseColor) * illumination).toInt().coerceIn(0, 255),
@@ -263,8 +294,7 @@ roughness[index] / roughnessScale
                 val mean = localSum / count
                 val variance = max(0.0, localSquareSum / count - mean * mean)
                 val index = y * width + x
-                residual[i
-ndex] = (elevations[index] - mean).toFloat()
+                residual[index] = (elevations[index] - mean).toFloat()
                 roughness[index] = sqrt(variance).toFloat()
             }
         }
@@ -315,8 +345,7 @@ ndex] = (elevations[index] - mean).toFloat()
         if (overlayType == 1) {
             val sectionX = max(1, width / 2)
             val sectionY = max(1, height / 2)
-            val isSectionLine = x % sectionX == 0 || y % se
-ctionY == 0
+            val isSectionLine = x % sectionX == 0 || y % sectionY == 0
             val roadY = height * 0.65f + sin(x * 0.08f) * height * 0.12f
             val isRoad = abs(y - roadY) < max(1.5f, height / 100f)
             if (isSectionLine) return Color.rgb(180, 150, 110)
@@ -361,8 +390,7 @@ ctionY == 0
 
     private fun aspectColor(dx: Float, dy: Float, slopeRadians: Float, shade: Float): Int {
         if (slopeRadians < Math.toRadians(1.0).toFloat()) return Color.rgb(148, 148, 148)
-        val degrees = ((Math.toDegrees(ko
-tlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
+        val degrees = ((Math.toDegrees(kotlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
         val vivid = Color.HSVToColor(floatArrayOf(degrees, 0.82f, 0.95f))
         return shadePalette(vivid, 0.35f + shade * 0.65f, 0.72f)
     }
@@ -404,8 +432,7 @@ tlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
         2 -> when {
             percent < 0.2f -> blend(Color.rgb(34, 112, 63), Color.rgb(46, 139, 87), percent / 0.2f)
             percent < 0.6f -> blend(Color.rgb(46, 139, 87), Color.rgb(196, 183, 101), (percent - 0.2f) / 0.4f)
-      
-      percent < 0.85f -> blend(Color.rgb(196, 183, 101), Color.rgb(130, 80, 40), (percent - 0.6f) / 0.25f)
+            percent < 0.85f -> blend(Color.rgb(196, 183, 101), Color.rgb(130, 80, 40), (percent - 0.6f) / 0.25f)
             else -> blend(Color.rgb(130, 80, 40), Color.rgb(210, 210, 215), (percent - 0.85f) / 0.15f)
         }
         else -> Color.GRAY

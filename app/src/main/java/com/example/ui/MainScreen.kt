@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -182,6 +183,7 @@ private fun TerrainTab(
             viewportResetKey = viewportResetKey.intValue,
             showSurveyCursor = false,
             showCoordinateHud = false,
+            contentBounds = remember(elevationGrid) { elevationGrid.validContentBounds() },
             onViewportChanged = { bounds, zoom ->
                 visibleBounds.value = bounds
                 zoomLevel.value = zoom
@@ -238,7 +240,10 @@ private fun TerrainTab(
         Surface(
             shape = RoundedCornerShape(10.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-            modifier = Modifier.align(Alignment.BottomStart).padding(14.dp),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 14.dp, end = if (canRefine) 168.dp else 14.dp, bottom = 14.dp)
+                .fillMaxWidth(if (canRefine) 0.58f else 0.92f),
         ) {
             Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
                 val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
@@ -247,11 +252,19 @@ private fun TerrainTab(
                     "${elevationGrid.width}×${elevationGrid.height} · ${widthMeters.format(0)}×${heightMeters.format(0)} m · ${elevationGrid.cellSizeMeters.toDouble().format(2)} m/cell",
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (showControls.value) "Controls open" else "Pinch to zoom · drag to pan · Tune for analysis",
+                    when {
+                        showControls.value -> "Controls open"
+                        detailMessage != null -> detailMessage!!
+                        else -> "Pinch to zoom · drag to pan · Tune for analysis"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -260,7 +273,10 @@ private fun TerrainTab(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
             tonalElevation = 6.dp,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(14.dp)
+                .widthIn(max = 168.dp),
         ) {
             Column(
                 modifier = Modifier.padding(10.dp),
@@ -268,26 +284,19 @@ private fun TerrainTab(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    "${zoomLevel.value.format(1)}× · pan to your target area",
+                    "${zoomLevel.value.format(1)}× · pan to target",
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
                 )
                 Button(
                     onClick = { viewModel.refineTerrain(visibleBounds.value) },
                     enabled = zoomLevel.value >= 1.5f && !isRefining,
                 ) {
-                    Text(if (isRefining) "Reading original LAZ…" else "Load detail here")
+                    Text(if (isRefining) "Reading LAZ…" else "Load detail here")
                 }
                 if (isDetailed) TextButton(onClick = viewModel::showWholeTerrain) {
                     Text("Whole file")
-                }
-                detailMessage?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                    )
                 }
             }
         }

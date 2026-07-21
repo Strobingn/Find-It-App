@@ -1,4 +1,5 @@
 package com.example.ui.components
+
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -40,12 +41,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.uni
-t.sp
+import androidx.compose.ui.unit.sp
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary
+import kotlin.math.min
+
 enum class LidarCanvasMode { SURVEY, EXPLORE }
+
 @Composable
 fun LidarMapCanvas(
     bitmap: Bitmap?,
@@ -63,10 +66,12 @@ fun LidarMapCanvas(
     viewportResetKey: Int = 0,
     showSurveyCursor: Boolean = true,
     showCoordinateHud: Boolean = true,
+    /** When set, initial/reset view zooms to this sparse content AABB instead of the full empty footprint. */
+    contentBounds: NormalizedRasterBounds? = null,
     onViewportChanged: (NormalizedRasterBounds, Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
-    // Cache ImageBitmap — recreating every drag frame can crash if Bitmap is mid-render
+    // Cache ImageBitmap - recreating every drag frame can crash if Bitmap is mid-render
     val imageBitmap = remember(bitmap) {
         try {
             bitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
@@ -77,20 +82,55 @@ fun LidarMapCanvas(
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
-    LaunchedEffect(viewportResetKey, mode, bitmap) {
-        zoom = 1f
-        pan = Offset.Zero
+
+    LaunchedEffect(viewportResetKey, mode, bitmap, contentBounds, viewportSize) {
+        val image = imageBitmap
+        val content = contentBounds?.sanitized()
+        if (
+            mode == LidarCanvasMode.EXPLORE &&
+            image != null &&
+            content != null &&
+            viewportSize.width > 0 &&
+            viewportSize.height > 0
+        ) {
+            val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
+            val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
+            val fit = min(viewportWidth / image.width, viewportHeight / image.height)
+            val contentWidth = (content.right - content.left).toFloat().coerceAtLeast(0.001f)
+            val contentHeight = (content.bottom - content.top).toFloat().coerceAtLeast(0.001f)
+            val framedZoom = min(1f / contentWidth, 1f / contentHeight).coerceIn(1f, 32f)
+            val displayWidth = image.width * fit * framedZoom
+            val displayHeight = image.height * fit * framedZoom
+            val contentCenterX = ((content.left + content.right) * 0.5).toFloat()
+            val contentCenterY = ((content.top + content.bottom) * 0.5).toFloat()
+            // Pan so the content AABB center lands on the viewport center.
+            val desiredPanX = viewportWidth * 0.5f - (contentCenterX * displayWidth)
+            val desiredPanY = viewportHeight * 0.5f - (contentCenterY * displayHeight)
+            // Convert from absolute image-origin pan to the canvas's centered-image pan model.
+            val imageLeftAtZeroPan = (viewportWidth - displayWidth) * 0.5f
+            val imageTopAtZeroPan = (viewportHeight - displayHeight) * 0.5f
+            val maxPanX = ((displayWidth - viewportWidth) * 0.5f).coerceAtLeast(0f)
+            val maxPanY = ((displayHeight - viewportHeight) * 0.5f).coerceAtLeast(0f)
+            zoom = framedZoom
+            pan = Offset(
+                x = (desiredPanX - imageLeftAtZeroPan).coerceIn(-maxPanX, maxPanX),
+                y = (desiredPanY - imageTopAtZeroPan).coerceIn(-maxPanY, maxPanY),
+            )
+        } else {
+            zoom = 1f
+            pan = Offset.Zero
+        }
     }
+
     LaunchedEffect(zoom, pan, viewportSize, imageBitmap) {
         val image = imageBitmap ?: return@LaunchedEffect
         val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
         val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
-        val fit = viewportWidth / image.width
+        val fit = min(viewportWidth / image.width, viewportHeight / image.height)
         val displayWidth = image.width * fit * zoom
         val displayHeight = image.height * fit * zoom
         val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
-        val imageTop = (view
-portHeight - displayHeight) * 0.5f + pan.y
+        val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
         val bounds = NormalizedRasterBounds(
             left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
             top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
@@ -99,6 +139,7 @@ portHeight - displayHeight) * 0.5f + pan.y
         ).sanitized()
         onViewportChanged(bounds, zoom)
     }
+
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         if (mode == LidarCanvasMode.EXPLORE) {
             val nextZoom = (zoom * zoomChange).coerceIn(1f, 32f)
@@ -106,7 +147,7 @@ portHeight - displayHeight) * 0.5f + pan.y
             val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
             val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
             val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
-            val fit = viewportWidth / sourceWidth
+            val fit = min(viewportWidth / sourceWidth, viewportHeight / sourceHeight)
             val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
             val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
             zoom = nextZoom
@@ -116,6 +157,7 @@ portHeight - displayHeight) * 0.5f + pan.y
             )
         }
     }
+
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
@@ -126,14 +168,13 @@ portHeight - displayHeight) * 0.5f + pan.y
         if (imageBitmap != null && bitmap != null) {
             val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
                 Modifier.transformable(transformState)
-   
-         } else {
+            } else {
                 Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val canvasWidth = size.width.toFloat().coerceAtLeast(1f)
                         val canvasHeight = size.height.toFloat().coerceAtLeast(1f)
-                        val fit = canvasWidth / bitmap.width
+                        val fit = min(canvasWidth / bitmap.width, canvasHeight / bitmap.height)
                         val imageWidth = bitmap.width * fit
                         val imageHeight = bitmap.height * fit
                         val imageLeft = (canvasWidth - imageWidth) * 0.5f
@@ -163,23 +204,24 @@ portHeight - displayHeight) * 0.5f + pan.y
                     .fillMaxSize()
                     .onSizeChanged { viewportSize = it }
                     .then(interactionModifier)
-                    .testTag("lidar_canv
-as"),
+                    .testTag("lidar_canvas"),
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
-                val fit = canvasWidth / imageBitmap.width
+                val fit = min(canvasWidth / imageBitmap.width, canvasHeight / imageBitmap.height)
                 val fittedWidth = imageBitmap.width * fit
                 val fittedHeight = imageBitmap.height * fit
                 val displayWidth = fittedWidth * zoom
                 val displayHeight = fittedHeight * zoom
                 val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
                 val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
+
                 drawImage(
                     image = imageBitmap,
                     dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
                     dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
                 )
+
                 // Search grid (avoid huge loops if spacing tiny)
                 if (gridSpacing >= 1f) {
                     val cols = (100f / gridSpacing).toInt().coerceIn(1, 50)
@@ -200,12 +242,12 @@ as"),
                             color = Color(0xFF29B6F6),
                             start = Offset(imageLeft, py),
                             end = Offset(imageLeft + displayWidth, py),
-                      
-      strokeWidth = 1f,
+                            strokeWidth = 1f,
                             alpha = 0.35f,
                         )
                     }
                 }
+
                 for (sig in loggedSignals) {
                     val px = imageLeft + (sig.gridX.coerceIn(0f, 100f) / 100f) * displayWidth
                     val py = imageTop + (sig.gridY.coerceIn(0f, 100f) / 100f) * displayHeight
@@ -223,10 +265,12 @@ as"),
                         style = Stroke(width = 2f),
                     )
                 }
+
                 if (showSurveyCursor) {
                     val sx = imageLeft + (sweepX.coerceIn(0f, 100f) / 100f) * displayWidth
                     val sy = imageTop + (sweepY.coerceIn(0f, 100f) / 100f) * displayHeight
                     val coil = Offset(sx, sy)
+
                     drawCircle(
                         color = Color(0xFFFFD700),
                         radius = 36f,
@@ -244,8 +288,7 @@ as"),
                     drawLine(
                         color = Color(0xFFFFD700),
                         start = Offset(sx - 10f, sy),
-                        end =
- Offset(sx + 10f, sy),
+                        end = Offset(sx + 10f, sy),
                         strokeWidth = 2f,
                         alpha = 0.8f,
                     )
@@ -259,6 +302,7 @@ as"),
                     drawCircle(color = Color.White, radius = 3f, center = coil)
                 }
             }
+
             // --- GEOSPATIAL GIS HUD ---
             Box(
                 modifier = Modifier
@@ -279,13 +323,14 @@ as"),
                         letterSpacing = 0.5.sp,
                     )
                     Text(
-                        text = "${geoMetadata.crs} • ${geoMetadata.datum}",
+                        text = "${geoMetadata.crs} ΓÇó ${geoMetadata.datum}",
                         color = Color.LightGray,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
             }
+
             if (showCoordinateHud) Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -293,8 +338,7 @@ as"),
                     .padding(10.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xE60D0E12))
-                    .bord
-er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
+                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
                     .padding(8.dp),
             ) {
                 if (currentLat != null && currentLon != null) {
@@ -302,7 +346,7 @@ er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
                         GeoSpatialLibrary.geographicToUtm(currentLat, currentLon)
                     }.getOrNull()
                     Text(
-                        text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
+                        text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ┬╖  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
                         color = Color.White,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
@@ -318,7 +362,7 @@ er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
                     }
                 } else {
                     Text(
-                        text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
+                        text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} ┬╖ Geographic CRS unavailable",
                         color = Color.White,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
@@ -338,9 +382,9 @@ er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
                 )
             }
         }
+
         if (isRendering) {
-         
-   Box(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.4f)),

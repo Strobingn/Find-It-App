@@ -1,6 +1,9 @@
 package com.example.data
 
 import android.graphics.Color
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
@@ -11,6 +14,47 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class ElevationGridTest {
+    @Test
+    fun validContentBoundsFramesSparseFootprint() {
+        val width = 40
+        val height = 20
+        val valid = BooleanArray(width * height)
+        for (row in 2..8) {
+            for (col in 3..10) {
+                valid[row * width + col] = true
+            }
+        }
+        val grid = ElevationGrid(
+            width = width,
+            height = height,
+            bareEarth = FloatArray(width * height) { 10f },
+            canopySpikes = FloatArray(width * height),
+            validData = valid,
+        )
+
+        val bounds = requireNotNull(grid.validContentBounds(paddingFraction = 0.0))
+        assertEquals(3.0 / width, bounds.left, 0.001)
+        assertEquals(2.0 / height, bounds.top, 0.001)
+        assertEquals(11.0 / width, bounds.right, 0.001)
+        assertEquals(9.0 / height, bounds.bottom, 0.001)
+    }
+
+    @Test
+    fun validContentBoundsIsNullWhenCoverageIsMostlyFull() {
+        val width = 10
+        val height = 10
+        val valid = BooleanArray(width * height) { true }
+        valid[0] = false
+        val grid = ElevationGrid(
+            width = width,
+            height = height,
+            bareEarth = FloatArray(width * height) { 5f },
+            canopySpikes = FloatArray(width * height),
+            validData = valid,
+        )
+        assertNull(grid.validContentBounds())
+    }
+
     @Test
     fun flatGroundGetsBrighterAsSunRises() {
         val grid = ElevationGrid(

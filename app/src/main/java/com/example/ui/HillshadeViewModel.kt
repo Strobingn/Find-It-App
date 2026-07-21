@@ -47,8 +47,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val sunAltitude = _sunAltitude.asStateFlow()
     private val _vegetationFilter = MutableStateFlow(0.8f)
     val vegetationFilter = _vegetationFilter.asStateFlow()
-    p
-rivate val _paletteType = MutableStateFlow(1)
+    private val _paletteType = MutableStateFlow(1)
     val paletteType = _paletteType.asStateFlow()
     private val _contrast = MutableStateFlow(1.5f)
     val contrast = _contrast.asStateFlow()
@@ -82,8 +81,7 @@ rivate val _paletteType = MutableStateFlow(1)
     private var overviewTerrain: DemGenerator.TerrainLoadResult? = null
     private var currentSourceBounds = NormalizedRasterBounds.Full
 
-    private val _hillshadeBitmap = MutableStateFlow<Bitm
-ap?>(null)
+    private val _hillshadeBitmap = MutableStateFlow<Bitmap?>(null)
     val hillshadeBitmap = _hillshadeBitmap.asStateFlow()
     private val _isRendering = MutableStateFlow(false)
     val isRendering = _isRendering.asStateFlow()
@@ -182,8 +180,7 @@ ap?>(null)
         applyCustomTerrain(result)
     }
 
-    private fun applyCustom
-Terrain(result: DemGenerator.TerrainLoadResult) {
+    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult) {
         val grid = result.grid
         customGrid = result.grid
         _elevationGrid.value = result.grid
@@ -251,7 +248,8 @@ Terrain(result: DemGenerator.TerrainLoadResult) {
         val overview = overviewTerrain ?: return
         currentSourceBounds = NormalizedRasterBounds.Full
         _isDetailedTerrain.value = false
-        _terrainDetailMessage.value = "Showing the complete point-cloud footprint."
+        _terrainDetailMessage.value =
+            "Complete point-cloud footprint. Dark gaps have no returns — zoom a strip, then Load detail."
         applyCustomTerrain(overview)
     }
 
@@ -276,8 +274,7 @@ Terrain(result: DemGenerator.TerrainLoadResult) {
     }
     fun updateSunAltitude(value: Float) { _sunAltitude.value = value.coerceIn(5f, 85f); scheduleRender() }
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
-    fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleR
-ender() }
+    fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateContrast(value: Float) { _contrast.value = value.coerceIn(1f, 2.5f); scheduleRender() }
     fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 8); scheduleRender() }
     fun updateOverlayType(value: Int) { _overlayType.value = value.coerceIn(0, 2); scheduleRender() }
@@ -328,8 +325,7 @@ ender() }
         viewModelScope.launch { signalDao.upsert(signal.toEntity()) }
     }
 
-    fun updateL
-oggedSignal(signal: TargetSignal) {
+    fun updateLoggedSignal(signal: TargetSignal) {
         viewModelScope.launch { signalDao.upsert(signal.toEntity()) }
     }
 
