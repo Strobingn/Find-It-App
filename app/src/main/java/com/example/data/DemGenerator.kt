@@ -998,6 +998,7 @@ object DemGenerator {
         val grid: ElevationGrid,
         val summary: String,
         val isBareEarth: Boolean,
+        val geoMetadata: com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata? = null,
     )
 
     /** Master entry point. LAS/LAZ is streamed; text inputs are capped at 16 MiB. */
@@ -1033,6 +1034,28 @@ object DemGenerator {
             val buffered =
                 if (inputStream is java.io.BufferedInputStream) inputStream
                 else java.io.BufferedInputStream(inputStream, 64 * 1024)
+
+            buffered.mark(16)
+            val fileHeader = ByteArray(4)
+            val headerBytes = readUpTo(buffered, fileHeader)
+            buffered.reset()
+            val isTiff = headerBytes >= 4 && (
+                fileHeader.contentEquals(byteArrayOf(0x49, 0x49, 0x2A, 0x00)) ||
+                    fileHeader.contentEquals(byteArrayOf(0x4D, 0x4D, 0x00, 0x2A))
+                )
+            if (lowerName.endsWith(".tif") || lowerName.endsWith(".tiff") || isTiff) {
+                val geotiff = GeoTiffTerrainReader.read(
+                    fileName = fileName,
+                    input = buffered,
+                    maxDimension = options.rasterResolution,
+                )
+                return TerrainLoadResult(
+                    grid = geotiff.grid,
+                    summary = geotiff.summary,
+                    isBareEarth = true,
+                    geoMetadata = geotiff.metadata,
+                )
+            }
 
             if (lowerName.endsWith(".laz")) {
                 val laz = LazTerrainReader.read(buffered, options) ?: return null

@@ -55,7 +55,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MAX_DOWNLOAD_BYTES = 250L * 1024L * 1024L
-private val supportedExtensions = setOf("las", "laz", "asc", "xyz", "csv", "txt", "dem")
+private val supportedExtensions = setOf("las", "laz", "tif", "tiff", "asc", "xyz", "csv", "txt", "dem")
 
 @Composable
 fun CustomFileLoader(
@@ -86,7 +86,7 @@ fun CustomFileLoader(
         progress = null
         if (result == null) {
             isError = true
-            message = "Could not parse $name. Supported: LAZ, LAS, ASC, XYZ, CSV/text matrices, or ZIP."
+            message = "Could not parse $name. Supported: LAZ, LAS, GeoTIFF, ASC, XYZ, CSV/text matrices, or ZIP."
         } else {
             onCustomTerrainLoaded(result)
             isError = false
@@ -111,7 +111,7 @@ fun CustomFileLoader(
     Column(modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Import terrain", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Load LAZ/LAS directly on-device, use another terrain grid, or download a direct HTTPS file. Imported grids without CRS metadata remain local-only.",
+            "Load LAZ/LAS or georeferenced GeoTIFF directly on-device, use another terrain grid, or download a direct HTTPS file. Grids without CRS metadata remain local-only.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -183,7 +183,7 @@ fun CustomFileLoader(
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (mode == 0) {
                     Button(
-                        onClick = { picker.launch(arrayOf("application/octet-stream", "text/*", "application/zip")) },
+                        onClick = { picker.launch(arrayOf("application/octet-stream", "image/tiff", "text/*", "application/zip")) },
                         enabled = !isWorking,
                         modifier = Modifier.fillMaxWidth().height(52.dp).testTag("choose_lidar_file_button"),
                     ) {
@@ -224,7 +224,7 @@ fun CustomFileLoader(
                     }
                 } else {
                     Text(
-                        "Use the NOAA Data Access Viewer (or another trusted provider), then paste a direct HTTPS link to a LAZ, LAS, ASC, XYZ, CSV, or ZIP download.",
+                        "Use the NOAA Data Access Viewer (or another trusted provider), then paste a direct HTTPS link to a LAZ, LAS, GeoTIFF, ASC, XYZ, CSV, or ZIP download.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     OutlinedButton(

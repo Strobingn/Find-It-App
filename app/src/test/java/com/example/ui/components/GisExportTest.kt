@@ -4,7 +4,9 @@ import com.example.data.DetectionSource
 import com.example.data.MetalType
 import com.example.data.TargetSignal
 import com.example.data.export.buildCsv
+import com.example.data.export.buildGeoJson
 import com.example.data.export.buildGpx
+import com.example.data.export.buildKml
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,5 +50,27 @@ class GisExportTest {
 
         assertTrue(gpx.contains("lat=\"43.1200000\""))
         assertTrue(gpx.contains("rock &amp; nail &lt;check&gt;"))
+    }
+
+    @Test
+    fun kmlAndGeoJsonUseStoredCoordinates() {
+        val located = TargetSignal(
+            id = 3,
+            gridX = 10f,
+            gridY = 20f,
+            metalType = MetalType.MANUAL_MARKER,
+            signalStrength = 18f,
+            latitude = 38.8977,
+            longitude = -77.0365,
+            source = DetectionSource.MANUAL,
+            notes = "foundation edge",
+        )
+
+        val kml = buildKml(listOf(located))
+        val geoJson = buildGeoJson(listOf(located))
+
+        assertTrue(kml.contains("-77.0365000,38.8977000,0"))
+        assertTrue(geoJson.contains("\"coordinates\":[-77.0365000,38.8977000]"))
+        assertTrue(geoJson.contains("\"type\":\"FeatureCollection\""))
     }
 }

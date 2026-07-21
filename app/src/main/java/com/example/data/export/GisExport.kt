@@ -44,6 +44,39 @@ fun buildGpx(signals: List<TargetSignal>): String = buildString {
     append("</gpx>\n")
 }
 
+fun buildKml(signals: List<TargetSignal>): String = buildString {
+    append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+    append("<kml xmlns=\"http://www.opengis.net/kml/2.2\"><Document>\n")
+    append("  <name>Find It field findings</name>\n")
+    signals.forEach { signal ->
+        val lat = signal.latitude ?: return@forEach
+        val lon = signal.longitude ?: return@forEach
+        append("  <Placemark><name>").append(xmlEscape(signal.metalType.label)).append("</name>")
+        append("<description>").append(xmlEscape(signal.notes.ifBlank { signal.status })).append("</description>")
+        append("<Point><coordinates>").append(formatDecimal(lon, 7)).append(',')
+            .append(formatDecimal(lat, 7)).append(",0</coordinates></Point></Placemark>\n")
+    }
+    append("</Document></kml>\n")
+}
+
+fun buildGeoJson(signals: List<TargetSignal>): String = buildString {
+    append("{\"type\":\"FeatureCollection\",\"features\":[")
+    signals.filter { it.latitude != null && it.longitude != null }.forEachIndexed { index, signal ->
+        if (index > 0) append(',')
+        append("{\"type\":\"Feature\",\"geometry\":{\"type\":\"Point\",\"coordinates\":[")
+        append(formatDecimal(requireNotNull(signal.longitude), 7)).append(',')
+        append(formatDecimal(requireNotNull(signal.latitude), 7)).append("]},\"properties\":{")
+        append("\"id\":").append(signal.id).append(',')
+        append("\"type\":\"").append(jsonEscape(signal.metalType.label)).append("\",")
+        append("\"source\":\"").append(jsonEscape(signal.source.name)).append("\",")
+        append("\"strength\":").append(formatDecimal(signal.signalStrength.toDouble(), 1)).append(',')
+        append("\"depthCm\":").append(signal.depthCm ?: "null").append(',')
+        append("\"status\":\"").append(jsonEscape(signal.status)).append("\",")
+        append("\"notes\":\"").append(jsonEscape(signal.notes)).append("\"}}")
+    }
+    append("]}")
+}
+
 private fun formatDecimal(value: Double, places: Int) =
     String.format(Locale.US, "%.${places}f", value)
 
@@ -55,3 +88,16 @@ private fun xmlEscape(value: String) = value
     .replace(">", "&gt;")
     .replace("\"", "&quot;")
     .replace("'", "&apos;")
+
+private fun jsonEscape(value: String) = buildString {
+    value.forEach { character ->
+        when (character) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) append("\\u%04x".format(character.code)) else append(character)
+        }
+    }
+}

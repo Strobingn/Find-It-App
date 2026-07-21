@@ -208,7 +208,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         customGrid = result.grid
         _elevationGrid.value = result.grid
         _currentSiteIndex.value = 3
-        _activeGeoMetadata.value = GeoSpatialLibrary.localGrid(
+        _activeGeoMetadata.value = result.geoMetadata ?: GeoSpatialLibrary.localGrid(
             name = "Custom imported layer",
             columns = grid.width,
             rows = grid.height,
