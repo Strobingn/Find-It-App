@@ -77,7 +77,7 @@ fun LidarMapCanvas(
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
-    LaunchedEffect(viewportResetKey, mode, bitmap) {
+    LaunchedEffect(viewportResetKey, mode) {
         zoom = 1f
         pan = Offset.Zero
     }
