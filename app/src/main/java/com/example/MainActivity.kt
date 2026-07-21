@@ -17,7 +17,7 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     setContent {
-      MyApplicationTheme {
+      MyApplicationTheme(darkTheme = true) {
         val vm: HillshadeViewModel = viewModel()
         MainScreen(viewModel = vm)
       }
