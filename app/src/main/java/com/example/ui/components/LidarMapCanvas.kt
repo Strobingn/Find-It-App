@@ -41,11 +41,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.uni
-t.sp
+import androidx.compose.ui.unit.sp
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary
+import kotlin.math.min
 
 enum class LidarCanvasMode { SURVEY, EXPLORE }
 
@@ -90,12 +90,12 @@ fun LidarMapCanvas(
         val image = imageBitmap ?: return@LaunchedEffect
         val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
         val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
-        val fit = viewportWidth / image.width
+        // CRITICAL FIX: always use contain (min) so the WHOLE image is visible at 1x
+        val fit = min(viewportWidth / image.width, viewportHeight / image.height)
         val displayWidth = image.width * fit * zoom
         val displayHeight = image.height * fit * zoom
         val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
-        val imageTop = (view
-portHeight - displayHeight) * 0.5f + pan.y
+        val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
         val bounds = NormalizedRasterBounds(
             left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
             top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
@@ -112,7 +112,8 @@ portHeight - displayHeight) * 0.5f + pan.y
             val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
             val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
             val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
-            val fit = viewportWidth / sourceWidth
+            // CRITICAL FIX: contain fit so pan limits match the actual drawn size
+            val fit = min(viewportWidth / sourceWidth, viewportHeight / sourceHeight)
             val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
             val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
             zoom = nextZoom
@@ -126,21 +127,21 @@ portHeight - displayHeight) * 0.5f + pan.y
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF1C1D21))
+            .background(Color(0xFF121316)) // slightly softer dark so the terrain stands out more
             .shadow(4.dp, RoundedCornerShape(16.dp))
             .testTag("lidar_map_canvas_container"),
     ) {
         if (imageBitmap != null && bitmap != null) {
             val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
                 Modifier.transformable(transformState)
-   
-         } else {
+            } else {
                 Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val canvasWidth = size.width.toFloat().coerceAtLeast(1f)
                         val canvasHeight = size.height.toFloat().coerceAtLeast(1f)
-                        val fit = canvasWidth / bitmap.width
+                        // CRITICAL FIX: contain
+                        val fit = min(canvasWidth / bitmap.width, canvasHeight / bitmap.height)
                         val imageWidth = bitmap.width * fit
                         val imageHeight = bitmap.height * fit
                         val imageLeft = (canvasWidth - imageWidth) * 0.5f
@@ -174,7 +175,8 @@ portHeight - displayHeight) * 0.5f + pan.y
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
-                val fit = canvasWidth / imageBitmap.width
+                // CRITICAL FIX: always contain so the complete terrain image is visible
+                val fit = min(canvasWidth / imageBitmap.width, canvasHeight / imageBitmap.height)
                 val fittedWidth = imageBitmap.width * fit
                 val fittedHeight = imageBitmap.height * fit
                 val displayWidth = fittedWidth * zoom
@@ -208,8 +210,7 @@ portHeight - displayHeight) * 0.5f + pan.y
                             color = Color(0xFF29B6F6),
                             start = Offset(imageLeft, py),
                             end = Offset(imageLeft + displayWidth, py),
-                      
-      strokeWidth = 1f,
+                            strokeWidth = 1f,
                             alpha = 0.35f,
                         )
                     }
@@ -255,8 +256,7 @@ portHeight - displayHeight) * 0.5f + pan.y
                     drawLine(
                         color = Color(0xFFFFD700),
                         start = Offset(sx - 10f, sy),
-                        end =
- Offset(sx + 10f, sy),
+                        end = Offset(sx + 10f, sy),
                         strokeWidth = 2f,
                         alpha = 0.8f,
                     )
@@ -271,29 +271,32 @@ portHeight - displayHeight) * 0.5f + pan.y
                 }
             }
 
-            // --- GEOSPATIAL GIS HUD ---
+            // --- GEOSPATIAL GIS HUD (made cleaner) ---
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(10.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xE60D0E12))
-                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xE6121316))
+                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Column {
                     Text(
-                        text = geoMetadata.siteName.uppercase(),
+                        text = geoMetadata.siteName,
                         color = Color(0xFFFFD700),
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
-                        letterSpacing = 0.5.sp,
                     )
                     Text(
-                        text = "${geoMetadata.crs} • ${geoMetadata.datum}",
-                        color = Color.LightGray,
-                        fontSize = 10.sp,
+                        text = if (geoMetadata.crs.contains("unavailable", ignoreCase = true)) {
+                            "Local grid · no GPS yet"
+                        } else {
+                            "${geoMetadata.crs} · ${geoMetadata.datum}"
+                        },
+                        color = Color(0xFFB0B3B8),
+                        fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
@@ -304,10 +307,10 @@ portHeight - displayHeight) * 0.5f + pan.y
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
                     .padding(10.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xE60D0E12))
-                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
-                    .padding(8.dp),
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xE6121316))
+                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(10.dp))
+                    .padding(10.dp),
             ) {
                 if (currentLat != null && currentLon != null) {
                     val utm = runCatching {
@@ -316,7 +319,7 @@ portHeight - displayHeight) * 0.5f + pan.y
                     Text(
                         text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
                         color = Color.White,
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                     )
@@ -324,17 +327,22 @@ portHeight - displayHeight) * 0.5f + pan.y
                         Text(
                             text = "UTM ${utm.zone}${utm.hemisphere}  E ${"%.1f".format(utm.easting)} m  N ${"%.1f".format(utm.northing)} m",
                             color = Color(0xFF64B5F6),
-                            fontSize = 10.sp,
+                            fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                         )
                     }
                 } else {
                     Text(
-                        text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
+                        text = "Local position ${sweepX.toInt()}%, ${sweepY.toInt()}%",
                         color = Color.White,
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "Tap or drag to move the survey cursor",
+                        color = Color(0xFFB0B3B8),
+                        fontSize = 11.sp,
                     )
                 }
             }
@@ -343,20 +351,28 @@ portHeight - displayHeight) * 0.5f + pan.y
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = "No LiDAR data loaded.\nSelect a template below to render.",
-                    color = Color.LightGray,
-                    modifier = Modifier.padding(16.dp),
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "No terrain loaded yet",
+                        color = Color(0xFFE0E0E0),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = "Go to Import and pick a LAZ / GeoTIFF / DEM",
+                        color = Color(0xFF9E9E9E),
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
         }
 
         if (isRendering) {
-         
-   Box(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.4f)),
+                    .background(Color.Black.copy(alpha = 0.45f)),
                 contentAlignment = Alignment.Center,
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)

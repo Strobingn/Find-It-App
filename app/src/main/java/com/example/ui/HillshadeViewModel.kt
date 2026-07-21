@@ -41,13 +41,13 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _sunAzimuth = MutableStateFlow(315f)
     val sunAzimuth = _sunAzimuth.asStateFlow()
-    private val _sunAltitude = MutableStateFlow(35f)
+    private val _sunAltitude = MutableStateFlow(45f)          // brighter default
     val sunAltitude = _sunAltitude.asStateFlow()
     private val _vegetationFilter = MutableStateFlow(0.8f)
     val vegetationFilter = _vegetationFilter.asStateFlow()
     private val _paletteType = MutableStateFlow(1)
     val paletteType = _paletteType.asStateFlow()
-    private val _contrast = MutableStateFlow(1.5f)
+    private val _contrast = MutableStateFlow(1.65f)
     val contrast = _contrast.asStateFlow()
     private val _visualizationMode = MutableStateFlow(0)
     val visualizationMode = _visualizationMode.asStateFlow()
@@ -57,7 +57,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val overlayOpacity = _overlayOpacity.asStateFlow()
     private val _gridSpacing = MutableStateFlow(0f)
     val gridSpacing = _gridSpacing.asStateFlow()
-    private val _zScale = MutableStateFlow(1f)
+    private val _zScale = MutableStateFlow(1.4f)
     val zScale = _zScale.asStateFlow()
     private val _featureScaleMeters = MutableStateFlow(6f)
     val featureScaleMeters = _featureScaleMeters.asStateFlow()
@@ -181,19 +181,20 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _elevationGrid.value = result.grid
         _currentSiteIndex.value = 3
         _activeGeoMetadata.value = result.geoMetadata ?: GeoSpatialLibrary.localGrid(
-            name = "Custom imported layer",
+            name = "Your imported terrain",
             columns = grid.width,
             rows = grid.height,
             resolutionMeters = grid.cellSizeMeters.toDouble(),
         )
         _activeTerrainSummary.value = result.summary
-        _vegetationFilter.value = if (result.isBareEarth) 1f else 0f
-        _visualizationMode.value = if (result.isBareEarth) 3 else 1
-        _contrast.value = 1.85f
-        _paletteType.value = 0
-        _sunAltitude.value = 28f
+        _vegetationFilter.value = if (result.isBareEarth) 1f else 0.15f
+        // Human-friendly brighter defaults so the map is not a black void
+        _visualizationMode.value = 1          // multi-directional hillshade (clearer)
+        _contrast.value = 1.9f
+        _paletteType.value = 1                // warmer palette, not pure gray
+        _sunAltitude.value = 48f              // higher sun = less dark shadows
         _sunAzimuth.value = 315f
-        _zScale.value = 2f
+        _zScale.value = 1.8f
         updateCoordinates()
         scheduleRender(immediate = true)
     }
@@ -206,11 +207,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         val widthFraction = absoluteBounds.right - absoluteBounds.left
         val heightFraction = absoluteBounds.bottom - absoluteBounds.top
         if (widthFraction >= 0.98 && heightFraction >= 0.98) {
-            _terrainDetailMessage.value = "Zoom farther in before loading detail."
+            _terrainDetailMessage.value = "Zoom in a bit more first, then load detail."
             return
         }
         _isRefiningTerrain.value = true
-        _terrainDetailMessage.value = "Reading original returns for this viewport…"
+        _terrainDetailMessage.value = "Loading higher detail for this area…"
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching {
                 getApplication<Application>().contentResolver.openInputStream(Uri.parse(source.uri))?.buffered()?.use { input ->
@@ -227,11 +228,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             withContext(Dispatchers.Main.immediate) {
                 _isRefiningTerrain.value = false
                 if (result == null) {
-                    _terrainDetailMessage.value = "Could not load detail from the original LAZ/LAS document."
+                    _terrainDetailMessage.value = "Could not load extra detail from the original file."
                 } else {
                     currentSourceBounds = absoluteBounds
                     _isDetailedTerrain.value = true
-                    _terrainDetailMessage.value = "Detailed viewport loaded from the original point cloud."
+                    _terrainDetailMessage.value = "Higher detail loaded for this area."
                     applyCustomTerrain(result)
                 }
             }
@@ -242,7 +243,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         val overview = overviewTerrain ?: return
         currentSourceBounds = NormalizedRasterBounds.Full
         _isDetailedTerrain.value = false
-        _terrainDetailMessage.value = "Showing the complete point-cloud footprint."
+        _terrainDetailMessage.value = "Showing the full survey area."
         applyCustomTerrain(overview)
     }
 
