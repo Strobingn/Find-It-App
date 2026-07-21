@@ -64,6 +64,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val gridSpacing = _gridSpacing.asStateFlow()
     private val _zScale = MutableStateFlow(1f)
     val zScale = _zScale.asStateFlow()
+    private val _featureScaleMeters = MutableStateFlow(6f)
+    val featureScaleMeters = _featureScaleMeters.asStateFlow()
+    private val _analysisSensitivity = MutableStateFlow(1.2f)
+    val analysisSensitivity = _analysisSensitivity.asStateFlow()
+    private val _contourIntervalMeters = MutableStateFlow(0f)
+    val contourIntervalMeters = _contourIntervalMeters.asStateFlow()
+    private val _activeTerrainSummary = MutableStateFlow("Built-in demonstration terrain")
+    val activeTerrainSummary = _activeTerrainSummary.asStateFlow()
 
     private val _hillshadeBitmap = MutableStateFlow<Bitmap?>(null)
     val hillshadeBitmap = _hillshadeBitmap.asStateFlow()
@@ -166,6 +174,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                             overlayType = _overlayType.value,
                             overlayOpacity = _overlayOpacity.value,
                             zScale = _zScale.value,
+                            featureScaleMeters = _featureScaleMeters.value,
+                            analysisSensitivity = _analysisSensitivity.value,
+                            contourIntervalMeters = _contourIntervalMeters.value,
                         )
                     }
                     if (generation == renderGeneration) _hillshadeBitmap.value = bitmap
@@ -184,6 +195,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (index in 0..2) {
             _elevationGrid.value = DemGenerator.generateSite(index)
             _activeGeoMetadata.value = GeoSpatialLibrary.SITES_METADATA[index]
+            _activeTerrainSummary.value = "Built-in simulated terrain"
         } else {
             _elevationGrid.value = requireNotNull(customGrid)
         }
@@ -191,9 +203,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         scheduleRender(immediate = true)
     }
 
-    fun setCustomGrid(grid: ElevationGrid) {
-        customGrid = grid
-        _elevationGrid.value = grid
+    fun setCustomTerrain(result: DemGenerator.TerrainLoadResult) {
+        val grid = result.grid
+        customGrid = result.grid
+        _elevationGrid.value = result.grid
         _currentSiteIndex.value = 3
         _activeGeoMetadata.value = GeoSpatialLibrary.localGrid(
             name = "Custom imported layer",
@@ -201,8 +214,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             rows = grid.height,
             resolutionMeters = grid.cellSizeMeters.toDouble(),
         )
-        _vegetationFilter.value = 1f
-        _visualizationMode.value = 3
+        _activeTerrainSummary.value = result.summary
+        _vegetationFilter.value = if (result.isBareEarth) 1f else 0f
+        _visualizationMode.value = if (result.isBareEarth) 3 else 1
         _contrast.value = 1.85f
         _paletteType.value = 0
         _sunAltitude.value = 28f
@@ -212,16 +226,46 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         scheduleRender(immediate = true)
     }
 
-    fun updateSunAzimuth(value: Float) { _sunAzimuth.value = value.coerceIn(0f, 360f); scheduleRender() }
+    fun setCustomGrid(grid: ElevationGrid) {
+        setCustomTerrain(
+            DemGenerator.TerrainLoadResult(
+                grid = grid,
+                summary = "Custom ${grid.width}×${grid.height} elevation grid",
+                isBareEarth = true,
+            ),
+        )
+    }
+
+    fun updateSunAzimuth(value: Float) {
+        _sunAzimuth.value = value.coerceIn(0f, 360f)
+        scheduleRender()
+    }
+    fun rotateSunAzimuth(deltaDegrees: Float) {
+        val value = _sunAzimuth.value + deltaDegrees
+        _sunAzimuth.value = ((value % 360f) + 360f) % 360f
+        scheduleRender()
+    }
     fun updateSunAltitude(value: Float) { _sunAltitude.value = value.coerceIn(5f, 85f); scheduleRender() }
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
     fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateContrast(value: Float) { _contrast.value = value.coerceIn(1f, 2.5f); scheduleRender() }
-    fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 3); scheduleRender() }
+    fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 5); scheduleRender() }
     fun updateOverlayType(value: Int) { _overlayType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateOverlayOpacity(value: Float) { _overlayOpacity.value = value.coerceIn(0.1f, 0.9f); scheduleRender() }
     fun updateGridSpacing(value: Float) { _gridSpacing.value = value.coerceIn(0f, 20f) }
     fun updateZScale(value: Float) { _zScale.value = value.coerceIn(0.5f, 4f); scheduleRender() }
+    fun updateFeatureScale(value: Float) {
+        _featureScaleMeters.value = value.coerceIn(1f, 40f)
+        scheduleRender()
+    }
+    fun updateAnalysisSensitivity(value: Float) {
+        _analysisSensitivity.value = value.coerceIn(0.4f, 2.5f)
+        scheduleRender()
+    }
+    fun updateContourInterval(value: Float) {
+        _contourIntervalMeters.value = value.coerceIn(0f, 5f)
+        scheduleRender()
+    }
 
     fun setSweepPosition(x: Float, y: Float) {
         _sweepX.value = x.coerceIn(0f, 100f)

@@ -287,7 +287,107 @@ object DemGenerator {
         val usedClassificationFilter: Boolean,
         val pointFormat: Int,
         val note: String,
+        val requestedGroundMode: GroundSurfaceMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+        val appliedGroundMode: GroundSurfaceMode = if (usedClassificationFilter) {
+            GroundSurfaceMode.SOURCE_CLASSIFIED
+        } else {
+            GroundSurfaceMode.AUTO_LOWEST
+        },
+        val sampledPoints: Int = totalPointsRead,
+        val wasTruncated: Boolean = false,
     )
+
+    /**
+     * Configurable LAS reader used by the import workspace. It preserves the file footprint aspect
+     * ratio and can build classified ground, automatic ground, or highest-return surface rasters.
+     */
+    fun parseLasStreamDetailed(
+        inputStream: java.io.InputStream,
+        options: LidarImportOptions,
+    ): LasLoadResult? {
+        return try {
+            val buffered = if (inputStream is java.io.BufferedInputStream) {
+                inputStream
+            } else {
+                java.io.BufferedInputStream(inputStream, 256 * 1024)
+            }
+            buffered.mark(4_096)
+            val header = ByteArray(375)
+            val headerBytes = readUpTo(buffered, header)
+            buffered.reset()
+            if (headerBytes < 227 || !header.copyOfRange(0, 4).contentEquals("LASF".toByteArray())) {
+                return null
+            }
+
+            val versionMajor = header[24].toInt() and 0xFF
+            val versionMinor = header[25].toInt() and 0xFF
+            val offsetToPoints = readIntLE(header, 96)
+            val rawPointFormat = header[104].toInt() and 0xFF
+            val pointFormat = rawPointFormat and 0x3F
+            val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
+            if (rawPointFormat and 0xC0 != 0) return LazTerrainReader.read(buffered, options)
+            if (offsetToPoints < 227 || pointRecordLength < 20 || pointRecordLength > 512) return null
+
+            var pointCount = readIntLE(header, 107).toLong() and 0xFFFFFFFFL
+            if (versionMajor == 1 && versionMinor >= 4 && headerBytes >= 255) {
+                readLongLE(header, 247).takeIf { it > 0 }?.let { pointCount = it }
+            }
+            val scaleX = readDoubleLE(header, 131)
+            val scaleY = readDoubleLE(header, 139)
+            val scaleZ = readDoubleLE(header, 147)
+            val offsetX = readDoubleLE(header, 155)
+            val offsetY = readDoubleLE(header, 163)
+            val offsetZ = readDoubleLE(header, 171)
+            val maxX = readDoubleLE(header, 179)
+            val minX = readDoubleLE(header, 187)
+            val maxY = readDoubleLE(header, 195)
+            val minY = readDoubleLE(header, 203)
+            if (!listOf(scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, maxX, minX, maxY, minY)
+                    .all { it.isFinite() } || maxX <= minX || maxY <= minY
+            ) {
+                return null
+            }
+
+            if (!skipFully(buffered, offsetToPoints)) return null
+            val rasterizer = LidarRasterizer(
+                minX = minX,
+                maxX = maxX,
+                minY = minY,
+                maxY = maxY,
+                options = options,
+                declaredPointCount = pointCount,
+            )
+            val classOffset = if (pointFormat >= 6) 16 else 15
+            val classMask = if (pointFormat >= 6) 0xFF else 0x1F
+            val keyPointMask = if (pointFormat >= 6) 0x02 else 0x40
+            val keyPointOffset = if (pointFormat >= 6) 15 else 15
+            val record = ByteArray(pointRecordLength)
+            while (readFullyRecord(buffered, record)) {
+                val rawX = readIntLE(record, 0)
+                val rawY = readIntLE(record, 4)
+                val rawZ = readIntLE(record, 8)
+                val classification = record[classOffset].toInt() and classMask
+                val isKeyPoint = record[keyPointOffset].toInt() and keyPointMask != 0
+                if (!rasterizer.addPoint(
+                        x = rawX * scaleX + offsetX,
+                        y = rawY * scaleY + offsetY,
+                        z = (rawZ * scaleZ + offsetZ).toFloat(),
+                        classification = classification,
+                        isKeyPoint = isKeyPoint,
+                    )
+                ) {
+                    break
+                }
+            }
+            rasterizer.finish(
+                pointFormat = pointFormat,
+                sourceLabel = "LAS $versionMajor.$versionMinor format $pointFormat",
+            )
+        } catch (exception: Exception) {
+            exception.printStackTrace()
+            null
+        }
+    }
 
     /**
      * Reads LAS point records incrementally. Only a single record and the 128×128 bins are retained,
@@ -900,7 +1000,7 @@ object DemGenerator {
         val isBareEarth: Boolean,
     )
 
-    /** Master entry point. LAS is streamed; text inputs are capped at 16 MiB. */
+    /** Master entry point. LAS/LAZ is streamed; text inputs are capped at 16 MiB. */
     fun parseFromStream(
         fileName: String,
         inputStream: java.io.InputStream,
@@ -911,37 +1011,63 @@ object DemGenerator {
         fileName: String,
         inputStream: java.io.InputStream,
         groundOnly: Boolean = true,
+    ): TerrainLoadResult? = parseFromStreamDetailed(
+        fileName = fileName,
+        inputStream = inputStream,
+        options = LidarImportOptions(
+            groundMode = if (groundOnly) {
+                GroundSurfaceMode.SOURCE_CLASSIFIED
+            } else {
+                GroundSurfaceMode.AUTO_LOWEST
+            },
+        ),
+    )
+
+    fun parseFromStreamDetailed(
+        fileName: String,
+        inputStream: java.io.InputStream,
+        options: LidarImportOptions,
     ): TerrainLoadResult? {
         return try {
             val lowerName = fileName.lowercase()
-            if (lowerName.endsWith(".laz")) {
-                return null // compressed LAZ needs a native decoder — use .las
-            }
-
             val buffered =
                 if (inputStream is java.io.BufferedInputStream) inputStream
                 else java.io.BufferedInputStream(inputStream, 64 * 1024)
 
-            if (lowerName.endsWith(".las")) {
-                val las = parseLasStreamDetailed(buffered, groundOnly = groundOnly) ?: return null
+            if (lowerName.endsWith(".laz")) {
+                val laz = LazTerrainReader.read(buffered, options) ?: return null
                 return TerrainLoadResult(
-                    grid = las.grid,
-                    summary = las.note,
-                    isBareEarth = las.usedClassificationFilter || groundOnly,
+                    grid = laz.grid,
+                    summary = laz.note,
+                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
                 )
             }
 
-            // Also detect LAS by signature even if extension wrong
-            buffered.mark(4)
-            val signature = ByteArray(4)
-            val signatureBytes = readUpTo(buffered, signature)
-            buffered.reset()
-            if (signatureBytes == 4 && signature.contentEquals("LASF".toByteArray())) {
-                val las = parseLasStreamDetailed(buffered, groundOnly = groundOnly) ?: return null
+            if (lowerName.endsWith(".las")) {
+                val las = parseLasStreamDetailed(buffered, options) ?: return null
                 return TerrainLoadResult(
                     grid = las.grid,
                     summary = las.note,
-                    isBareEarth = las.usedClassificationFilter || groundOnly,
+                    isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+                )
+            }
+
+            // Detect LAS or LAZ by the common LASF signature and point-format compression bits.
+            buffered.mark(512)
+            val signature = ByteArray(105)
+            val signatureBytes = readUpTo(buffered, signature)
+            buffered.reset()
+            if (signatureBytes >= 105 && signature.copyOfRange(0, 4).contentEquals("LASF".toByteArray())) {
+                val isCompressed = signature[104].toInt() and 0xC0 != 0
+                val las = if (isCompressed) {
+                    LazTerrainReader.read(buffered, options)
+                } else {
+                    parseLasStreamDetailed(buffered, options)
+                } ?: return null
+                return TerrainLoadResult(
+                    grid = las.grid,
+                    summary = las.note,
+                    isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
                 )
             }
 

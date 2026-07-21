@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun LidarControlPanel(
@@ -49,6 +50,12 @@ fun LidarControlPanel(
     onGridSpacingChanged: (Float) -> Unit,
     zScale: Float,
     onZScaleChanged: (Float) -> Unit,
+    featureScaleMeters: Float,
+    onFeatureScaleChanged: (Float) -> Unit,
+    analysisSensitivity: Float,
+    onAnalysisSensitivityChanged: (Float) -> Unit,
+    contourIntervalMeters: Float,
+    onContourIntervalChanged: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -80,9 +87,11 @@ fun LidarControlPanel(
             OptionGrid(
                 options = listOf(
                     Option(0, "Standard", "Single light source"),
-                    Option(1, "Multi-direction", "Balanced opposing light"),
+                    Option(1, "Multi-light", "Four balanced directions"),
                     Option(2, "Slope", "Highlight steep ground"),
-                    Option(3, "Foundations", "Local-relief filter"),
+                    Option(3, "Local relief", "Banks, walls and cellars"),
+                    Option(4, "Curvature", "Breaks and edges in slope"),
+                    Option(5, "Disturbance", "Screen anomaly candidates"),
                 ),
                 selected = visualizationMode,
                 onSelected = onVisualizationModeChanged,
@@ -144,6 +153,26 @@ fun LidarControlPanel(
         }
 
         ControlCard("Lighting and relief") {
+            Text(
+                "Light direction: ${compassDirection(sunAzimuth)}",
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+            )
+            OptionGrid(
+                options = listOf(
+                    Option(0, "N", "0°"),
+                    Option(45, "NE", "45°"),
+                    Option(90, "E", "90°"),
+                    Option(135, "SE", "135°"),
+                    Option(180, "S", "180°"),
+                    Option(225, "SW", "225°"),
+                    Option(270, "W", "270°"),
+                    Option(315, "NW", "315°"),
+                ),
+                selected = ((sunAzimuth / 45f).roundToInt() * 45).mod(360),
+                onSelected = { onSunAzimuthChanged(it.toFloat()) },
+                tagPrefix = "sun_direction",
+            )
             LabeledSlider(
                 label = "Sun azimuth",
                 displayValue = "${sunAzimuth.toInt()}°",
@@ -178,6 +207,42 @@ fun LidarControlPanel(
             )
         }
 
+        ControlCard("Feature screening") {
+            LabeledSlider(
+                label = "Feature scale",
+                displayValue = String.format(Locale.US, "%.1f m", featureScaleMeters),
+                value = featureScaleMeters,
+                range = 1f..40f,
+                onValueChange = onFeatureScaleChanged,
+                modifier = Modifier.testTag("feature_scale_slider"),
+            )
+            LabeledSlider(
+                label = "Candidate sensitivity",
+                displayValue = String.format(Locale.US, "%.1f×", analysisSensitivity),
+                value = analysisSensitivity,
+                range = 0.4f..2.5f,
+                onValueChange = onAnalysisSensitivityChanged,
+                modifier = Modifier.testTag("analysis_sensitivity_slider"),
+            )
+            LabeledSlider(
+                label = "Measured contours",
+                displayValue = if (contourIntervalMeters < 0.05f) {
+                    "Off"
+                } else {
+                    String.format(Locale.US, "%.2f m", contourIntervalMeters)
+                },
+                value = contourIntervalMeters,
+                range = 0f..5f,
+                onValueChange = onContourIntervalChanged,
+                modifier = Modifier.testTag("contour_interval_slider"),
+            )
+            Text(
+                "Local relief, curvature, and disturbance views flag terrain shapes for review; they do not identify or date a foundation by themselves.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
         ControlCard("Elevation palette") {
             OptionGrid(
                 options = listOf(
@@ -191,6 +256,12 @@ fun LidarControlPanel(
             )
         }
     }
+}
+
+private fun compassDirection(azimuth: Float): String {
+    val directions = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+    val normalized = ((azimuth % 360f) + 360f) % 360f
+    return directions[((normalized / 45f).roundToInt()).mod(directions.size)]
 }
 
 private data class Option(val value: Int, val title: String, val subtitle: String)

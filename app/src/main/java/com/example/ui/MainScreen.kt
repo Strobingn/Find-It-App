@@ -12,16 +12,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.CompassCalibration
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.RotateLeft
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -32,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -39,20 +47,25 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.LidarControlPanel
+import com.example.ui.components.LidarCanvasMode
 import com.example.ui.components.LidarMapCanvas
 import com.example.ui.components.MagnetometerGauge
 import com.example.ui.components.TargetLoggerPanel
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private data class AppTab(val label: String, val icon: ImageVector)
 
@@ -67,10 +80,11 @@ private val tabs = listOf(
 @Composable
 fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     val selectedTab = rememberSaveable { mutableIntStateOf(0) }
+    val terrainFocusMode = rememberSaveable { mutableStateOf(false) }
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
+            if (!terrainFocusMode.value) TopAppBar(
                 title = {
                     Column {
                         Text("Find It", fontWeight = FontWeight.Bold)
@@ -84,11 +98,14 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
             )
         },
         bottomBar = {
-            NavigationBar {
+            if (!terrainFocusMode.value) NavigationBar {
                 tabs.forEachIndexed { index, tab ->
                     NavigationBarItem(
                         selected = selectedTab.intValue == index,
-                        onClick = { selectedTab.intValue = index },
+                        onClick = {
+                            selectedTab.intValue = index
+                            terrainFocusMode.value = false
+                        },
                         icon = { Icon(tab.icon, contentDescription = null) },
                         label = { Text(tab.label) },
                     )
@@ -98,9 +115,17 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     ) { padding ->
         when (selectedTab.intValue) {
             0 -> ScanTab(viewModel, padding)
-            1 -> TerrainTab(viewModel, padding)
+            1 -> TerrainTab(
+                viewModel = viewModel,
+                padding = padding,
+                focusMode = terrainFocusMode.value,
+                onFocusModeChanged = { terrainFocusMode.value = it },
+            )
             2 -> FindsTab(viewModel, padding)
-            else -> ImportTab(viewModel, padding)
+            else -> ImportTab(viewModel, padding) {
+                selectedTab.intValue = 1
+                terrainFocusMode.value = false
+            }
         }
     }
 }
@@ -187,7 +212,7 @@ private fun ScanTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
                     }
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        map(Modifier.fillMaxWidth().aspectRatio(1.25f).heightIn(min = 280.dp, max = 480.dp))
+                        map(Modifier.fillMaxWidth().aspectRatio(1.15f).heightIn(min = 340.dp, max = 580.dp))
                         gauge(Modifier.fillMaxWidth())
                     }
                 }
@@ -268,8 +293,21 @@ private fun SettingSwitch(
 }
 
 @Composable
-private fun TerrainTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+private fun TerrainTab(
+    viewModel: HillshadeViewModel,
+    padding: PaddingValues,
+    focusMode: Boolean,
+    onFocusModeChanged: (Boolean) -> Unit,
+) {
     val site by viewModel.currentSiteIndex.collectAsStateWithLifecycle()
+    val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
+    val isRendering by viewModel.isRendering.collectAsStateWithLifecycle()
+    val sweepX by viewModel.sweepX.collectAsStateWithLifecycle()
+    val sweepY by viewModel.sweepY.collectAsStateWithLifecycle()
+    val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    val elevationGrid by viewModel.elevationGrid.collectAsStateWithLifecycle()
+    val terrainSummary by viewModel.activeTerrainSummary.collectAsStateWithLifecycle()
     val azimuth by viewModel.sunAzimuth.collectAsStateWithLifecycle()
     val altitude by viewModel.sunAltitude.collectAsStateWithLifecycle()
     val vegetation by viewModel.vegetationFilter.collectAsStateWithLifecycle()
@@ -280,36 +318,160 @@ private fun TerrainTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val overlayOpacity by viewModel.overlayOpacity.collectAsStateWithLifecycle()
     val grid by viewModel.gridSpacing.collectAsStateWithLifecycle()
     val zScale by viewModel.zScale.collectAsStateWithLifecycle()
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(padding),
-        contentPadding = PaddingValues(16.dp),
+    val featureScale by viewModel.featureScaleMeters.collectAsStateWithLifecycle()
+    val sensitivity by viewModel.analysisSensitivity.collectAsStateWithLifecycle()
+    val contourInterval by viewModel.contourIntervalMeters.collectAsStateWithLifecycle()
+    val showControls = rememberSaveable { mutableStateOf(false) }
+    val viewportResetKey = rememberSaveable { mutableIntStateOf(0) }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(if (focusMode) PaddingValues(0.dp) else padding),
     ) {
-        item {
-            LidarControlPanel(
-                selectedSiteIndex = site,
-                onSiteSelected = viewModel::selectSite,
-                sunAzimuth = azimuth,
-                onSunAzimuthChanged = viewModel::updateSunAzimuth,
-                sunAltitude = altitude,
-                onSunAltitudeChanged = viewModel::updateSunAltitude,
-                vegetationFilter = vegetation,
-                onVegetationFilterChanged = viewModel::updateVegetationFilter,
-                paletteType = palette,
-                onPaletteTypeChanged = viewModel::updatePalette,
-                contrast = contrast,
-                onContrastChanged = viewModel::updateContrast,
-                visualizationMode = visualization,
-                onVisualizationModeChanged = viewModel::updateVisualizationMode,
-                overlayType = overlay,
-                onOverlayTypeChanged = viewModel::updateOverlayType,
-                overlayOpacity = overlayOpacity,
-                onOverlayOpacityChanged = viewModel::updateOverlayOpacity,
-                gridSpacing = grid,
-                onGridSpacingChanged = viewModel::updateGridSpacing,
-                zScale = zScale,
-                onZScaleChanged = viewModel::updateZScale,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        LidarMapCanvas(
+            bitmap = bitmap,
+            isRendering = isRendering,
+            sweepX = sweepX,
+            sweepY = sweepY,
+            loggedSignals = signals,
+            onSweepPositionChanged = viewModel::setSweepPosition,
+            onStopSweeping = viewModel::stopSweeping,
+            gridSpacing = grid,
+            geoMetadata = metadata,
+            currentLat = null,
+            currentLon = null,
+            mode = LidarCanvasMode.EXPLORE,
+            viewportResetKey = viewportResetKey.intValue,
+            showSurveyCursor = false,
+            showCoordinateHud = false,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(if (focusMode) 0.dp else 8.dp)
+                .testTag("terrain_workspace"),
+        )
+
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            tonalElevation = 6.dp,
+            modifier = Modifier.align(Alignment.TopCenter).padding(14.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.padding(horizontal = 4.dp),
+            ) {
+                IconButton(onClick = { viewModel.rotateSunAzimuth(-45f) }) {
+                    Icon(Icons.Default.RotateLeft, contentDescription = "Rotate light 45 degrees left")
+                }
+                Icon(
+                    Icons.Default.WbSunny,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.rotate(azimuth),
+                )
+                Text(
+                    "${compassLabel(azimuth)} ${azimuth.roundToInt()}°",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                )
+                IconButton(onClick = { viewModel.rotateSunAzimuth(45f) }) {
+                    Icon(Icons.Default.RotateRight, contentDescription = "Rotate light 45 degrees right")
+                }
+                IconButton(onClick = { viewportResetKey.intValue++ }) {
+                    Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit terrain to screen")
+                }
+                IconButton(onClick = { showControls.value = !showControls.value }) {
+                    Icon(Icons.Default.Tune, contentDescription = "Show terrain controls")
+                }
+                IconButton(onClick = { onFocusModeChanged(!focusMode) }) {
+                    Icon(
+                        if (focusMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        contentDescription = if (focusMode) "Exit full screen" else "Open full screen",
+                    )
+                }
+            }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+            modifier = Modifier.align(Alignment.BottomStart).padding(14.dp),
+        ) {
+            Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
+                val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
+                Text(
+                    "${elevationGrid.width}×${elevationGrid.height} · ${widthMeters.format(0)}×${heightMeters.format(0)} m · ${elevationGrid.cellSizeMeters.toDouble().format(2)} m/cell",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Text(
+                    if (showControls.value) "Controls open" else "Pinch to zoom · drag to pan · Tune for analysis",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = showControls.value,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                tonalElevation = 8.dp,
+                modifier = Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.72f),
+            ) {
+                LazyColumn(
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item {
+                        Text(
+                            terrainSummary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    item {
+                        LidarControlPanel(
+                            selectedSiteIndex = site,
+                            onSiteSelected = viewModel::selectSite,
+                            sunAzimuth = azimuth,
+                            onSunAzimuthChanged = viewModel::updateSunAzimuth,
+                            sunAltitude = altitude,
+                            onSunAltitudeChanged = viewModel::updateSunAltitude,
+                            vegetationFilter = vegetation,
+                            onVegetationFilterChanged = viewModel::updateVegetationFilter,
+                            paletteType = palette,
+                            onPaletteTypeChanged = viewModel::updatePalette,
+                            contrast = contrast,
+                            onContrastChanged = viewModel::updateContrast,
+                            visualizationMode = visualization,
+                            onVisualizationModeChanged = viewModel::updateVisualizationMode,
+                            overlayType = overlay,
+                            onOverlayTypeChanged = viewModel::updateOverlayType,
+                            overlayOpacity = overlayOpacity,
+                            onOverlayOpacityChanged = viewModel::updateOverlayOpacity,
+                            gridSpacing = grid,
+                            onGridSpacingChanged = viewModel::updateGridSpacing,
+                            zScale = zScale,
+                            onZScaleChanged = viewModel::updateZScale,
+                            featureScaleMeters = featureScale,
+                            onFeatureScaleChanged = viewModel::updateFeatureScale,
+                            analysisSensitivity = sensitivity,
+                            onAnalysisSensitivityChanged = viewModel::updateAnalysisSensitivity,
+                            contourIntervalMeters = contourInterval,
+                            onContourIntervalChanged = viewModel::updateContourInterval,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -332,11 +494,14 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 }
 
 @Composable
-private fun ImportTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+private fun ImportTab(viewModel: HillshadeViewModel, padding: PaddingValues, onImported: () -> Unit) {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
         item {
             CustomFileLoader(
-                onCustomGridLoaded = viewModel::setCustomGrid,
+                onCustomTerrainLoaded = {
+                    viewModel.setCustomTerrain(it)
+                    onImported()
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -344,3 +509,11 @@ private fun ImportTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 }
 
 private fun Double.format(places: Int) = String.format(Locale.US, "%.${places}f", this)
+
+private fun Float.format(places: Int) = toDouble().format(places)
+
+private fun compassLabel(azimuth: Float): String {
+    val directions = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+    val normalized = ((azimuth % 360f) + 360f) % 360f
+    return directions[((normalized / 45f).roundToInt()).mod(directions.size)]
+}

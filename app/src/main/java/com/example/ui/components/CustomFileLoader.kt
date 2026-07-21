@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Language
@@ -38,7 +39,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.data.DemGenerator
-import com.example.data.ElevationGrid
+import com.example.data.GroundSurfaceMode
+import com.example.data.LidarImportOptions
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -53,11 +55,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MAX_DOWNLOAD_BYTES = 250L * 1024L * 1024L
-private val supportedExtensions = setOf("las", "asc", "xyz", "csv", "txt", "dem")
+private val supportedExtensions = setOf("las", "laz", "asc", "xyz", "csv", "txt", "dem")
 
 @Composable
 fun CustomFileLoader(
-    onCustomGridLoaded: (ElevationGrid) -> Unit,
+    onCustomTerrainLoaded: (DemGenerator.TerrainLoadResult) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -69,15 +71,24 @@ fun CustomFileLoader(
     var progress by remember { mutableStateOf<Float?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var isError by remember { mutableStateOf(false) }
+    var groundMode by remember { mutableStateOf(GroundSurfaceMode.SOURCE_CLASSIFIED) }
+    var rasterResolution by remember { mutableStateOf(320) }
+    var smoothingRadius by remember { mutableStateOf(0) }
+
+    fun importOptions() = LidarImportOptions(
+        groundMode = groundMode,
+        rasterResolution = rasterResolution,
+        smoothingRadius = smoothingRadius,
+    )
 
     fun showResult(result: DemGenerator.TerrainLoadResult?, name: String) {
         isWorking = false
         progress = null
         if (result == null) {
             isError = true
-            message = "Could not parse $name. Supported: LAS, ASC, XYZ, CSV/text matrices, or ZIP. LAZ must be converted to LAS first."
+            message = "Could not parse $name. Supported: LAZ, LAS, ASC, XYZ, CSV/text matrices, or ZIP."
         } else {
-            onCustomGridLoaded(result.grid)
+            onCustomTerrainLoaded(result)
             isError = false
             message = "$name loaded as ${result.grid.width} × ${result.grid.height}. ${result.summary}"
         }
@@ -86,16 +97,12 @@ fun CustomFileLoader(
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         val name = displayName(context, uri)
-        if (name.substringAfterLast('.', "").lowercase() == "laz") {
-            isError = true
-            message = "Compressed LAZ is not supported on-device. Convert it to LAS, then import the LAS file."
-            return@rememberLauncherForActivityResult
-        }
+        val options = importOptions()
         isWorking = true
         message = "Reading $name…"
         scope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { parseContentUri(context, uri, name) }.getOrNull()
+                runCatching { parseContentUri(context, uri, name, options) }.getOrNull()
             }
             showResult(result, name)
         }
@@ -104,10 +111,61 @@ fun CustomFileLoader(
     Column(modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Import terrain", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Load a local DEM/LAS file, paste a rectangular elevation matrix, or download a direct HTTPS file. Imported grids without CRS metadata remain local-only.",
+            "Load LAZ/LAS directly on-device, use another terrain grid, or download a direct HTTPS file. Imported grids without CRS metadata remain local-only.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("LiDAR ground processing", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Choose how returns become a raster. This is non-destructive: the source LAZ/LAS classifications are never overwritten.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                GroundModeButton(
+                    title = "Source ground classes",
+                    subtitle = "Prefer ASPRS class 2 and legacy class 8; fall back when coverage is sparse.",
+                    selected = groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED,
+                    onClick = { groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED },
+                )
+                GroundModeButton(
+                    title = "Automatic ground estimate",
+                    subtitle = "Use lowest returns and reject isolated low noise when classes are missing.",
+                    selected = groundMode == GroundSurfaceMode.AUTO_LOWEST,
+                    onClick = { groundMode = GroundSurfaceMode.AUTO_LOWEST },
+                )
+                GroundModeButton(
+                    title = "Highest-return surface (DSM)",
+                    subtitle = "Keep trees and structures for comparison with the bare-earth model.",
+                    selected = groundMode == GroundSurfaceMode.SURFACE_MODEL,
+                    onClick = { groundMode = GroundSurfaceMode.SURFACE_MODEL },
+                )
+
+                Text("Raster detail", style = MaterialTheme.typography.labelLarge)
+                ChoiceRow(
+                    options = listOf(192 to "Overview", 320 to "Balanced", 512 to "Fine"),
+                    selected = rasterResolution,
+                    onSelected = { rasterResolution = it },
+                )
+                Text(
+                    "Fine detail preserves smaller banks and foundation edges but renders more slowly.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Text("Ground smoothing", style = MaterialTheme.typography.labelLarge)
+                ChoiceRow(
+                    options = listOf(0 to "None", 1 to "Light", 2 to "Strong"),
+                    selected = smoothingRadius,
+                    onSelected = { smoothingRadius = it },
+                )
+            }
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("Local / matrix", "Remote HTTPS").forEachIndexed { index, label ->
                 if (mode == index) {
@@ -166,7 +224,7 @@ fun CustomFileLoader(
                     }
                 } else {
                     Text(
-                        "Use the NOAA Data Access Viewer (or another trusted provider), then paste a direct HTTPS link to a LAS, ASC, XYZ, CSV, or ZIP download.",
+                        "Use the NOAA Data Access Viewer (or another trusted provider), then paste a direct HTTPS link to a LAZ, LAS, ASC, XYZ, CSV, or ZIP download.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     OutlinedButton(
@@ -200,6 +258,7 @@ fun CustomFileLoader(
                                 downloadTerrain(
                                     context = context,
                                     urlText = remoteUrl,
+                                    options = importOptions(),
                                     onProgress = { progress = it },
                                 ).onSuccess { (result, name) -> showResult(result, name) }
                                     .onFailure {
@@ -238,6 +297,54 @@ fun CustomFileLoader(
     }
 }
 
+@Composable
+private fun GroundModeButton(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val content: @Composable () -> Unit = {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.Start,
+        ) {
+            Text(title)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (selected) {
+        Button(onClick = onClick, modifier = Modifier.fillMaxWidth().height(64.dp)) { content() }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(64.dp)) { content() }
+    }
+}
+
+@Composable
+private fun ChoiceRow(
+    options: List<Pair<Int, String>>,
+    selected: Int,
+    onSelected: (Int) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        options.forEach { (value, label) ->
+            if (value == selected) {
+                Button(
+                    onClick = { onSelected(value) },
+                    modifier = Modifier.weight(1f).height(44.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
+                ) { Text(label, maxLines = 1) }
+            } else {
+                OutlinedButton(
+                    onClick = { onSelected(value) },
+                    modifier = Modifier.weight(1f).height(44.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
+                ) { Text(label, maxLines = 1) }
+            }
+        }
+    }
+}
+
 private fun displayName(context: Context, uri: Uri): String {
     if (uri.scheme == "content") {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -254,6 +361,7 @@ private fun parseContentUri(
     context: Context,
     uri: Uri,
     name: String,
+    options: LidarImportOptions,
 ): DemGenerator.TerrainLoadResult? {
     if (name.lowercase().endsWith(".zip")) {
         val temp = File.createTempFile("find-it-import-", ".zip", context.cacheDir)
@@ -261,19 +369,20 @@ private fun parseContentUri(
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(temp).use { output -> copyLimited(input, output, MAX_DOWNLOAD_BYTES) }
             } ?: return null
-            parseTerrainFile(context, temp, name).first
+            parseTerrainFile(context, temp, name, options).first
         } finally {
             temp.delete()
         }
     }
     return context.contentResolver.openInputStream(uri)?.buffered()?.use {
-        DemGenerator.parseFromStreamDetailed(name, it, groundOnly = true)
+        DemGenerator.parseFromStreamDetailed(name, it, options)
     }
 }
 
 private suspend fun downloadTerrain(
     context: Context,
     urlText: String,
+    options: LidarImportOptions,
     onProgress: (Float?) -> Unit,
 ): Result<Pair<DemGenerator.TerrainLoadResult?, String>> = withContext(Dispatchers.IO) {
     runCatching {
@@ -321,7 +430,7 @@ private suspend fun downloadTerrain(
                 }
             }
             active.disconnect()
-            val (result, parsedName) = parseTerrainFile(context, temp, name)
+            val (result, parsedName) = parseTerrainFile(context, temp, name, options)
             withContext(Dispatchers.Main.immediate) { onProgress(1f) }
             result to parsedName
         } finally {
@@ -335,6 +444,7 @@ private fun parseTerrainFile(
     context: Context,
     file: File,
     suggestedName: String,
+    options: LidarImportOptions,
 ): Pair<DemGenerator.TerrainLoadResult?, String> {
     val isZip = suggestedName.lowercase().endsWith(".zip") || FileInputStream(file).use { input ->
         val signature = ByteArray(4)
@@ -342,7 +452,7 @@ private fun parseTerrainFile(
     }
     if (!isZip) {
         return FileInputStream(file).buffered().use {
-            DemGenerator.parseFromStreamDetailed(suggestedName, it, groundOnly = true) to suggestedName
+            DemGenerator.parseFromStreamDetailed(suggestedName, it, options) to suggestedName
         }
     }
 
@@ -363,7 +473,7 @@ private fun parseTerrainFile(
         }
         val selectedName = entryName ?: error("ZIP contains no supported terrain file")
         FileInputStream(extracted).buffered().use {
-            DemGenerator.parseFromStreamDetailed(selectedName, it, groundOnly = true) to selectedName
+            DemGenerator.parseFromStreamDetailed(selectedName, it, options) to selectedName
         }
     } finally {
         extracted.delete()

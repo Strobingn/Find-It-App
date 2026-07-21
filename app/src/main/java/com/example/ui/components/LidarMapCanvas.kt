@@ -6,26 +6,24 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,6 +34,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -45,6 +44,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary
+import kotlin.math.min
+
+enum class LidarCanvasMode { SURVEY, EXPLORE }
 
 @Composable
 fun LidarMapCanvas(
@@ -59,6 +61,10 @@ fun LidarMapCanvas(
     geoMetadata: GeoSpatialLibrary.GeoSpatialMetadata,
     currentLat: Double?,
     currentLon: Double?,
+    mode: LidarCanvasMode = LidarCanvasMode.SURVEY,
+    viewportResetKey: Int = 0,
+    showSurveyCursor: Boolean = true,
+    showCoordinateHud: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     // Cache ImageBitmap — recreating every drag frame can crash if Bitmap is mid-render
@@ -67,6 +73,27 @@ fun LidarMapCanvas(
             bitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
         } catch (_: Exception) {
             null
+        }
+    }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var pan by remember { mutableStateOf(Offset.Zero) }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+
+    LaunchedEffect(viewportResetKey, mode, bitmap) {
+        zoom = 1f
+        pan = Offset.Zero
+    }
+
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        if (mode == LidarCanvasMode.EXPLORE) {
+            val nextZoom = (zoom * zoomChange).coerceIn(1f, 8f)
+            val maxPanX = viewportSize.width * (nextZoom - 1f) * 0.5f
+            val maxPanY = viewportSize.height * (nextZoom - 1f) * 0.5f
+            zoom = nextZoom
+            pan = Offset(
+                x = (pan.x + panChange.x).coerceIn(-maxPanX, maxPanX),
+                y = (pan.y + panChange.y).coerceIn(-maxPanY, maxPanY),
+            )
         }
     }
 
@@ -78,45 +105,60 @@ fun LidarMapCanvas(
             .testTag("lidar_map_canvas_container"),
     ) {
         if (imageBitmap != null && bitmap != null) {
+            val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
+                Modifier.transformable(transformState)
+            } else {
+                Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val canvasWidth = size.width.toFloat().coerceAtLeast(1f)
+                        val canvasHeight = size.height.toFloat().coerceAtLeast(1f)
+                        val fit = min(canvasWidth / bitmap.width, canvasHeight / bitmap.height)
+                        val imageWidth = bitmap.width * fit
+                        val imageHeight = bitmap.height * fit
+                        val imageLeft = (canvasWidth - imageWidth) * 0.5f
+                        val imageTop = (canvasHeight - imageHeight) * 0.5f
+                        fun report(offset: Offset) {
+                            val xPct = ((offset.x - imageLeft) / imageWidth * 100f).coerceIn(0f, 100f)
+                            val yPct = ((offset.y - imageTop) / imageHeight * 100f).coerceIn(0f, 100f)
+                            onSweepPositionChanged(xPct, yPct)
+                        }
+                        report(down.position)
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (!change.pressed) break
+                                if (change.positionChange() != Offset.Zero) change.consume()
+                                report(change.position)
+                            }
+                        } finally {
+                            onStopSweeping()
+                        }
+                    }
+                }
+            }
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    // ONE gesture handler only — dual detectTap+detectDrag crashed on hold/drag
-                    .pointerInput(onSweepPositionChanged, onStopSweeping) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val w = size.width.toFloat().coerceAtLeast(1f)
-                            val h = size.height.toFloat().coerceAtLeast(1f)
-                            fun report(offset: Offset) {
-                                val xPct = ((offset.x / w) * 100f).coerceIn(0f, 100f)
-                                val yPct = ((offset.y / h) * 100f).coerceIn(0f, 100f)
-                                onSweepPositionChanged(xPct, yPct)
-                            }
-                            report(down.position)
-                            try {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull() ?: break
-                                    if (!change.pressed) break
-                                    if (change.positionChange() != Offset.Zero) {
-                                        change.consume()
-                                    }
-                                    report(change.position)
-                                }
-                            } finally {
-                                onStopSweeping()
-                            }
-                        }
-                    }
+                    .onSizeChanged { viewportSize = it }
+                    .then(interactionModifier)
                     .testTag("lidar_canvas"),
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
+                val fit = min(canvasWidth / imageBitmap.width, canvasHeight / imageBitmap.height)
+                val fittedWidth = imageBitmap.width * fit
+                val fittedHeight = imageBitmap.height * fit
+                val displayWidth = fittedWidth * zoom
+                val displayHeight = fittedHeight * zoom
+                val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
+                val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
 
                 drawImage(
                     image = imageBitmap,
-                    dstOffset = IntOffset(0, 0),
-                    dstSize = IntSize(canvasWidth.toInt(), canvasHeight.toInt()),
+                    dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
+                    dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
                 )
 
                 // Search grid (avoid huge loops if spacing tiny)
@@ -124,21 +166,21 @@ fun LidarMapCanvas(
                     val cols = (100f / gridSpacing).toInt().coerceIn(1, 50)
                     val rows = (100f / gridSpacing).toInt().coerceIn(1, 50)
                     for (i in 1 until cols) {
-                        val px = (i * gridSpacing / 100f) * canvasWidth
+                        val px = imageLeft + (i * gridSpacing / 100f) * displayWidth
                         drawLine(
                             color = Color(0xFF29B6F6),
-                            start = Offset(px, 0f),
-                            end = Offset(px, canvasHeight),
+                            start = Offset(px, imageTop),
+                            end = Offset(px, imageTop + displayHeight),
                             strokeWidth = 1f,
                             alpha = 0.35f,
                         )
                     }
                     for (i in 1 until rows) {
-                        val py = (i * gridSpacing / 100f) * canvasHeight
+                        val py = imageTop + (i * gridSpacing / 100f) * displayHeight
                         drawLine(
                             color = Color(0xFF29B6F6),
-                            start = Offset(0f, py),
-                            end = Offset(canvasWidth, py),
+                            start = Offset(imageLeft, py),
+                            end = Offset(imageLeft + displayWidth, py),
                             strokeWidth = 1f,
                             alpha = 0.35f,
                         )
@@ -146,8 +188,8 @@ fun LidarMapCanvas(
                 }
 
                 for (sig in loggedSignals) {
-                    val px = (sig.gridX.coerceIn(0f, 100f) / 100f) * canvasWidth
-                    val py = (sig.gridY.coerceIn(0f, 100f) / 100f) * canvasHeight
+                    val px = imageLeft + (sig.gridX.coerceIn(0f, 100f) / 100f) * displayWidth
+                    val py = imageTop + (sig.gridY.coerceIn(0f, 100f) / 100f) * displayHeight
                     val pinColor = try {
                         Color(sig.metalType.colorHex)
                     } catch (_: Exception) {
@@ -163,39 +205,41 @@ fun LidarMapCanvas(
                     )
                 }
 
-                val sx = (sweepX.coerceIn(0f, 100f) / 100f) * canvasWidth
-                val sy = (sweepY.coerceIn(0f, 100f) / 100f) * canvasHeight
-                val coil = Offset(sx, sy)
+                if (showSurveyCursor) {
+                    val sx = imageLeft + (sweepX.coerceIn(0f, 100f) / 100f) * displayWidth
+                    val sy = imageTop + (sweepY.coerceIn(0f, 100f) / 100f) * displayHeight
+                    val coil = Offset(sx, sy)
 
-                drawCircle(
-                    color = Color(0xFFFFD700),
-                    radius = 36f,
-                    center = coil,
-                    style = Stroke(width = 1.5f),
-                    alpha = 0.35f,
-                )
-                drawCircle(
-                    color = Color(0xFFFFD700),
-                    radius = 24f,
-                    center = coil,
-                    style = Stroke(width = 3.5f),
-                    alpha = 0.85f,
-                )
-                drawLine(
-                    color = Color(0xFFFFD700),
-                    start = Offset(sx - 10f, sy),
-                    end = Offset(sx + 10f, sy),
-                    strokeWidth = 2f,
-                    alpha = 0.8f,
-                )
-                drawLine(
-                    color = Color(0xFFFFD700),
-                    start = Offset(sx, sy - 10f),
-                    end = Offset(sx, sy + 10f),
-                    strokeWidth = 2f,
-                    alpha = 0.8f,
-                )
-                drawCircle(color = Color.White, radius = 3f, center = coil)
+                    drawCircle(
+                        color = Color(0xFFFFD700),
+                        radius = 36f,
+                        center = coil,
+                        style = Stroke(width = 1.5f),
+                        alpha = 0.35f,
+                    )
+                    drawCircle(
+                        color = Color(0xFFFFD700),
+                        radius = 24f,
+                        center = coil,
+                        style = Stroke(width = 3.5f),
+                        alpha = 0.85f,
+                    )
+                    drawLine(
+                        color = Color(0xFFFFD700),
+                        start = Offset(sx - 10f, sy),
+                        end = Offset(sx + 10f, sy),
+                        strokeWidth = 2f,
+                        alpha = 0.8f,
+                    )
+                    drawLine(
+                        color = Color(0xFFFFD700),
+                        start = Offset(sx, sy - 10f),
+                        end = Offset(sx, sy + 10f),
+                        strokeWidth = 2f,
+                        alpha = 0.8f,
+                    )
+                    drawCircle(color = Color.White, radius = 3f, center = coil)
+                }
             }
 
             // --- GEOSPATIAL GIS HUD ---
@@ -226,7 +270,7 @@ fun LidarMapCanvas(
                 }
             }
 
-            Column(
+            if (showCoordinateHud) Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
