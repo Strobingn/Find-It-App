@@ -8,32 +8,51 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Color
 
 private val DarkColorScheme = darkColorScheme(
-    primary = GoldAmber,
-    secondary = CyberBlue,
-    tertiary = LidarCopper,
-    background = EarthSlateBackground,
-    surface = DarkSteelSurface,
-    onPrimary = Color.Black,
-    onSecondary = Color.Black,
-    onBackground = Color(0xFFF5F5F7),
-    onSurface = Color(0xFFF5F5F7)
+    primary = PrimaryDark,
+    primaryContainer = PrimaryContainerDark,
+    onPrimary = OnPrimaryDark,
+    onPrimaryContainer = Color.White,
+    secondary = Grey400,
+    onSecondary = Grey900,
+    secondaryContainer = Grey800,
+    onSecondaryContainer = Grey200,
+    tertiary = Grey600,
+    onTertiary = Grey100,
+    background = DarkBackground,
+    onBackground = Grey200,
+    surface = DarkSurface,
+    onSurface = Grey300,
+    surfaceVariant = DarkSurfaceVariant,
+    onSurfaceVariant = Grey400,
+    outline = Grey700,
+    outlineVariant = Grey800,
+    scrim = Color.Black.copy(alpha = 0.4f),
+    inverseOnSurface = Grey900,
+    inversePrimary = PrimaryLight,
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF765B00),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFFFE16B),
-    onPrimaryContainer = Color(0xFF241A00),
-    secondary = Color(0xFF006494),
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFCBE6FF),
-    onSecondaryContainer = Color(0xFF001E30),
-    tertiary = Color(0xFF8B5000),
-    background = Color(0xFFFFF8F2),
-    surface = Color(0xFFFFF8F2),
-    surfaceVariant = Color(0xFFE9E2D9),
-    onBackground = Color(0xFF201B16),
-    onSurface = Color(0xFF201B16),
+    primary = PrimaryLight,
+    primaryContainer = PrimaryContainerLight,
+    onPrimary = OnPrimaryLight,
+    onPrimaryContainer = Color(0xFF21005E),
+    secondary = Grey600,
+    onSecondary = Grey50,
+    secondaryContainer = Grey200,
+    onSecondaryContainer = Grey800,
+    tertiary = Grey700,
+    onTertiary = Grey50,
+    background = LightBackground,
+    onBackground = Grey900,
+    surface = LightSurface,
+    onSurface = Grey900,
+    surfaceVariant = LightSurfaceVariant,
+    onSurfaceVariant = Grey700,
+    outline = Grey500,
+    outlineVariant = Grey400,
+    scrim = Color.Black.copy(alpha = 0.4f),
+    inverseOnSurface = Grey100,
+    inversePrimary = Color(0xFFEADDFF),
 )
 
 @Composable
@@ -48,4 +67,3 @@ fun MyApplicationTheme(
         content = content
     )
 }
-
