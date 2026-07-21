@@ -93,9 +93,7 @@ class OfflineMapsViewModel(application: Application) : AndroidViewModel(applicat
                         _downloadProgress.value = processed to total
                         _statusMessage.value = "Downloaded $processed of $total tiles"
                     },
-                    onTileDownloaded = { coordinate ->
-                        // Could update UI for each tile if needed
-                    }
+
                 )
                 
                 _statusMessage.value = "Download complete: $downloaded tiles cached"
@@ -140,21 +138,18 @@ class OfflineMapsViewModel(application: Application) : AndroidViewModel(applicat
      */
     fun removeCachedRegion(key: String) {
         viewModelScope.launch {
-            _statusMessage.value = "Removing region..."
-            val definition = mapCache.loadRegionDefinition(key)
-            definition?.let { (region, provider) ->
-                // Clear tiles for this region's provider
-                mapCache.clearProvider(provider)
-                // Remove definition file
-                val definitionsDir = android.os.Environment.getDataDirectory()
-                // Simplified - just refresh
-                refreshCacheStats()
-                refreshCachedRegions()
-                _statusMessage.value = "Region removed"
-            } ?: run {
-                _statusMessage.value = "Region not found"
+            val removed = mapCache.deleteRegionDefinition(key)
+            refreshCachedRegions()
+            _statusMessage.value = if (removed) {
+                "Region removed; shared cached tiles were kept."
+            } else {
+                "Could not remove region."
             }
         }
+    }
+
+    fun reportValidationError(message: String) {
+        _statusMessage.value = message
     }
     
     /**
@@ -164,13 +159,7 @@ class OfflineMapsViewModel(application: Application) : AndroidViewModel(applicat
         return mapCache.loadRegionDefinition(key)?.first
     }
     
-    /**
-     * Get the cache directory path (for display purposes)
-     */
-    fun getCacheDirectoryPath(): String {
-        return mapCache.cacheDir.absolutePath
-    }
-    
+
     /**
      * Check if a specific region is already cached
      */

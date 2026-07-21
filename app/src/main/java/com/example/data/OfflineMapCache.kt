@@ -3,13 +3,13 @@ package com.example.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Environment
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Manages offline caching of basemap tiles for field use without connectivity.
@@ -22,7 +22,9 @@ class OfflineMapCache(private val context: Context) {
     companion object {
         private const val CACHE_DIR_NAME = "offline_maps"
         private const val MAX_CACHE_SIZE_MB = 500L // 500 MB limit
-        private const val TILE_SIZE = 256 // Standard tile size in pixels
+        private const val MAX_REGION_TILES = 20_000
+        private const val CONNECT_TIMEOUT_MS = 15_000
+        private const val READ_TIMEOUT_MS = 20_000
         
         // Common tile providers
         const val OSM_STANDARD = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -43,13 +45,7 @@ class OfflineMapCache(private val context: Context) {
         val zoom: Int,
         val provider: String = OSM_STANDARD
     ) {
-        fun toFileName(): String {
-            return "${provider.hashCode()}_${zoom}_${x}_${y}.png"
-        }
-        
-        fun toFile(): File {
-            return File(cacheDir, toFileName())
-        }
+        fun toFileName(): String = "${provider.hashCode()}_${zoom}_${x}_${y}.png"
     }
     
     /**
@@ -78,11 +74,13 @@ class OfflineMapCache(private val context: Context) {
         fun percentUsed(): Double = (totalSizeBytes.toDouble() / maxCacheSizeBytes) * 100
     }
     
+    private fun tileFile(coordinate: TileCoordinate) = File(cacheDir, coordinate.toFileName())
+
     /**
      * Get a tile from cache if available
      */
     fun getTile(coordinate: TileCoordinate): Bitmap? {
-        val file = coordinate.toFile()
+        val file = tileFile(coordinate)
         return if (file.exists()) {
             try {
                 BitmapFactory.decodeFile(file.absolutePath)
@@ -99,7 +97,7 @@ class OfflineMapCache(private val context: Context) {
      */
     fun storeTile(coordinate: TileCoordinate, bitmap: Bitmap): Boolean {
         return try {
-            val file = coordinate.toFile()
+            val file = tileFile(coordinate)
             FileOutputStream(file).use { output ->
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
             }
@@ -113,7 +111,7 @@ class OfflineMapCache(private val context: Context) {
      * Check if a tile is cached
      */
     fun hasTile(coordinate: TileCoordinate): Boolean {
-        return coordinate.toFile().exists()
+        return tileFile(coordinate).exists()
     }
     
     /**
@@ -123,47 +121,87 @@ class OfflineMapCache(private val context: Context) {
         region: CacheRegion,
         providerUrl: String = OSM_STANDARD,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-        onTileDownloaded: (TileCoordinate) -> Unit = {}
-    ): Int {
-        var downloadedCount = 0
+        onTileDownloaded: (TileCoordinate) -> Unit = {},
+    ): Int = withContext(Dispatchers.IO) {
         val tiles = calculateTilesForRegion(region, providerUrl)
-        var processed = 0
-        
-        tiles.forEach { coordinate ->
-            if (!hasTile(coordinate)) {
-                // TODO: Download tile from network
-                // For now, just mark as processed
-                // In a real implementation, this would use a network client
-                // to download the tile from the provider URL
-            }
-            processed++
-            downloadedCount++
-            onProgress(processed, tiles.size)
-            onTileDownloaded(coordinate)
+        require(tiles.size <= MAX_REGION_TILES) {
+            "Region requires ${tiles.size} tiles; reduce the area or zoom range (limit $MAX_REGION_TILES)."
         }
-        
-        return downloadedCount
+        var downloadedCount = 0
+        tiles.forEachIndexed { index, coordinate ->
+            val available = hasTile(coordinate) || downloadTile(coordinate)
+            if (available) {
+                if (!hasTile(coordinate)) error("Tile download completed without a cache file")
+                downloadedCount++
+                onTileDownloaded(coordinate)
+            }
+            onProgress(index + 1, tiles.size)
+            if ((index + 1) % 50 == 0 && getStats().isFull()) return@withContext downloadedCount
+        }
+        downloadedCount
+    }
+
+    private fun downloadTile(coordinate: TileCoordinate): Boolean {
+        val tileUrl = coordinate.provider
+            .replace("{z}", coordinate.zoom.toString())
+            .replace("{x}", coordinate.x.toString())
+            .replace("{y}", coordinate.y.toString())
+        val connection = URL(tileUrl).openConnection() as? HttpURLConnection ?: return false
+        return try {
+            connection.connectTimeout = CONNECT_TIMEOUT_MS
+            connection.readTimeout = READ_TIMEOUT_MS
+            connection.instanceFollowRedirects = true
+            connection.setRequestProperty("User-Agent", "Find-It-Android/1.1")
+            if (connection.responseCode !in 200..299) return false
+            val bitmap = connection.inputStream.buffered().use(BitmapFactory::decodeStream) ?: return false
+            try {
+                storeTile(coordinate, bitmap)
+            } finally {
+                bitmap.recycle()
+            }
+        } catch (_: Exception) {
+            false
+        } finally {
+            connection.disconnect()
+        }
     }
     
     /**
      * Calculate which tiles are needed for a geographic region
      */
     private fun calculateTilesForRegion(region: CacheRegion, providerUrl: String): List<TileCoordinate> {
-        val tiles = mutableListOf<TileCoordinate>()
-        
+        require(region.minLat.isFinite() && region.maxLat.isFinite()) { "Latitude bounds are invalid." }
+        require(region.minLon.isFinite() && region.maxLon.isFinite()) { "Longitude bounds are invalid." }
+        require(region.minLat in -85.0511..85.0511 && region.maxLat in -85.0511..85.0511) {
+            "Latitude must be between -85.0511 and 85.0511 degrees."
+        }
+        require(region.minLon in -180.0..180.0 && region.maxLon in -180.0..180.0) {
+            "Longitude must be between -180 and 180 degrees."
+        }
+        require(region.minLat <= region.maxLat && region.minLon <= region.maxLon) {
+            "Minimum bounds must not exceed maximum bounds."
+        }
+        require(region.minZoom in 0..19 && region.maxZoom in region.minZoom..19) {
+            "Zoom range must be ordered and between 0 and 19."
+        }
+        require(providerUrl.startsWith("https://")) { "Tile provider must use HTTPS." }
+
+        val tiles = ArrayList<TileCoordinate>()
         for (zoom in region.minZoom..region.maxZoom) {
-            val minTileX = lonToTileX(region.minLon, zoom)
-            val maxTileX = lonToTileX(region.maxLon, zoom)
-            val minTileY = latToTileY(region.maxLat, zoom) // Y is inverted
-            val maxTileY = latToTileY(region.minLat, zoom)
-            
+            val maxIndex = (1 shl zoom) - 1
+            val minTileX = lonToTileX(region.minLon, zoom).coerceIn(0, maxIndex)
+            val maxTileX = lonToTileX(region.maxLon, zoom).coerceIn(0, maxIndex)
+            val minTileY = latToTileY(region.maxLat, zoom).coerceIn(0, maxIndex)
+            val maxTileY = latToTileY(region.minLat, zoom).coerceIn(0, maxIndex)
             for (x in minTileX..maxTileX) {
                 for (y in minTileY..maxTileY) {
+                    require(tiles.size < MAX_REGION_TILES) {
+                        "Region exceeds $MAX_REGION_TILES tiles; reduce the area or zoom range."
+                    }
                     tiles.add(TileCoordinate(x, y, zoom, providerUrl))
                 }
             }
         }
-        
         return tiles
     }
     
@@ -186,7 +224,8 @@ class OfflineMapCache(private val context: Context) {
      * Get cache statistics
      */
     fun getStats(): CacheStats {
-        val files = cacheDir.listFiles() ?: return CacheStats(0, 0, MAX_CACHE_SIZE_MB * 1024 * 1024, emptySet())
+        val files = cacheDir.listFiles()?.filter { it.isFile && it.extension == "png" }
+            ?: return CacheStats(0, 0, MAX_CACHE_SIZE_MB * 1024 * 1024, emptySet())
         
         var totalSize = 0L
         val providers = mutableSetOf<String>()
@@ -245,7 +284,7 @@ class OfflineMapCache(private val context: Context) {
         val cutoff = System.currentTimeMillis() - (daysToKeep * 24L * 60 * 60 * 1000)
         
         try {
-            cacheDir.listFiles()?.forEach { file ->
+            cacheDir.listFiles()?.filter { it.isFile && it.extension == "png" }?.forEach { file ->
                 if (file.lastModified() < cutoff) {
                     file.delete()
                     deletedCount++
@@ -308,7 +347,7 @@ class OfflineMapCache(private val context: Context) {
                 val maxLon = content.substringAfter("\"maxLon\":").substringBefore(",").toDouble()
                 val minZoom = content.substringAfter("\"minZoom\":").substringBefore(",").toInt()
                 val maxZoom = content.substringAfter("\"maxZoom\":").substringBefore(",").toInt()
-                val provider = content.substringAfter("\"provider\":\"").substringBefore("\"")
+                val provider = content.substringAfter("\"provider\":").substringAfter('"').substringBefore('"')
                 
                 CacheRegion(minLat, maxLat, minLon, maxLon, minZoom, maxZoom) to provider
             } else {
@@ -319,6 +358,13 @@ class OfflineMapCache(private val context: Context) {
         }
     }
     
+    fun deleteRegionDefinition(key: String): Boolean {
+        if (!key.matches(Regex("[a-f0-9]{64}"))) return false
+        val definitionsDir = File(cacheDir, "definitions")
+        val file = File(definitionsDir, "$key.json")
+        return !file.exists() || file.delete()
+    }
+
     /**
      * List all saved region definitions
      */

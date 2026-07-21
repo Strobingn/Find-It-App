@@ -16,15 +16,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddLocationAlt
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -39,7 +36,6 @@ import androidx.compose.ui.unit.dp
 import com.example.data.import.GpxParser
 import com.example.data.import.KmlParser
 import com.example.data.import.SurveyImportResult
-import com.example.data.import.SurveyPoint
 import com.example.data.import.detectFileTypeByExtension
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -53,10 +49,8 @@ fun SurveyImportPanel(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var isWorking by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf<Float?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var isError by remember { mutableStateOf(false) }
-    var importSummary by remember { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -74,7 +68,6 @@ fun SurveyImportPanel(
         
         isWorking = true
         message = "Reading $name…"
-        importSummary = ""
         
         scope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -91,7 +84,6 @@ fun SurveyImportPanel(
             
             withContext(Dispatchers.Main.immediate) {
                 isWorking = false
-                progress = null
                 
                 if (result.errors.isNotEmpty()) {
                     isError = true
@@ -114,7 +106,6 @@ fun SurveyImportPanel(
                         }
                     }
                     message = summary
-                    importSummary = summary
                 }
             }
         }
@@ -152,24 +143,11 @@ fun SurveyImportPanel(
                     Text("Choose GPX/KML file")
                 }
 
-                OutlinedButton(
-                    onClick = { /* TODO: Add sample download */ },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                ) {
-                    androidx.compose.material3.Icon(Icons.Default.Download, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Download sample survey")
-                }
             }
         }
 
-        if (isWorking) {
-            if (progress == null) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            } else {
-                LinearProgressIndicator(progress = { progress!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-            }
-        }
+        if (isWorking) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+
         
         message?.let {
             Text(

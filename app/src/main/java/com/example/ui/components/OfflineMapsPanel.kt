@@ -360,7 +360,7 @@ fun OfflineMapsPanel(
                             )
                             viewModel.preloadRegion(region, selectedProvider)
                         } catch (e: NumberFormatException) {
-                            viewModel.statusMessage.value = "Invalid coordinates"
+                            viewModel.reportValidationError("Invalid coordinates or zoom range")
                         }
                     }
                 ) {
@@ -387,7 +387,7 @@ fun OfflineMapsPanel(
                         showClearDialog = false
                         viewModel.clearAllCache()
                     },
-                    colors = androidx.compose.material3.TextButtonDefaults.textButtonColors(
+                    colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error
                     )
                 ) {

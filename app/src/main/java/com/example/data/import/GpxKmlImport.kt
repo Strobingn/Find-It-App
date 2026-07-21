@@ -89,116 +89,108 @@ object GpxParser {
     fun parse(input: InputStream): SurveyImportResult {
         val waypoints = mutableListOf<SurveyPoint>()
         val tracks = mutableListOf<SurveyTrack>()
-        val boundaries = mutableListOf<List<SurveyPoint>>()
-        var currentTrack: SurveyTrack? = null
-        var currentTrackPoints = mutableListOf<SurveyPoint>()
         val boundsTracker = BoundsTracker()
         val errors = mutableListOf<String>()
-        
+
         try {
-            val factory = XmlPullParserFactory.newInstance()
-            val parser = factory.newPullParser()
-            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
-            parser.setInput(input, null)
-            
+            val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+                setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+                setInput(input, null)
+            }
             var eventType = parser.eventType
             var currentTag = ""
-            var currentName = ""
-            var currentDescription = ""
-            var currentLat: Double? = null
-            var currentLon: Double? = null
-            var currentEle: Double? = null
-            var currentTime: String? = null
-            
+            var collectionType: String? = null
+            var collectionName = ""
+            var collectionDescription = ""
+            var collectionPoints = mutableListOf<SurveyPoint>()
+            var pointType: String? = null
+            var pointName = ""
+            var pointDescription = ""
+            var pointLat: Double? = null
+            var pointLon: Double? = null
+            var pointElevation: Double? = null
+            var pointTime: String? = null
+
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
                         currentTag = parser.name
                         when (currentTag) {
-                            "wpt" -> {
-                                currentName = parser.getAttributeValue(null, "name") ?: ""
-                                currentDescription = ""
-                                currentLat = null
-                                currentLon = null
-                                currentEle = null
-                                currentTime = null
+                            "trk", "rte" -> {
+                                collectionType = currentTag
+                                collectionName = ""
+                                collectionDescription = ""
+                                collectionPoints = mutableListOf()
                             }
-                            "trk" -> {
-                                currentTrack = SurveyTrack(
-                                    name = parser.getAttributeValue(null, "name") ?: "",
-                                    description = ""
-                                )
-                                currentTrackPoints = mutableListOf()
-                            }
-                            "trkseg" -> {}
-                            "rte" -> {
-                                currentTrack = SurveyTrack(
-                                    name = parser.getAttributeValue(null, "name") ?: "",
-                                    description = ""
-                                )
-                                currentTrackPoints = mutableListOf()
+                            "wpt", "trkpt", "rtept" -> {
+                                pointType = currentTag
+                                pointName = ""
+                                pointDescription = ""
+                                pointLat = parser.getAttributeValue(null, "lat")?.toDoubleOrNull()
+                                pointLon = parser.getAttributeValue(null, "lon")?.toDoubleOrNull()
+                                pointElevation = null
+                                pointTime = null
                             }
                         }
                     }
                     XmlPullParser.TEXT -> {
-                        val text = parser.text.trim()
-                        if (text.isNotEmpty()) {
-                            when (currentTag) {
-                                "name" -> currentName = text
-                                "desc" -> currentDescription += text
-                                "lat" -> currentLat = text.toDoubleOrNull()
-                                "lon" -> currentLon = text.toDoubleOrNull()
-                                "ele" -> currentEle = text.toDoubleOrNull()
-                                "time" -> currentTime = text
+                        val value = parser.text.trim()
+                        if (value.isNotEmpty()) {
+                            if (pointType != null) {
+                                when (currentTag) {
+                                    "name" -> pointName += value
+                                    "desc", "cmt" -> pointDescription += value
+                                    "ele" -> pointElevation = value.toDoubleOrNull()
+                                    "time" -> pointTime = value
+                                }
+                            } else if (collectionType != null) {
+                                when (currentTag) {
+                                    "name" -> collectionName += value
+                                    "desc" -> collectionDescription += value
+                                }
                             }
                         }
                     }
                     XmlPullParser.END_TAG -> {
                         when (parser.name) {
-                            "wpt" -> {
-                                if (currentLat != null && currentLon != null) {
-                                    val point = SurveyPoint(
-                                        latitude = currentLat!!,
-                                        longitude = currentLon!!,
-                                        name = currentName,
-                                        description = currentDescription,
-                                        elevation = currentEle,
-                                        timestamp = currentTime?.let { parseIso8601Time(it) }
-                                    )
-                                    waypoints.add(point)
-                                    boundsTracker.update(point.latitude, point.longitude)
+                            "wpt", "trkpt", "rtept" -> {
+                                val latitude = pointLat
+                                val longitude = pointLon
+                                if (
+                                    latitude == null ||
+                                    longitude == null ||
+                                    !latitude.isFinite() ||
+                                    !longitude.isFinite() ||
+                                    latitude !in -90.0..90.0 ||
+                                    longitude !in -180.0..180.0
+                                ) {
+                                    errors.add("${parser.name} missing valid coordinates")
                                 } else {
-                                    errors.add("Waypoint missing coordinates")
-                                }
-                            }
-                            "trkpt" -> {
-                                if (currentLat != null && currentLon != null) {
                                     val point = SurveyPoint(
-                                        latitude = currentLat!!,
-                                        longitude = currentLon!!,
-                                        name = currentName,
-                                        description = currentDescription,
-                                        elevation = currentEle,
-                                        timestamp = currentTime?.let { parseIso8601Time(it) }
+                                        latitude = latitude,
+                                        longitude = longitude,
+                                        name = pointName,
+                                        description = pointDescription,
+                                        elevation = pointElevation?.takeIf { it.isFinite() },
+                                        timestamp = pointTime?.let(::parseIso8601Time),
                                     )
-                                    currentTrackPoints.add(point)
-                                    boundsTracker.update(point.latitude, point.longitude)
+                                    if (parser.name == "wpt") waypoints.add(point) else collectionPoints.add(point)
+                                    boundsTracker.update(latitude, longitude)
                                 }
+                                pointType = null
                             }
-                            "trkseg" -> {}
-                            "trk" -> {
-                                currentTrack?.let { track ->
-                                    tracks.add(track.copy(points = currentTrackPoints.toList()))
+                            "trk", "rte" -> {
+                                if (collectionPoints.isNotEmpty()) {
+                                    tracks.add(
+                                        SurveyTrack(
+                                            name = collectionName,
+                                            description = collectionDescription,
+                                            points = collectionPoints.toList(),
+                                        ),
+                                    )
                                 }
-                                currentTrack = null
-                                currentTrackPoints = mutableListOf()
-                            }
-                            "rte" -> {
-                                currentTrack?.let { track ->
-                                    tracks.add(track.copy(points = currentTrackPoints.toList()))
-                                }
-                                currentTrack = null
-                                currentTrackPoints = mutableListOf()
+                                collectionType = null
+                                collectionPoints = mutableListOf()
                             }
                         }
                         currentTag = ""
@@ -206,25 +198,17 @@ object GpxParser {
                 }
                 eventType = parser.next()
             }
-            
-            // If we have track points but no track, add them as a boundary
-            if (currentTrackPoints.isNotEmpty() && currentTrack == null) {
-                boundaries.add(currentTrackPoints.toList())
-            }
-            
-        } catch (e: Exception) {
-            errors.add("GPX parsing error: ${e.localizedMessage}")
+        } catch (exception: Exception) {
+            errors.add("GPX parsing error: ${exception.localizedMessage ?: exception.javaClass.simpleName}")
         }
-        
+
         return SurveyImportResult(
             waypoints = waypoints,
             tracks = tracks,
-            boundaries = boundaries,
             bounds = boundsTracker.toBoundingBox(),
-            errors = errors
+            errors = errors,
         )
     }
-    
     private fun parseIso8601Time(timeString: String): Long? {
         return try {
             // Try parsing ISO 8601 format
@@ -260,165 +244,84 @@ object KmlParser {
         val waypoints = mutableListOf<SurveyPoint>()
         val tracks = mutableListOf<SurveyTrack>()
         val boundaries = mutableListOf<List<SurveyPoint>>()
-        var currentTrack: SurveyTrack? = null
-        var currentTrackPoints = mutableListOf<SurveyPoint>()
         val boundsTracker = BoundsTracker()
         val errors = mutableListOf<String>()
-        
+
         try {
-            val factory = XmlPullParserFactory.newInstance()
-            val parser = factory.newPullParser()
-            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
-            parser.setInput(input, null)
-            
+            val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+                setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+                setInput(input, null)
+            }
             var eventType = parser.eventType
-            var inPlacemark = false
-            var inLineString = false
-            var inPoint = false
-            var inPolygon = false
-            var inMultiGeometry = false
-            var currentName = ""
-            var currentDescription = ""
-            var currentPlacemark: SurveyPoint? = null
-            var currentCoordinates: String? = null
-            
+            var currentTag = ""
+            val text = StringBuilder()
+            var placemarkName = ""
+            var placemarkDescription = ""
+            var geometryPoints = emptyList<SurveyPoint>()
+
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
-                        when (parser.name) {
+                        currentTag = parser.name.substringAfter(':')
+                        when (currentTag) {
                             "Placemark" -> {
-                                inPlacemark = true
-                                currentName = parser.getAttributeValue(null, "name") ?: ""
-                                currentDescription = ""
-                                currentPlacemark = SurveyPoint(
-                                    latitude = 0.0,
-                                    longitude = 0.0,
-                                    name = currentName,
-                                    description = ""
-                                )
-                                currentCoordinates = null
+                                placemarkName = ""
+                                placemarkDescription = ""
                             }
-                            "name" -> {
-                                if (inPlacemark) {
-                                    currentName = parser.nextText().trim()
-                                    currentPlacemark?.let { pm ->
-                                        currentPlacemark = pm.copy(name = currentName)
-                                    }
-                                }
+                            "Point", "LineString", "LinearRing" -> {
+                                geometryPoints = emptyList()
                             }
-                            "description" -> {
-                                if (inPlacemark) {
-                                    currentDescription = parser.nextText().trim()
-                                    currentPlacemark?.let { pm ->
-                                        currentPlacemark = pm.copy(description = currentDescription)
-                                    }
-                                }
-                            }
-                            "Point" -> {
-                                inPoint = true
-                                inLineString = false
-                                inPolygon = false
-                            }
-                            "LineString" -> {
-                                inLineString = true
-                                inPoint = false
-                                inPolygon = false
-                                currentTrackPoints = mutableListOf()
-                            }
-                            "LinearRing" -> {
-                                inPolygon = true
-                                inPoint = false
-                                inLineString = false
-                                currentTrackPoints = mutableListOf()
-                            }
-                            "MultiGeometry" -> {
-                                inMultiGeometry = true
-                            }
-                            "coordinates" -> {
-                                currentCoordinates = parser.nextText().trim()
-                            }
+                            "name", "description", "coordinates" -> text.setLength(0)
                         }
-                        eventType = parser.next()
-                        continue
+                    }
+                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> {
+                        if (currentTag in setOf("name", "description", "coordinates")) {
+                            text.append(parser.text)
+                        }
                     }
                     XmlPullParser.END_TAG -> {
-                        when (parser.name) {
-                            "Placemark" -> {
-                                if (inPlacemark) {
-                                    currentPlacemark?.let { pm ->
-                                        if (pm.latitude != 0.0 || pm.longitude != 0.0) {
-                                            waypoints.add(pm)
-                                            boundsTracker.update(pm.latitude, pm.longitude)
-                                        }
-                                    }
-                                    inPlacemark = false
-                                    currentPlacemark = null
+                        when (parser.name.substringAfter(':')) {
+                            "name" -> placemarkName = text.toString().trim()
+                            "description" -> placemarkDescription = text.toString().trim()
+                            "coordinates" -> geometryPoints = parseCoordinates(text.toString())
+                            "Point" -> {
+                                geometryPoints.firstOrNull()?.let { raw ->
+                                    val point = raw.copy(name = placemarkName, description = placemarkDescription)
+                                    waypoints.add(point)
+                                    boundsTracker.update(point.latitude, point.longitude)
                                 }
                             }
-                            "Point" -> {
-                                inPoint = false
-                            }
                             "LineString" -> {
-                                inLineString = false
-                                if (currentTrackPoints.isNotEmpty()) {
-                                    tracks.add(SurveyTrack(
-                                        name = currentName,
-                                        description = currentDescription,
-                                        points = currentTrackPoints.toList()
-                                    ))
-                                    currentTrackPoints.forEach { boundsTracker.update(it.latitude, it.longitude) }
+                                if (geometryPoints.isNotEmpty()) {
+                                    val namedPoints = geometryPoints.map { it.copy(description = placemarkDescription) }
+                                    tracks.add(SurveyTrack(placemarkName, placemarkDescription, namedPoints))
+                                    namedPoints.forEach { boundsTracker.update(it.latitude, it.longitude) }
                                 }
                             }
                             "LinearRing" -> {
-                                inPolygon = false
-                                if (currentTrackPoints.isNotEmpty()) {
-                                    boundaries.add(currentTrackPoints.toList())
-                                    currentTrackPoints.forEach { boundsTracker.update(it.latitude, it.longitude) }
+                                if (geometryPoints.isNotEmpty()) {
+                                    boundaries.add(geometryPoints)
+                                    geometryPoints.forEach { boundsTracker.update(it.latitude, it.longitude) }
                                 }
                             }
-                            "MultiGeometry" -> {
-                                inMultiGeometry = false
-                            }
                         }
+                        currentTag = ""
                     }
                 }
-                
-                // Process coordinates if we have them
-                currentCoordinates?.let { coords ->
-                    val points = parseCoordinates(coords)
-                    if (inPoint && points.isNotEmpty()) {
-                        val point = points[0]
-                        currentPlacemark?.let { pm ->
-                            currentPlacemark = pm.copy(
-                                latitude = point.latitude,
-                                longitude = point.longitude,
-                                elevation = point.elevation
-                            )
-                        }
-                    } else if (inLineString && points.isNotEmpty()) {
-                        currentTrackPoints.addAll(points)
-                    } else if (inPolygon && points.isNotEmpty()) {
-                        currentTrackPoints.addAll(points)
-                    }
-                    currentCoordinates = null
-                }
-                
                 eventType = parser.next()
             }
-            
-        } catch (e: Exception) {
-            errors.add("KML parsing error: ${e.localizedMessage}")
+        } catch (exception: Exception) {
+            errors.add("KML parsing error: ${exception.localizedMessage ?: exception.javaClass.simpleName}")
         }
-        
+
         return SurveyImportResult(
             waypoints = waypoints,
             tracks = tracks,
             boundaries = boundaries,
             bounds = boundsTracker.toBoundingBox(),
-            errors = errors
+            errors = errors,
         )
     }
-    
     private fun parseCoordinates(coords: String): List<SurveyPoint> {
         val result = mutableListOf<SurveyPoint>()
         val coordinateTuples = coords.trim()

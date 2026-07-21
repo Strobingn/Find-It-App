@@ -102,7 +102,7 @@ class LidarRasterizerTest {
     }
 
     @Test
-    fun coverageMaskBridgesSmallBinGapsButPreservesLargeNoDataAreas() {
+    fun coverageMaskFillsInteriorFlightLineGapsButPreservesOutsideArea() {
         val width = 100
         val height = 10
         val counts = IntArray(width * height)
@@ -114,12 +114,30 @@ class LidarRasterizerTest {
         val mask = buildCoverageMask(counts, width, height)
 
         assertTrue(mask[5 * width + 6])
-        assertFalse(mask[5 * width + 50])
+        assertTrue(mask[5 * width + 50])
         assertTrue(mask[5 * width + 94])
+        assertFalse(mask[0 * width + 50])
     }
 
     @Test
-    fun rasterizedPointCloudCarriesItsMeasuredFootprint() {
+    fun coverageMaskClosesTheLargeCenterGapFromTheReportedMapShape() {
+        val width = 1_024
+        val height = 744
+        val counts = IntArray(width * height)
+        for (y in 220..650 step 4) {
+            for (x in 0..220 step 4) counts[y * width + x] = 1
+            for (x in 800 until width step 4) counts[y * width + x] = 1
+        }
+
+        val mask = buildCoverageMask(counts, width, height)
+
+        assertTrue(mask[400 * width + 512])
+        assertFalse(mask[20 * width + 512])
+        assertFalse(mask[720 * width + 512])
+    }
+
+    @Test
+    fun rasterizedPointCloudFillsItsInteriorSurveyFootprint() {
         val rasterizer = LidarRasterizer(
             minX = 0.0,
             maxX = 100.0,
@@ -149,10 +167,11 @@ class LidarRasterizerTest {
         val result = requireNotNull(rasterizer.finish(6, "two strips"))
         val middle = (result.grid.height / 2) * result.grid.width + result.grid.width / 2
 
-        assertFalse(result.grid.validData[middle])
+        assertTrue(result.grid.validData[middle])
         assertTrue(result.grid.validData.any { it })
         assertTrue(result.grid.bareEarth.all { it.isFinite() })
     }
+
     @Test
     fun nestedViewportBoundsComposeAgainstTheCurrentDetailTile() {
         val parent = NormalizedRasterBounds(0.2, 0.1, 0.8, 0.9)
@@ -196,5 +215,31 @@ class LidarRasterizerTest {
         assertEquals(3f, result.grid.bareEarth.minOrNull() ?: Float.NaN)
         assertEquals(7f, result.grid.bareEarth.maxOrNull() ?: Float.NaN)
         assertTrue(result.note.contains("detailed viewport"))
+    }
+
+    @Test
+    fun binsEveryDecodedReturnAndReportsIncompleteStreams() {
+        val rasterizer = LidarRasterizer(
+            minX = 0.0,
+            maxX = 10.0,
+            minY = 0.0,
+            maxY = 10.0,
+            options = LidarImportOptions(groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            declaredPointCount = 10,
+        )
+        repeat(3) { index ->
+            rasterizer.addPoint(
+                x = index.toDouble(),
+                y = index.toDouble(),
+                z = index.toFloat(),
+                classification = 2,
+            )
+        }
+
+        val result = requireNotNull(rasterizer.finish(6, "partial"))
+
+        assertEquals(3, rasterizer.pointsBinned)
+        assertTrue(result.wasTruncated)
+        assertTrue(result.note.contains("3 / 10 points decoded"))
     }
 }
