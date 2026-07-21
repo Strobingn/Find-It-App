@@ -1,453 +1,346 @@
 package com.example.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CompassCalibration
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.VolumeMute
-import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.RotateLeft
+import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.LidarControlPanel
+import com.example.ui.components.LidarCanvasMode
 import com.example.ui.components.LidarMapCanvas
-import com.example.ui.components.MagnetometerGauge
 import com.example.ui.components.TargetLoggerPanel
+import java.util.Locale
+import kotlin.math.roundToInt
+
+private data class AppTab(val label: String, val icon: ImageVector)
+
+private val tabs = listOf(
+    AppTab("Terrain", Icons.Default.Map),
+    AppTab("Finds", Icons.Default.Flag),
+    AppTab("Import", Icons.Default.UploadFile),
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(
-    viewModel: HillshadeViewModel,
-    modifier: Modifier = Modifier
-) {
-    val currentSiteIndex by viewModel.currentSiteIndex.collectAsState()
-    val sunAzimuth by viewModel.sunAzimuth.collectAsState()
-    val sunAltitude by viewModel.sunAltitude.collectAsState()
-    val vegetationFilter by viewModel.vegetationFilter.collectAsState()
-    val paletteType by viewModel.paletteType.collectAsState()
-    val contrast by viewModel.contrast.collectAsState()
-    val visualizationMode by viewModel.visualizationMode.collectAsState()
-    val overlayType by viewModel.overlayType.collectAsState()
-    val overlayOpacity by viewModel.overlayOpacity.collectAsState()
-    val gridSpacing by viewModel.gridSpacing.collectAsState()
-    val zScale by viewModel.zScale.collectAsState()
-    val hillshadeBitmap by viewModel.hillshadeBitmap.collectAsState()
-    val isRendering by viewModel.isRendering.collectAsState()
-
-    val activeGeoMetadata by viewModel.activeGeoMetadata.collectAsState()
-    val currentLat by viewModel.currentLat.collectAsState()
-    val currentLon by viewModel.currentLon.collectAsState()
-
-    val sweepX by viewModel.sweepX.collectAsState()
-    val sweepY by viewModel.sweepY.collectAsState()
-    val loggedSignals by viewModel.loggedSignals.collectAsState()
-
-    val isPhysicalSensorAvailable by viewModel.isPhysicalSensorAvailable.collectAsState()
-    val usePhysicalSensor by viewModel.usePhysicalSensor.collectAsState()
-    val detectorSignalStrength by viewModel.detectorSignalStrength.collectAsState()
-    val detectedMetalType by viewModel.detectedMetalType.collectAsState()
-
-    val audioPingEnabled by viewModel.audioPingEnabled.collectAsState()
-    val vibrationEnabled by viewModel.vibrationEnabled.collectAsState()
-
-    val scrollState = rememberScrollState()
-
+fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
+    val selectedTab = rememberSaveable { mutableIntStateOf(0) }
+    val terrainFocusMode = rememberSaveable { mutableStateOf(true) }
     Scaffold(
+        modifier = modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
+            if (!terrainFocusMode.value) TopAppBar(
                 title = {
                     Column {
+                        Text("Find It", fontWeight = FontWeight.Bold)
                         Text(
-                            text = "LIDAR GROUND STACK",
-                            fontWeight = FontWeight.Black,
-                            fontSize = 18.sp,
-                            letterSpacing = 1.5.sp,
-                            color = Color(0xFFFFD700)
-                        )
-                        Text(
-                            text = "Hillshade Foundation Profiler",
-                            fontSize = 11.sp,
-                            color = Color.Gray,
-                            fontWeight = FontWeight.Medium
+                            "LiDAR terrain and field survey",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
-                actions = {
-                    IconButton(
-                        onClick = { viewModel.calibrateMagnetometer() },
-                        modifier = Modifier.testTag("calibrate_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CompassCalibration,
-                            contentDescription = "Calibrate baseline",
-                            tint = Color(0xFF29B6F6)
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF141518),
-                    titleContentColor = Color.White
-                )
             )
         },
-        containerColor = Color(0xFF0D0E12),
-        modifier = modifier.fillMaxSize()
-    ) { innerPadding ->
-        Column(
+        bottomBar = {
+            if (!terrainFocusMode.value) NavigationBar {
+                tabs.forEachIndexed { index, tab ->
+                    NavigationBarItem(
+                        selected = selectedTab.intValue == index,
+                        onClick = {
+                            selectedTab.intValue = index
+                            terrainFocusMode.value = false
+                        },
+                        icon = { Icon(tab.icon, contentDescription = null) },
+                        label = { Text(tab.label) },
+                    )
+                }
+            }
+        },
+    ) { padding ->
+        when (selectedTab.intValue) {
+            0 -> TerrainTab(
+                viewModel = viewModel,
+                padding = padding,
+                focusMode = terrainFocusMode.value,
+                onFocusModeChanged = { terrainFocusMode.value = it },
+            )
+            1 -> FindsTab(viewModel, padding)
+            else -> ImportTab(viewModel, padding) {
+                selectedTab.intValue = 0
+                terrainFocusMode.value = true
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerrainTab(
+    viewModel: HillshadeViewModel,
+    padding: PaddingValues,
+    focusMode: Boolean,
+    onFocusModeChanged: (Boolean) -> Unit,
+) {
+    val site by viewModel.currentSiteIndex.collectAsStateWithLifecycle()
+    val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
+    val isRendering by viewModel.isRendering.collectAsStateWithLifecycle()
+    val sweepX by viewModel.sweepX.collectAsStateWithLifecycle()
+    val sweepY by viewModel.sweepY.collectAsStateWithLifecycle()
+    val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    val elevationGrid by viewModel.elevationGrid.collectAsStateWithLifecycle()
+    val terrainSummary by viewModel.activeTerrainSummary.collectAsStateWithLifecycle()
+    val azimuth by viewModel.sunAzimuth.collectAsStateWithLifecycle()
+    val altitude by viewModel.sunAltitude.collectAsStateWithLifecycle()
+    val vegetation by viewModel.vegetationFilter.collectAsStateWithLifecycle()
+    val palette by viewModel.paletteType.collectAsStateWithLifecycle()
+    val contrast by viewModel.contrast.collectAsStateWithLifecycle()
+    val visualization by viewModel.visualizationMode.collectAsStateWithLifecycle()
+    val overlay by viewModel.overlayType.collectAsStateWithLifecycle()
+    val overlayOpacity by viewModel.overlayOpacity.collectAsStateWithLifecycle()
+    val grid by viewModel.gridSpacing.collectAsStateWithLifecycle()
+    val zScale by viewModel.zScale.collectAsStateWithLifecycle()
+    val featureScale by viewModel.featureScaleMeters.collectAsStateWithLifecycle()
+    val sensitivity by viewModel.analysisSensitivity.collectAsStateWithLifecycle()
+    val contourInterval by viewModel.contourIntervalMeters.collectAsStateWithLifecycle()
+    val showControls = rememberSaveable { mutableStateOf(false) }
+    val viewportResetKey = rememberSaveable { mutableIntStateOf(0) }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(if (focusMode) PaddingValues(0.dp) else padding),
+    ) {
+        LidarMapCanvas(
+            bitmap = bitmap,
+            isRendering = isRendering,
+            sweepX = sweepX,
+            sweepY = sweepY,
+            loggedSignals = signals,
+            onSweepPositionChanged = viewModel::setSweepPosition,
+            onStopSweeping = {},
+            gridSpacing = grid,
+            geoMetadata = metadata,
+            currentLat = null,
+            currentLon = null,
+            mode = LidarCanvasMode.EXPLORE,
+            viewportResetKey = viewportResetKey.intValue,
+            showSurveyCursor = false,
+            showCoordinateHud = false,
             modifier = Modifier
-                .padding(innerPadding)
                 .fillMaxSize()
-                .verticalScroll(scrollState)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(if (focusMode) 0.dp else 8.dp)
+                .testTag("terrain_workspace"),
+        )
+
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            tonalElevation = 6.dp,
+            modifier = Modifier.align(Alignment.TopCenter).padding(14.dp),
         ) {
-            // --- HEADER METRICS BAR ---
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF141518))
-                    .border(1.dp, Color(0xFF2C2E35), RoundedCornerShape(10.dp))
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.padding(horizontal = 4.dp),
             ) {
-                Column {
-                    Text(
-                        text = "COIL COORDINATES",
-                        color = Color.Gray,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "LAT: ${String.format("%.4f", currentLat)}° | LON: ${String.format("%.4f", currentLon)}°",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
+                IconButton(onClick = { viewModel.rotateSunAzimuth(-45f) }) {
+                    Icon(Icons.Default.RotateLeft, contentDescription = "Rotate light 45 degrees left")
                 }
-
-                Box(
-                    modifier = Modifier
-                        .height(30.dp)
-                        .width(1.dp)
-                        .background(Color(0xFF2C2E35))
+                Icon(
+                    Icons.Default.WbSunny,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.rotate(azimuth),
                 )
-
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = "SURVEY MODE",
-                        color = Color.Gray,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (currentSiteIndex == 3) "Custom Layer" else "Archaeological",
-                        color = if (currentSiteIndex == 3) Color(0xFF29B6F6) else Color(0xFF00E676),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                Text(
+                    "${compassLabel(azimuth)} ${azimuth.roundToInt()}°",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                )
+                IconButton(onClick = { viewModel.rotateSunAzimuth(45f) }) {
+                    Icon(Icons.Default.RotateRight, contentDescription = "Rotate light 45 degrees right")
                 }
-            }
-
-            // --- 1. LIDAR ELEVATION CANVAS (HILLSHADE RELIEF) ---
-            Text(
-                text = "ACTIVE LIDAR RASTER",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-
-            LidarMapCanvas(
-                bitmap = hillshadeBitmap,
-                isRendering = isRendering,
-                sweepX = sweepX,
-                sweepY = sweepY,
-                loggedSignals = loggedSignals,
-                onSweepPositionChanged = { x, y -> viewModel.setSweepPosition(x, y) },
-                onStopSweeping = { viewModel.stopSweeping() },
-                gridSpacing = gridSpacing,
-                geoMetadata = activeGeoMetadata,
-                currentLat = currentLat,
-                currentLon = currentLon,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(300.dp)
-                    .testTag("map_canvas")
-            )
-
-            // Hint Text for Map Dragging
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2026)),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                IconButton(onClick = { viewportResetKey.intValue++ }) {
+                    Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit terrain to screen")
+                }
+                IconButton(onClick = { showControls.value = !showControls.value }) {
+                    Icon(Icons.Default.Tune, contentDescription = "Show terrain controls")
+                }
+                IconButton(onClick = { onFocusModeChanged(!focusMode) }) {
                     Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = Color(0xFFFFD700),
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "TAP & DRAG the golden coil above to sweep the ground and search for anomalies.",
-                        color = Color.LightGray,
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp
-                    )
-                }
-            }
-
-            // --- 2. SENSOR & ANOMALY DETECTOR GAUGE ---
-            Text(
-                text = "COIL FEEDBACK & SIGNAL DISCRIMINATION",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-
-            MagnetometerGauge(
-                signalStrength = detectorSignalStrength,
-                detectedMetal = detectedMetalType,
-                isPhysicalSensor = usePhysicalSensor,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // --- 3. HARDWARE & DEVIATION SETTINGS ---
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF141518)),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFF2C2E35), RoundedCornerShape(12.dp))
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    // Physical Magnetometer Toggle (Only enabled if physically present)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                text = "Use Hardware Magnetometer",
-                                color = Color.White,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp
-                            )
-                            Text(
-                                text = if (isPhysicalSensorAvailable) {
-                                    "Measure nearby physical magnetic metals with phone sensor"
-                                } else {
-                                    "No physical sensor detected. Simulating coil sweeps."
-                                },
-                                color = Color.Gray,
-                                fontSize = 10.sp
-                            )
-                        }
-
-                        Switch(
-                            checked = usePhysicalSensor,
-                            onCheckedChange = { viewModel.togglePhysicalSensor(it) },
-                            enabled = isPhysicalSensorAvailable,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color(0xFFFFD700),
-                                checkedTrackColor = Color(0xFFFFD700).copy(alpha = 0.5f)
-                            ),
-                            modifier = Modifier.testTag("hardware_sensor_switch")
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Audio & Vibrate Quick Controls
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { viewModel.toggleAudioPing(!audioPingEnabled) }) {
-                                Icon(
-                                    imageVector = if (audioPingEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeMute,
-                                    contentDescription = "Toggle Audio pings",
-                                    tint = if (audioPingEnabled) Color(0xFFFFD700) else Color.Gray,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Text(
-                                text = "Audio Pings",
-                                color = Color.LightGray,
-                                fontSize = 12.sp
-                            )
-                        }
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { viewModel.toggleVibration(!vibrationEnabled) }) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Toggle vibration",
-                                    tint = if (vibrationEnabled) Color(0xFF00E676) else Color.Gray,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                            Text(
-                                text = "Coil Vibration",
-                                color = Color.LightGray,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
-                }
-            }
-
-            // --- 4. LIDAR CONTROL PANEL ---
-            Text(
-                text = "LIDAR VISUALIZATION FILTERS",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-
-            LidarControlPanel(
-                selectedSiteIndex = currentSiteIndex,
-                onSiteSelected = { viewModel.selectSite(it) },
-                sunAzimuth = sunAzimuth,
-                onSunAzimuthChanged = { viewModel.updateSunAzimuth(it) },
-                sunAltitude = sunAltitude,
-                onSunAltitudeChanged = { viewModel.updateSunAltitude(it) },
-                vegetationFilter = vegetationFilter,
-                onVegetationFilterChanged = { viewModel.updateVegetationFilter(it) },
-                paletteType = paletteType,
-                onPaletteTypeChanged = { viewModel.updatePalette(it) },
-                contrast = contrast,
-                onContrastChanged = { viewModel.updateContrast(it) },
-                visualizationMode = visualizationMode,
-                onVisualizationModeChanged = { viewModel.updateVisualizationMode(it) },
-                overlayType = overlayType,
-                onOverlayTypeChanged = { viewModel.updateOverlayType(it) },
-                overlayOpacity = overlayOpacity,
-                onOverlayOpacityChanged = { viewModel.updateOverlayOpacity(it) },
-                gridSpacing = gridSpacing,
-                onGridSpacingChanged = { viewModel.updateGridSpacing(it) },
-                zScale = zScale,
-                onZScaleChanged = { viewModel.updateZScale(it) },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // --- 5. TARGET LOGS LOGGER ---
-            Text(
-                text = "HISTORIC MARKS LOGS",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-
-            TargetLoggerPanel(
-                loggedSignals = loggedSignals,
-                currentSweepX = sweepX,
-                currentSweepY = sweepY,
-                onLogSignal = { viewModel.logCurrentSignal() },
-                onDeleteSignal = { viewModel.deleteLoggedSignal(it) },
-                onUpdateSignal = { viewModel.updateLoggedSignal(it) },
-                onClearAll = { viewModel.clearLoggedSignals() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(260.dp)
-            )
-
-            // --- 6. CUSTOM GRID LAYER IMPORTER ---
-            Text(
-                text = "GEO-SPATIAL GRID IMPORT",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-
-            CustomFileLoader(
-                onCustomGridLoaded = { viewModel.setCustomGrid(it) },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // --- 7. EDUCATIONAL GUIDE CARD ---
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF141518)),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFF2C2E35), RoundedCornerShape(12.dp))
-                    .padding(bottom = 16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "LiDAR Archaeological Guide",
-                        color = Color(0xFFFFD700),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "1. Under forest canopy (low ground classification filter), ruins are hidden by trees and vegetation spikes.\n\n" +
-                               "2. Turn Ground Classification up to 100% to fully filter out vegetation and reveal bare soil relief features.\n\n" +
-                               "3. Adjust the Azimuth (sun angle) and low Altitude (sun height) to cast long, dramatic shadows. foundations, cellars, and trenches will pop out vividly in the clay/grey palette!",
-                        color = Color.LightGray,
-                        fontSize = 11.sp,
-                        lineHeight = 16.sp
+                        if (focusMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        contentDescription = if (focusMode) "Exit full screen" else "Open full screen",
                     )
                 }
             }
         }
+
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+            modifier = Modifier.align(Alignment.BottomStart).padding(14.dp),
+        ) {
+            Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
+                val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
+                Text(
+                    "${elevationGrid.width}×${elevationGrid.height} · ${widthMeters.format(0)}×${heightMeters.format(0)} m · ${elevationGrid.cellSizeMeters.toDouble().format(2)} m/cell",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Text(
+                    if (showControls.value) "Controls open" else "Pinch to zoom · drag to pan · Tune for analysis",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = showControls.value,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                tonalElevation = 8.dp,
+                modifier = Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.72f),
+            ) {
+                LazyColumn(
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item {
+                        Text(
+                            terrainSummary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    item {
+                        LidarControlPanel(
+                            selectedSiteIndex = site,
+                            onSiteSelected = viewModel::selectSite,
+                            sunAzimuth = azimuth,
+                            onSunAzimuthChanged = viewModel::updateSunAzimuth,
+                            sunAltitude = altitude,
+                            onSunAltitudeChanged = viewModel::updateSunAltitude,
+                            vegetationFilter = vegetation,
+                            onVegetationFilterChanged = viewModel::updateVegetationFilter,
+                            paletteType = palette,
+                            onPaletteTypeChanged = viewModel::updatePalette,
+                            contrast = contrast,
+                            onContrastChanged = viewModel::updateContrast,
+                            visualizationMode = visualization,
+                            onVisualizationModeChanged = viewModel::updateVisualizationMode,
+                            overlayType = overlay,
+                            onOverlayTypeChanged = viewModel::updateOverlayType,
+                            overlayOpacity = overlayOpacity,
+                            onOverlayOpacityChanged = viewModel::updateOverlayOpacity,
+                            gridSpacing = grid,
+                            onGridSpacingChanged = viewModel::updateGridSpacing,
+                            zScale = zScale,
+                            onZScaleChanged = viewModel::updateZScale,
+                            featureScaleMeters = featureScale,
+                            onFeatureScaleChanged = viewModel::updateFeatureScale,
+                            analysisSensitivity = sensitivity,
+                            onAnalysisSensitivityChanged = viewModel::updateAnalysisSensitivity,
+                            contourIntervalMeters = contourInterval,
+                            onContourIntervalChanged = viewModel::updateContourInterval,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+        }
     }
+}
+
+@Composable
+private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
+    val x by viewModel.sweepX.collectAsStateWithLifecycle()
+    val y by viewModel.sweepY.collectAsStateWithLifecycle()
+    TargetLoggerPanel(
+        loggedSignals = signals,
+        currentSweepX = x,
+        currentSweepY = y,
+        onLogSignal = viewModel::logCurrentSignal,
+        onDeleteSignal = viewModel::deleteLoggedSignal,
+        onUpdateSignal = viewModel::updateLoggedSignal,
+        onClearAll = viewModel::clearLoggedSignals,
+        modifier = Modifier.fillMaxSize().padding(padding),
+    )
+}
+
+@Composable
+private fun ImportTab(viewModel: HillshadeViewModel, padding: PaddingValues, onImported: () -> Unit) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
+        item {
+            CustomFileLoader(
+                onCustomTerrainLoaded = {
+                    viewModel.setCustomTerrain(it)
+                    onImported()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+private fun Double.format(places: Int) = String.format(Locale.US, "%.${places}f", this)
+
+private fun Float.format(places: Int) = toDouble().format(places)
+
+private fun compassLabel(azimuth: Float): String {
+    val directions = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+    val normalized = ((azimuth % 360f) + 360f) % 360f
+    return directions[((normalized / 45f).roundToInt()).mod(directions.size)]
 }

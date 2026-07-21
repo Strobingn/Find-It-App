@@ -1,166 +1,157 @@
 package com.example.geospatial
 
+import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/**
- * A geo-spatial projection and distance calculation engine designed for LiDAR and DEM terrain layers.
- * Supports WGS84, UTM Zone 10N (EPSG:32610), and Haversine geodesic distance computations.
- */
+/** Small, dependency-free coordinate helpers for the terrain preview. */
 object GeoSpatialLibrary {
+    private const val EQUATORIAL_RADIUS = 6_378_137.0
+    private const val POLAR_RADIUS = 6_356_752.314245
 
-    // WGS-84 Ellipsoid Constants
-    private const val EQUATORIAL_RADIUS = 6378137.0
-    private const val POLAR_RADIUS = 6356752.3142
-    private const val FLATTENING = 1.0 / 298.257223563
-
-    /**
-     * Bounding box metadata for a geospatial terrain data layer.
-     */
-    data class GeoSpatialMetadata(
-        val siteName: String,
+    data class GeographicBounds(
         val minLat: Double,
         val maxLat: Double,
         val minLon: Double,
         val maxLon: Double,
-        val crs: String = "EPSG:32610 (UTM Zone 10N)",
-        val datum: String = "NAD83",
-        val resolutionMeters: Double = 0.5 // 50cm per pixel
+    )
+
+    data class GeoSpatialMetadata(
+        val siteName: String,
+        val bounds: GeographicBounds? = null,
+        val crs: String = "Local grid (CRS unavailable)",
+        val datum: String = "Unknown",
+        val resolutionMeters: Double = 1.0,
+        val columns: Int = 100,
+        val rows: Int = 100,
     ) {
-        val widthMeters: Double
-            get() = resolutionMeters * 100.0 // Grid is 100x100
-        val heightMeters: Double
-            get() = resolutionMeters * 100.0
+        val isGeoreferenced: Boolean get() = bounds != null
+        val widthMeters: Double get() = resolutionMeters * columns
+        val heightMeters: Double get() = resolutionMeters * rows
     }
 
-    // Default sites mapped to Southern Oregon Coast (Bandon / Coos Bay region)
+    data class UtmCoordinate(
+        val zone: Int,
+        val hemisphere: Char,
+        val easting: Double,
+        val northing: Double,
+    )
+
     val SITES_METADATA = listOf(
         GeoSpatialMetadata(
             siteName = "Homestead & Chimney Plot",
-            minLat = 43.1201,
-            maxLat = 43.1209,
-            minLon = -124.4087,
-            maxLon = -124.4077,
-            resolutionMeters = 0.5
+            bounds = GeographicBounds(43.1201, 43.1209, -124.4087, -124.4077),
+            crs = "EPSG:32610 (WGS 84 / UTM zone 10N)",
+            datum = "WGS 84",
+            resolutionMeters = 0.5,
         ),
         GeoSpatialMetadata(
             siteName = "Civil War Fortification",
-            minLat = 43.1176,
-            maxLat = 43.1184,
-            minLon = -124.4100,
-            maxLon = -124.4090,
-            resolutionMeters = 0.5
+            bounds = GeographicBounds(43.1176, 43.1184, -124.4100, -124.4090),
+            crs = "EPSG:32610 (WGS 84 / UTM zone 10N)",
+            datum = "WGS 84",
+            resolutionMeters = 0.5,
         ),
         GeoSpatialMetadata(
             siteName = "Roman Villa Complex",
-            minLat = 43.1221,
-            maxLat = 43.1229,
-            minLon = -124.4065,
-            maxLon = -124.4055,
-            resolutionMeters = 0.5
+            bounds = GeographicBounds(43.1221, 43.1229, -124.4065, -124.4055),
+            crs = "EPSG:32610 (WGS 84 / UTM zone 10N)",
+            datum = "WGS 84",
+            resolutionMeters = 0.5,
         ),
-        // Custom loaded layers default to Bandon Oregon Lidar index (ID 10206)
-        GeoSpatialMetadata(
-            siteName = "Custom Imported Layer",
-            minLat = 43.1150,
-            maxLat = 43.1165,
-            minLon = -124.4150,
-            maxLon = -124.4135,
-            resolutionMeters = 0.8
-        )
     )
 
-    /**
-     * Interpolates geographic coordinates (Lat, Lon) from grid percent coordinates (0-100).
-     */
+    fun localGrid(
+        name: String,
+        columns: Int,
+        rows: Int,
+        resolutionMeters: Double = 1.0,
+    ) = GeoSpatialMetadata(
+        siteName = name,
+        resolutionMeters = resolutionMeters.coerceAtLeast(0.001),
+        columns = columns.coerceAtLeast(1),
+        rows = rows.coerceAtLeast(1),
+    )
+
+    /** Returns null when an imported grid has no declared geographic bounds. */
     fun gridToGeographic(
         xPct: Float,
         yPct: Float,
-        metadata: GeoSpatialMetadata
-    ): Pair<Double, Double> {
-        val lat = metadata.minLat + ((100f - yPct) / 100f) * (metadata.maxLat - metadata.minLat)
-        val lon = metadata.minLon + (xPct / 100f) * (metadata.maxLon - metadata.minLon)
-        return Pair(lat, lon)
+        metadata: GeoSpatialMetadata,
+    ): Pair<Double, Double>? {
+        val bounds = metadata.bounds ?: return null
+        val x = xPct.coerceIn(0f, 100f) / 100.0
+        val y = (100f - yPct.coerceIn(0f, 100f)) / 100.0
+        val lat = bounds.minLat + y * (bounds.maxLat - bounds.minLat)
+        val lon = bounds.minLon + x * (bounds.maxLon - bounds.minLon)
+        return lat to lon
     }
 
-    /**
-     * Computes the great-circle distance between two geographic coordinates using the Haversine formula.
-     */
     fun calculateGeodesicDistance(
-        lat1: Double, lon1: Double,
-        lat2: Double, lon2: Double
+        lat1: Double,
+        lon1: Double,
+        lat2: Double,
+        lon2: Double,
     ): Double {
-        val r = 6371000.0 // Earth's radius in meters
         val dLat = Math.toRadians(lat2 - lat1)
         val dLon = Math.toRadians(lon2 - lon1)
-        val a = sin(dLat / 2) * sin(dLat / 2) +
-                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-                sin(dLon / 2) * sin(dLon / 2)
-        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return r * c
+        val a = sin(dLat / 2).let { it * it } +
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
+            sin(dLon / 2).let { it * it }
+        return 6_371_000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    /**
-     * Projects WGS84 Latitude/Longitude to Transverse Mercator (UTM Zone 10N) Easting and Northing.
-     */
-    fun geographicToUtmZone10(lat: Double, lon: Double): Pair<Double, Double> {
+    /** Projects valid WGS84 coordinates into their natural UTM zone. */
+    fun geographicToUtm(lat: Double, lon: Double): UtmCoordinate {
+        require(lat in -80.0..84.0) { "UTM is defined between 80°S and 84°N" }
+        require(lon in -180.0..180.0) { "Longitude must be between -180 and 180" }
+
+        val zone = ((lon + 180.0) / 6.0).toInt().coerceIn(0, 59) + 1
         val latRad = Math.toRadians(lat)
         val lonRad = Math.toRadians(lon)
-
-        val utmZone = 10
-        val centralMeridian = Math.toRadians((utmZone * 6 - 183).toDouble())
-
+        val centralMeridian = Math.toRadians(zone * 6.0 - 183.0)
         val scaleFactor = 0.9996
-        val falseEasting = 500000.0
-        val falseNorthing = 0.0
-
-        val eccSquared = (EQUATORIAL_RADIUS * EQUATORIAL_RADIUS - POLAR_RADIUS * POLAR_RADIUS) / (EQUATORIAL_RADIUS * EQUATORIAL_RADIUS)
+        val eccSquared =
+            (EQUATORIAL_RADIUS * EQUATORIAL_RADIUS - POLAR_RADIUS * POLAR_RADIUS) /
+                (EQUATORIAL_RADIUS * EQUATORIAL_RADIUS)
         val eccPrimeSquared = eccSquared / (1.0 - eccSquared)
-
         val n = EQUATORIAL_RADIUS / sqrt(1.0 - eccSquared * sin(latRad) * sin(latRad))
-        val t = Math.tan(latRad) * Math.tan(latRad)
+        val t = kotlin.math.tan(latRad).let { it * it }
         val c = eccPrimeSquared * cos(latRad) * cos(latRad)
-        val a2 = cos(latRad) * (lonRad - centralMeridian)
-
+        val a = cos(latRad) * (lonRad - centralMeridian)
         val m = EQUATORIAL_RADIUS * (
-                (1.0 - eccSquared / 4.0 - 3.0 * eccSquared * eccSquared / 64.0 - 5.0 * eccSquared * eccSquared * eccSquared / 256.0) * latRad -
+            (1.0 - eccSquared / 4.0 - 3.0 * eccSquared * eccSquared / 64.0 - 5.0 * eccSquared * eccSquared * eccSquared / 256.0) * latRad -
                 (3.0 * eccSquared / 8.0 + 3.0 * eccSquared * eccSquared / 32.0 + 45.0 * eccSquared * eccSquared * eccSquared / 1024.0) * sin(2.0 * latRad) +
                 (15.0 * eccSquared * eccSquared / 256.0 + 45.0 * eccSquared * eccSquared * eccSquared / 1024.0) * sin(4.0 * latRad) -
                 (35.0 * eccSquared * eccSquared * eccSquared / 3072.0) * sin(6.0 * latRad)
-                )
+            )
 
-        val easting = falseEasting + scaleFactor * n * (
-                a2 +
-                (1.0 - t + c) * a2 * a2 * a2 / 6.0 +
-                (5.0 - 18.0 * t + t * t + 72.0 * c - 58.0 * eccPrimeSquared) * a2 * a2 * a2 * a2 * a2 / 120.0
+        val easting = 500_000.0 + scaleFactor * n * (
+            a + (1.0 - t + c) * a * a * a / 6.0 +
+                (5.0 - 18.0 * t + t * t + 72.0 * c - 58.0 * eccPrimeSquared) * a * a * a * a * a / 120.0
+            )
+        var northing = scaleFactor * (
+            m + n * kotlin.math.tan(latRad) * (
+                a * a / 2.0 + (5.0 - t + 9.0 * c + 4.0 * c * c) * a * a * a * a / 24.0 +
+                    (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * eccPrimeSquared) * a * a * a * a * a * a / 720.0
                 )
-
-        val northing = falseNorthing + scaleFactor * (
-                m + n * Math.tan(latRad) * (
-                        a2 * a2 / 2.0 +
-                        (5.0 - t + 9.0 * c + 4.0 * c * c) * a2 * a2 * a2 * a2 / 24.0 +
-                        (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * eccPrimeSquared) * a2 * a2 * a2 * a2 * a2 * a2 / 720.0
-                        )
-                )
-
-        return Pair(easting, northing)
+            )
+        if (lat < 0) northing += 10_000_000.0
+        return UtmCoordinate(zone, if (lat >= 0) 'N' else 'S', easting, northing)
     }
 
-    /**
-     * Formats a coordinate into clean GPS/DMS (Degrees, Minutes, Seconds) presentation.
-     */
-    fun formatDMS(deg: Double, isLatitude: Boolean): String {
+    fun formatDms(degrees: Double, isLatitude: Boolean): String {
         val direction = if (isLatitude) {
-            if (deg >= 0) "N" else "S"
+            if (degrees >= 0) "N" else "S"
         } else {
-            if (deg >= 0) "E" else "W"
+            if (degrees >= 0) "E" else "W"
         }
-        val absDeg = Math.abs(deg)
-        val d = absDeg.toInt()
-        val m = ((absDeg - d) * 60.0).toInt()
-        val s = (absDeg - d - m / 60.0) * 3600.0
-        return String.format("%d°%02d'%04.1f\"%s", d, m, s, direction)
+        val absolute = kotlin.math.abs(degrees)
+        val whole = absolute.toInt()
+        val minutes = ((absolute - whole) * 60.0).toInt()
+        val seconds = (absolute - whole - minutes / 60.0) * 3600.0
+        return String.format(Locale.US, "%d°%02d′%04.1f″%s", whole, minutes, seconds, direction)
     }
 }

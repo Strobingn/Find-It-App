@@ -9,10 +9,11 @@ on:
       - master
       - grok
       - grok-v7
+      - "agent/**"
       - "feature/**"
       - "fix/**"
   pull_request:
-    branches: [main, master]
+    branches: [main, master, grok-v7]
   workflow_dispatch:
 
 jobs:
@@ -39,13 +40,6 @@ jobs:
           test -f gradlew || { echo "gradlew missing on this branch"; ls -la; exit 1; }
           chmod +x ./gradlew
 
-      - name: Ensure .env for secrets plugin
-        run: |
-          if [ ! -f .env ] && [ -f .env.example ]; then
-            cp .env.example .env
-          fi
-          touch .env
-
       - name: Ensure Android debug keystore
         run: |
           mkdir -p "$HOME/.android"
@@ -64,8 +58,10 @@ jobs:
           fi
 
       - name: Unit tests
-        continue-on-error: true
         run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Android lint
+        run: ./gradlew lintDebug --stacktrace
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
@@ -73,20 +69,18 @@ jobs:
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: lidar-metal-detector-debug-${{ github.ref_name }}-${{ github.run_number }}
+          name: find-it-debug-${{ github.run_id }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Build Release APK (unsigned OK)
-        continue-on-error: true
+      - name: Build Release APK
         run: ./gradlew assembleRelease --stacktrace
 
       - name: Upload Release APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: lidar-metal-detector-release-${{ github.ref_name }}-${{ github.run_number }}
+          name: find-it-release-${{ github.run_id }}
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14

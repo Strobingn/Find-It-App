@@ -178,7 +178,7 @@ object DemGenerator {
             }
         }
 
-        return ElevationGrid(GRID_SIZE, GRID_SIZE, bareEarth, canopySpikes)
+        return ElevationGrid(GRID_SIZE, GRID_SIZE, bareEarth, canopySpikes, cellSizeMeters = 0.5f)
     }
 
     /**
@@ -205,19 +205,20 @@ object DemGenerator {
 
                 val floats = FloatArray(tokens.size)
                 for (i in tokens.indices) {
-                    floats[i] = tokens[i].toFloatOrNull() ?: 0f
+                    val value = tokens[i].toFloatOrNull() ?: return null
+                    if (!value.isFinite()) return null
+                    floats[i] = value
                 }
 
                 if (colCount == -1) {
                     colCount = floats.size
                 } else if (floats.size != colCount) {
-                    // Non-matching columns, truncate or pad to maintain grid
-                    val adjustedFloats = FloatArray(colCount)
-                    System.arraycopy(floats, 0, adjustedFloats, 0, Math.min(floats.size, colCount))
-                    rowData.add(adjustedFloats)
-                    continue
+                    return null
                 }
                 rowData.add(floats)
+                if (rowData.size > 2_048 || colCount > 2_048 || rowData.size.toLong() * colCount > 2_000_000) {
+                    return null
+                }
             }
 
             if (rowData.isEmpty() || colCount <= 0) return null
@@ -274,15 +275,7 @@ object DemGenerator {
     fun parseLasStream(
         inputStream: java.io.InputStream,
         groundOnly: Boolean = true,
-    ): ElevationGrid? {
-        return try {
-            val bytes = inputStream.readBytes()
-            parseLasBytes(bytes, groundOnly)?.grid
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
-    }
+    ): ElevationGrid? = parseLasStreamDetailed(inputStream, groundOnly)?.grid
 
     /**
      * Full LAS load result with stats for the UI (ground counts, method used).
@@ -294,7 +287,290 @@ object DemGenerator {
         val usedClassificationFilter: Boolean,
         val pointFormat: Int,
         val note: String,
+        val requestedGroundMode: GroundSurfaceMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+        val appliedGroundMode: GroundSurfaceMode = if (usedClassificationFilter) {
+            GroundSurfaceMode.SOURCE_CLASSIFIED
+        } else {
+            GroundSurfaceMode.AUTO_LOWEST
+        },
+        val sampledPoints: Int = totalPointsRead,
+        val wasTruncated: Boolean = false,
     )
+
+    /**
+     * Configurable LAS reader used by the import workspace. It preserves the file footprint aspect
+     * ratio and can build classified ground, automatic ground, or highest-return surface rasters.
+     */
+    fun parseLasStreamDetailed(
+        inputStream: java.io.InputStream,
+        options: LidarImportOptions,
+    ): LasLoadResult? {
+        return try {
+            val buffered = if (inputStream is java.io.BufferedInputStream) {
+                inputStream
+            } else {
+                java.io.BufferedInputStream(inputStream, 256 * 1024)
+            }
+            buffered.mark(4_096)
+            val header = ByteArray(375)
+            val headerBytes = readUpTo(buffered, header)
+            buffered.reset()
+            if (headerBytes < 227 || !header.copyOfRange(0, 4).contentEquals("LASF".toByteArray())) {
+                return null
+            }
+
+            val versionMajor = header[24].toInt() and 0xFF
+            val versionMinor = header[25].toInt() and 0xFF
+            val offsetToPoints = readIntLE(header, 96)
+            val rawPointFormat = header[104].toInt() and 0xFF
+            val pointFormat = rawPointFormat and 0x3F
+            val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
+            if (rawPointFormat and 0xC0 != 0) return LazTerrainReader.read(buffered, options)
+            if (offsetToPoints < 227 || pointRecordLength < 20 || pointRecordLength > 512) return null
+
+            var pointCount = readIntLE(header, 107).toLong() and 0xFFFFFFFFL
+            if (versionMajor == 1 && versionMinor >= 4 && headerBytes >= 255) {
+                readLongLE(header, 247).takeIf { it > 0 }?.let { pointCount = it }
+            }
+            val scaleX = readDoubleLE(header, 131)
+            val scaleY = readDoubleLE(header, 139)
+            val scaleZ = readDoubleLE(header, 147)
+            val offsetX = readDoubleLE(header, 155)
+            val offsetY = readDoubleLE(header, 163)
+            val offsetZ = readDoubleLE(header, 171)
+            val maxX = readDoubleLE(header, 179)
+            val minX = readDoubleLE(header, 187)
+            val maxY = readDoubleLE(header, 195)
+            val minY = readDoubleLE(header, 203)
+            if (!listOf(scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, maxX, minX, maxY, minY)
+                    .all { it.isFinite() } || maxX <= minX || maxY <= minY
+            ) {
+                return null
+            }
+
+            if (!skipFully(buffered, offsetToPoints)) return null
+            val rasterizer = LidarRasterizer(
+                minX = minX,
+                maxX = maxX,
+                minY = minY,
+                maxY = maxY,
+                options = options,
+                declaredPointCount = pointCount,
+            )
+            val classOffset = if (pointFormat >= 6) 16 else 15
+            val classMask = if (pointFormat >= 6) 0xFF else 0x1F
+            val keyPointMask = if (pointFormat >= 6) 0x02 else 0x40
+            val keyPointOffset = if (pointFormat >= 6) 15 else 15
+            val record = ByteArray(pointRecordLength)
+            while (readFullyRecord(buffered, record)) {
+                val rawX = readIntLE(record, 0)
+                val rawY = readIntLE(record, 4)
+                val rawZ = readIntLE(record, 8)
+                val classification = record[classOffset].toInt() and classMask
+                val isKeyPoint = record[keyPointOffset].toInt() and keyPointMask != 0
+                if (!rasterizer.addPoint(
+                        x = rawX * scaleX + offsetX,
+                        y = rawY * scaleY + offsetY,
+                        z = (rawZ * scaleZ + offsetZ).toFloat(),
+                        classification = classification,
+                        isKeyPoint = isKeyPoint,
+                    )
+                ) {
+                    break
+                }
+            }
+            rasterizer.finish(
+                pointFormat = pointFormat,
+                sourceLabel = "LAS $versionMajor.$versionMinor format $pointFormat",
+            )
+        } catch (exception: Exception) {
+            exception.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Reads LAS point records incrementally. Only a single record and the 128×128 bins are retained,
+     * so large point clouds cannot exhaust the app heap.
+     */
+    fun parseLasStreamDetailed(
+        inputStream: java.io.InputStream,
+        groundOnly: Boolean = true,
+    ): LasLoadResult? {
+        return try {
+            val buffered =
+                if (inputStream is java.io.BufferedInputStream) inputStream
+                else java.io.BufferedInputStream(inputStream, 64 * 1024)
+            val header = ByteArray(375)
+            val headerBytes = readUpTo(buffered, header)
+            if (headerBytes < 227 ||
+                header[0] != 'L'.code.toByte() || header[1] != 'A'.code.toByte() ||
+                header[2] != 'S'.code.toByte() || header[3] != 'F'.code.toByte()
+            ) {
+                return null
+            }
+
+            val versionMajor = header[24].toInt() and 0xFF
+            val versionMinor = header[25].toInt() and 0xFF
+            val offsetToPoints = readIntLE(header, 96)
+            val pointFormat = header[104].toInt() and 0x3F
+            val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
+            if (offsetToPoints < 227 || pointRecordLength < 20 || pointRecordLength > 512) return null
+
+            var numPoints = readIntLE(header, 107).toLong() and 0xFFFFFFFFL
+            if (versionMajor == 1 && versionMinor >= 4 && headerBytes >= 255) {
+                readLongLE(header, 247).takeIf { it > 0 }?.let { numPoints = it }
+            }
+            val maxProcess = minOf(if (numPoints > 0) numPoints else Long.MAX_VALUE, 2_000_000L).toInt()
+
+            val scaleX = readDoubleLE(header, 131)
+            val scaleY = readDoubleLE(header, 139)
+            val scaleZ = readDoubleLE(header, 147)
+            val offsetX = readDoubleLE(header, 155)
+            val offsetY = readDoubleLE(header, 163)
+            val offsetZ = readDoubleLE(header, 171)
+            val maxX = readDoubleLE(header, 179)
+            val minX = readDoubleLE(header, 187)
+            val maxY = readDoubleLE(header, 195)
+            val minY = readDoubleLE(header, 203)
+            if (!listOf(scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, maxX, minX, maxY, minY).all { it.isFinite() }) {
+                return null
+            }
+
+            val pointStream: java.io.InputStream =
+                if (offsetToPoints < headerBytes) {
+                    java.io.SequenceInputStream(
+                        java.io.ByteArrayInputStream(header, offsetToPoints, headerBytes - offsetToPoints),
+                        buffered,
+                    )
+                } else {
+                    if (!skipFully(buffered, offsetToPoints - headerBytes)) return null
+                    buffered
+                }
+
+            val gridW = 128
+            val gridH = 128
+            val groundMin = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+            val groundCnt = IntArray(gridW * gridH)
+            val allMin = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+            val allMax = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
+            val allCnt = IntArray(gridW * gridH)
+            val rangeX = (maxX - minX).takeIf { it > 0 && it.isFinite() } ?: 1.0
+            val rangeY = (maxY - minY).takeIf { it > 0 && it.isFinite() } ?: 1.0
+            val classOffset = if (pointFormat >= 6) 16 else 15
+            val classMask = if (pointFormat >= 6) 0xFF else 0x1F
+            val record = ByteArray(pointRecordLength)
+            var read = 0
+            var groundUsed = 0
+
+            while (read < maxProcess && readFullyRecord(pointStream, record)) {
+                read++
+                val rawX = readIntLE(record, 0)
+                val rawY = readIntLE(record, 4)
+                val rawZ = readIntLE(record, 8)
+                val realX = rawX * scaleX + offsetX
+                val realY = rawY * scaleY + offsetY
+                val realZ = (rawZ * scaleZ + offsetZ).toFloat()
+                if (!realX.isFinite() || !realY.isFinite() || !realZ.isFinite()) continue
+
+                val classification = record[classOffset].toInt() and classMask
+                val gx = (((realX - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
+                val gy = ((1.0 - (realY - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
+                val index = gy * gridW + gx
+                if (realZ < allMin[index]) allMin[index] = realZ
+                if (realZ > allMax[index]) allMax[index] = realZ
+                allCnt[index]++
+                if (classification == 2 || classification == 8) {
+                    if (realZ < groundMin[index]) groundMin[index] = realZ
+                    groundCnt[index]++
+                    groundUsed++
+                }
+            }
+            if (read == 0 || allCnt.none { it > 0 }) return null
+
+            val groundCells = groundCnt.count { it > 0 }
+            val allCells = allCnt.count { it > 0 }
+            val useClassFilter =
+                groundOnly && groundUsed >= 500 &&
+                    groundCells >= (allCells * 0.15).toInt().coerceAtLeast(20)
+            val sourceMin = if (useClassFilter) groundMin else allMin
+            val sourceCnt = if (useClassFilter) groundCnt else allCnt
+            val bareEarth = FloatArray(gridW * gridH)
+            val canopySpikes = FloatArray(gridW * gridH)
+            for (index in bareEarth.indices) {
+                if (sourceCnt[index] > 0) {
+                    bareEarth[index] = sourceMin[index]
+                    canopySpikes[index] =
+                        if (allCnt[index] > 0) (allMax[index] - sourceMin[index]).coerceAtLeast(0f) else 0f
+                } else {
+                    bareEarth[index] = Float.NaN
+                }
+            }
+            fillNaNNearest(bareEarth, gridW, gridH)
+            val smoothBare = boxSmooth(bareEarth, gridW, gridH, radius = 1)
+            val smoothCanopy =
+                if (useClassFilter) FloatArray(gridW * gridH)
+                else boxSmooth(canopySpikes, gridW, gridH, radius = 1)
+            val cellSize = maxOf(rangeX / (gridW - 1), rangeY / (gridH - 1))
+                .takeIf { it.isFinite() && it in 0.001..100_000.0 }
+                ?.toFloat() ?: 1f
+            val note = when {
+                useClassFilter ->
+                    "Ground classes 2/8: $groundUsed / $read points · LAS $versionMajor.$versionMinor format $pointFormat"
+                groundOnly && groundUsed < 500 ->
+                    "Too few classified ground points ($groundUsed); used min-Z fallback on $read points"
+                else -> "Min-Z bare-earth from $read points"
+            }
+            LasLoadResult(
+                grid = ElevationGrid(gridW, gridH, smoothBare, smoothCanopy, cellSize),
+                totalPointsRead = read,
+                groundPointsUsed = if (useClassFilter) groundUsed else read,
+                usedClassificationFilter = useClassFilter,
+                pointFormat = pointFormat,
+                note = note,
+            )
+        } catch (exception: Exception) {
+            exception.printStackTrace()
+            null
+        }
+    }
+
+    private fun readUpTo(input: java.io.InputStream, target: ByteArray): Int {
+        var offset = 0
+        while (offset < target.size) {
+            val count = input.read(target, offset, target.size - offset)
+            if (count < 0) break
+            if (count == 0) continue
+            offset += count
+        }
+        return offset
+    }
+
+    private fun readFullyRecord(input: java.io.InputStream, record: ByteArray): Boolean {
+        var offset = 0
+        while (offset < record.size) {
+            val count = input.read(record, offset, record.size - offset)
+            if (count < 0) return false
+            if (count == 0) continue
+            offset += count
+        }
+        return true
+    }
+
+    private fun skipFully(input: java.io.InputStream, byteCount: Int): Boolean {
+        var remaining = byteCount.toLong()
+        while (remaining > 0) {
+            val skipped = input.skip(remaining)
+            if (skipped > 0) {
+                remaining -= skipped
+            } else if (input.read() < 0) {
+                return false
+            } else {
+                remaining--
+            }
+        }
+        return true
+    }
 
     fun parseLasBytes(bytes: ByteArray, groundOnly: Boolean = true): LasLoadResult? {
         try {
@@ -310,7 +586,7 @@ object DemGenerator {
             val versionMajor = bytes[24].toInt() and 0xFF
             val versionMinor = bytes[25].toInt() and 0xFF
             val offsetToPoints = readIntLE(bytes, 96)
-            val pointFormat = bytes[104].toInt() and 0xFF
+            val pointFormat = bytes[104].toInt() and 0x3F
             val pointRecordLength = readShortLE(bytes, 105).toInt() and 0xFFFF
             val legacyNumPoints = readIntLE(bytes, 107).toLong() and 0xFFFFFFFFL
 
@@ -561,10 +837,11 @@ object DemGenerator {
             ncols = headerMap["ncols"]?.toInt() ?: 0
             nrows = headerMap["nrows"]?.toInt() ?: 0
             nodata = headerMap["nodata_value"]?.toFloat() ?: -9999f
-            
-            if (ncols <= 0 || nrows <= 0) return null
-            
-            val tempGrid = FloatArray(ncols * nrows)
+            val sourceCellSize = headerMap["cellsize"]?.toFloatOrNull() ?: 1f
+
+            if (ncols <= 0 || nrows <= 0 || ncols.toLong() * nrows > 8_000_000L) return null
+
+            val tempGrid = FloatArray(ncols * nrows) { Float.NaN }
             var index = 0
             
             // If we broke on a data line, we need to process it first
@@ -573,15 +850,19 @@ object DemGenerator {
                 val tokens = dataLine.trim().split(Regex("\\s+"))
                 for (token in tokens) {
                     if (token.isNotEmpty() && index < tempGrid.size) {
-                        val v = token.toFloatOrNull() ?: 0f
-                        tempGrid[index++] = if (v == nodata) 0f else v
+                        val v = token.toFloatOrNull()
+                        tempGrid[index++] = if (v == null || !v.isFinite() || v == nodata) Float.NaN else v
                     }
                 }
                 dataLine = reader.readLine()
             }
             
-            val gridW = 100
-            val gridH = 100
+            if (index == 0 || tempGrid.none { it.isFinite() }) return null
+            fillNaNNearest(tempGrid, ncols, nrows)
+
+            val scale = minOf(160.0 / ncols, 160.0 / nrows, 1.0)
+            val gridW = (ncols * scale).toInt().coerceAtLeast(2)
+            val gridH = (nrows * scale).toInt().coerceAtLeast(2)
             val bareEarth = FloatArray(gridW * gridH)
             val canopySpikes = FloatArray(gridW * gridH) // ASC typically doesn't have canopy
             
@@ -593,7 +874,13 @@ object DemGenerator {
                 }
             }
             
-            return ElevationGrid(gridW, gridH, bareEarth, canopySpikes)
+            val outputCellSize =
+                if (sourceCellSize.isFinite() && sourceCellSize in 0.01f..10_000f) {
+                    (sourceCellSize / scale).toFloat()
+                } else {
+                    1f
+                }
+            return ElevationGrid(gridW, gridH, bareEarth, canopySpikes, outputCellSize)
         } catch (e: Exception) {
             e.printStackTrace()
             return null
@@ -604,9 +891,9 @@ object DemGenerator {
         try {
             val points = ArrayList<FloatArray>()
             var minX = Float.MAX_VALUE
-            var maxX = Float.MIN_VALUE
+            var maxX = -Float.MAX_VALUE
             var minY = Float.MAX_VALUE
-            var maxY = Float.MIN_VALUE
+            var maxY = -Float.MAX_VALUE
             
             var lineCount = 0
             reader.forEachLine { line ->
@@ -633,7 +920,7 @@ object DemGenerator {
             val gridW = 100
             val gridH = 100
             val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
-            val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
+            val maxGrid = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
             val countGrid = IntArray(gridW * gridH)
             
             val rangeX = if (maxX - minX > 0) (maxX - minX) else 1f
@@ -711,12 +998,10 @@ object DemGenerator {
         val grid: ElevationGrid,
         val summary: String,
         val isBareEarth: Boolean,
+        val geoMetadata: com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata? = null,
     )
 
-    /**
-     * Master entry point. Reads the ENTIRE stream into memory first.
-     * LAS defaults to ground-classified points only (ASPRS class 2 / 8).
-     */
+    /** Master entry point. LAS/LAZ is streamed; text inputs are capped at 16 MiB. */
     fun parseFromStream(
         fileName: String,
         inputStream: java.io.InputStream,
@@ -727,39 +1012,90 @@ object DemGenerator {
         fileName: String,
         inputStream: java.io.InputStream,
         groundOnly: Boolean = true,
+    ): TerrainLoadResult? = parseFromStreamDetailed(
+        fileName = fileName,
+        inputStream = inputStream,
+        options = LidarImportOptions(
+            groundMode = if (groundOnly) {
+                GroundSurfaceMode.SOURCE_CLASSIFIED
+            } else {
+                GroundSurfaceMode.AUTO_LOWEST
+            },
+        ),
+    )
+
+    fun parseFromStreamDetailed(
+        fileName: String,
+        inputStream: java.io.InputStream,
+        options: LidarImportOptions,
     ): TerrainLoadResult? {
         return try {
-            val bytes = inputStream.readBytes()
-            if (bytes.isEmpty()) return null
-
             val lowerName = fileName.lowercase()
+            val buffered =
+                if (inputStream is java.io.BufferedInputStream) inputStream
+                else java.io.BufferedInputStream(inputStream, 64 * 1024)
+
+            buffered.mark(16)
+            val fileHeader = ByteArray(4)
+            val headerBytes = readUpTo(buffered, fileHeader)
+            buffered.reset()
+            val isTiff = headerBytes >= 4 && (
+                fileHeader.contentEquals(byteArrayOf(0x49, 0x49, 0x2A, 0x00)) ||
+                    fileHeader.contentEquals(byteArrayOf(0x4D, 0x4D, 0x00, 0x2A))
+                )
+            if (lowerName.endsWith(".tif") || lowerName.endsWith(".tiff") || isTiff) {
+                val geotiff = GeoTiffTerrainReader.read(
+                    fileName = fileName,
+                    input = buffered,
+                    maxDimension = options.rasterResolution,
+                )
+                return TerrainLoadResult(
+                    grid = geotiff.grid,
+                    summary = geotiff.summary,
+                    isBareEarth = true,
+                    geoMetadata = geotiff.metadata,
+                )
+            }
 
             if (lowerName.endsWith(".laz")) {
-                return null // compressed LAZ needs a native decoder — use .las
+                val laz = LazTerrainReader.read(buffered, options) ?: return null
+                return TerrainLoadResult(
+                    grid = laz.grid,
+                    summary = laz.note,
+                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+                )
             }
 
             if (lowerName.endsWith(".las")) {
-                val las = parseLasBytes(bytes, groundOnly = groundOnly) ?: return null
+                val las = parseLasStreamDetailed(buffered, options) ?: return null
                 return TerrainLoadResult(
                     grid = las.grid,
                     summary = las.note,
-                    isBareEarth = las.usedClassificationFilter || groundOnly,
+                    isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
                 )
             }
 
-            // Also detect LAS by signature even if extension wrong
-            if (bytes.size > 4 &&
-                bytes[0] == 'L'.code.toByte() && bytes[1] == 'A'.code.toByte() &&
-                bytes[2] == 'S'.code.toByte() && bytes[3] == 'F'.code.toByte()
-            ) {
-                val las = parseLasBytes(bytes, groundOnly = groundOnly) ?: return null
+            // Detect LAS or LAZ by the common LASF signature and point-format compression bits.
+            buffered.mark(512)
+            val signature = ByteArray(105)
+            val signatureBytes = readUpTo(buffered, signature)
+            buffered.reset()
+            if (signatureBytes >= 105 && signature.copyOfRange(0, 4).contentEquals("LASF".toByteArray())) {
+                val isCompressed = signature[104].toInt() and 0xC0 != 0
+                val las = if (isCompressed) {
+                    LazTerrainReader.read(buffered, options)
+                } else {
+                    parseLasStreamDetailed(buffered, options)
+                } ?: return null
                 return TerrainLoadResult(
                     grid = las.grid,
                     summary = las.note,
-                    isBareEarth = las.usedClassificationFilter || groundOnly,
+                    isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
                 )
             }
 
+            val bytes = readLimitedBytes(buffered, 16 * 1024 * 1024)
+            if (bytes.isEmpty()) return null
             val text = String(bytes, Charsets.UTF_8)
             val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
             if (lines.isEmpty()) return null
@@ -793,5 +1129,20 @@ object DemGenerator {
             e.printStackTrace()
             null
         }
+    }
+
+    private fun readLimitedBytes(input: java.io.InputStream, maxBytes: Int): ByteArray {
+        val output = java.io.ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
+        val buffer = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count == 0) continue
+            total += count
+            require(total <= maxBytes) { "Text terrain files must be 16 MiB or smaller" }
+            output.write(buffer, 0, count)
+        }
+        return output.toByteArray()
     }
 }

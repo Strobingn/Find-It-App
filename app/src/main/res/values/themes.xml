@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- App theme after splash (Compose owns UI; keep dark status/nav) -->
-    <style name="Theme.LidarMetalDetector" parent="android:Theme.Material.NoActionBar">
+    <style name="Theme.FindIt" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@color/splash_background</item>
         <item name="android:navigationBarColor">@color/splash_background</item>
         <item name="android:windowBackground">@color/splash_background</item>
@@ -11,11 +11,11 @@
     </style>
 
     <!-- Android 12+ SplashScreen API + pre-12 window background -->
-    <style name="Theme.LidarMetalDetector.Splash" parent="Theme.SplashScreen">
+    <style name="Theme.FindIt.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash_logo</item>
         <item name="windowSplashScreenAnimationDuration">400</item>
-        <item name="postSplashScreenTheme">@style/Theme.LidarMetalDetector</item>
+        <item name="postSplashScreenTheme">@style/Theme.FindIt</item>
         <!-- Pre-12 fallback -->
         <item name="android:windowBackground">@drawable/splash_background</item>
         <item name="android:statusBarColor">@color/splash_background</item>
@@ -23,5 +23,5 @@
     </style>
 
     <!-- Backward-compatible aliases used by older resources -->
-    <style name="Theme.MyApplication" parent="Theme.LidarMetalDetector" />
+    <style name="Theme.MyApplication" parent="Theme.FindIt" />
 </resources>

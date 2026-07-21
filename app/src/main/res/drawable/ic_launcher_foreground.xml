@@ -5,51 +5,45 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Safe zone ~66dp circle centered; coil detector + lidar target -->
-
-    <!-- Green radar sweep wedge -->
+    <!-- LiDAR terrain grid -->
     <path
-        android:fillColor="#00E676"
-        android:fillAlpha="0.22"
-        android:pathData="M54,54 L54,26 A28,28 0 0,1 82,54 Z" />
-
-    <!-- Outer search coil (gold) -->
-    <path
-        android:pathData="M54,26 A28,28 0 1,1 53.99,26"
-        android:strokeWidth="3.5"
-        android:strokeColor="#FFD700"
-        android:strokeLineCap="round"
-        android:fillColor="#00000000" />
-
-    <!-- Inner coil -->
-    <path
-        android:pathData="M54,38 A16,16 0 1,1 53.99,38"
-        android:strokeWidth="2.4"
-        android:strokeColor="#FFD700"
-        android:strokeLineCap="round"
-        android:fillColor="#00000000" />
-
-    <!-- Crosshairs -->
-    <path
-        android:pathData="M22,54 H86"
-        android:strokeWidth="1.8"
+        android:pathData="M22,22 V86 M38,22 V86 M54,22 V86 M70,22 V86 M86,22 V86 M22,22 H86 M22,38 H86 M22,54 H86 M22,70 H86 M22,86 H86"
+        android:strokeWidth="1"
         android:strokeColor="#00E676"
-        android:strokeAlpha="0.9"
-        android:fillColor="#00000000" />
-    <path
-        android:pathData="M54,22 V86"
-        android:strokeWidth="1.8"
-        android:strokeColor="#00E676"
-        android:strokeAlpha="0.9"
+        android:strokeAlpha="0.22"
         android:fillColor="#00000000" />
 
-    <!-- Center target -->
+    <!-- Shaded relief -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,50 A4.2,4.2 0 1,1 53.99,50 Z" />
-
-    <!-- Hot anomaly / coin hit -->
-    <path
+        android:pathData="M18,79 C28,66 36,70 45,54 C55,36 64,46 73,29 C84,42 90,60 94,79 Z"
         android:fillColor="#FFD700"
-        android:pathData="M71,40 A3.2,3.2 0 1,1 70.99,40 Z" />
+        android:fillAlpha="0.24" />
+    <path
+        android:pathData="M18,79 C28,66 36,70 45,54 C55,36 64,46 73,29 C84,42 90,60 94,79"
+        android:strokeWidth="3.2"
+        android:strokeColor="#FFD700"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+
+    <!-- Topographic contour lines -->
+    <path
+        android:pathData="M20,84 C34,74 47,82 60,70 C71,60 82,67 91,57"
+        android:strokeWidth="2.2"
+        android:strokeColor="#00E676"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M25,72 C37,61 45,68 54,57 C64,45 76,55 85,44"
+        android:strokeWidth="2.2"
+        android:strokeColor="#00E676"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M37,59 C47,48 53,51 60,42 C66,35 72,38 77,34"
+        android:strokeWidth="2.2"
+        android:strokeColor="#FFFFFF"
+        android:strokeAlpha="0.9"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
 </vector>
