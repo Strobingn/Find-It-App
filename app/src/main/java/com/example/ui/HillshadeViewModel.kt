@@ -2,12 +2,15 @@ package com.example.ui
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.DemGenerator
 import com.example.data.DetectionSource
 import com.example.data.ElevationGrid
 import com.example.data.MetalType
+import com.example.data.NormalizedRasterBounds
+import com.example.data.TerrainImportSource
 import com.example.data.TargetSignal
 import com.example.data.local.AppDatabase
 import com.example.data.local.toDomain
@@ -64,6 +67,17 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val contourIntervalMeters = _contourIntervalMeters.asStateFlow()
     private val _activeTerrainSummary = MutableStateFlow("Built-in demonstration terrain")
     val activeTerrainSummary = _activeTerrainSummary.asStateFlow()
+    private val _canRefineTerrain = MutableStateFlow(false)
+    val canRefineTerrain = _canRefineTerrain.asStateFlow()
+    private val _isRefiningTerrain = MutableStateFlow(false)
+    val isRefiningTerrain = _isRefiningTerrain.asStateFlow()
+    private val _isDetailedTerrain = MutableStateFlow(false)
+    val isDetailedTerrain = _isDetailedTerrain.asStateFlow()
+    private val _terrainDetailMessage = MutableStateFlow<String?>(null)
+    val terrainDetailMessage = _terrainDetailMessage.asStateFlow()
+    private var terrainSource: TerrainImportSource? = null
+    private var overviewTerrain: DemGenerator.TerrainLoadResult? = null
+    private var currentSourceBounds = NormalizedRasterBounds.Full
 
     private val _hillshadeBitmap = MutableStateFlow<Bitmap?>(null)
     val hillshadeBitmap = _hillshadeBitmap.asStateFlow()
@@ -148,7 +162,20 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         scheduleRender(immediate = true)
     }
 
-    fun setCustomTerrain(result: DemGenerator.TerrainLoadResult) {
+    fun setCustomTerrain(
+        result: DemGenerator.TerrainLoadResult,
+        source: TerrainImportSource? = null,
+    ) {
+        terrainSource = source
+        overviewTerrain = result.takeIf { source != null }
+        currentSourceBounds = NormalizedRasterBounds.Full
+        _canRefineTerrain.value = source != null
+        _isDetailedTerrain.value = false
+        _terrainDetailMessage.value = null
+        applyCustomTerrain(result)
+    }
+
+    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult) {
         val grid = result.grid
         customGrid = result.grid
         _elevationGrid.value = result.grid
@@ -169,6 +196,54 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _zScale.value = 2f
         updateCoordinates()
         scheduleRender(immediate = true)
+    }
+
+
+    fun refineTerrain(viewport: NormalizedRasterBounds) {
+        val source = terrainSource ?: return
+        if (_isRefiningTerrain.value) return
+        val absoluteBounds = viewport.sanitized().inside(currentSourceBounds)
+        val widthFraction = absoluteBounds.right - absoluteBounds.left
+        val heightFraction = absoluteBounds.bottom - absoluteBounds.top
+        if (widthFraction >= 0.98 && heightFraction >= 0.98) {
+            _terrainDetailMessage.value = "Zoom farther in before loading detail."
+            return
+        }
+        _isRefiningTerrain.value = true
+        _terrainDetailMessage.value = "Reading original returns for this viewport…"
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                getApplication<Application>().contentResolver.openInputStream(Uri.parse(source.uri))?.buffered()?.use { input ->
+                    DemGenerator.parseFromStreamDetailed(
+                        fileName = source.displayName,
+                        inputStream = input,
+                        options = source.options.copy(
+                            rasterResolution = 1_024,
+                            focusBounds = absoluteBounds,
+                        ),
+                    )
+                }
+            }.getOrNull()
+            withContext(Dispatchers.Main.immediate) {
+                _isRefiningTerrain.value = false
+                if (result == null) {
+                    _terrainDetailMessage.value = "Could not load detail from the original LAZ/LAS document."
+                } else {
+                    currentSourceBounds = absoluteBounds
+                    _isDetailedTerrain.value = true
+                    _terrainDetailMessage.value = "Detailed viewport loaded from the original point cloud."
+                    applyCustomTerrain(result)
+                }
+            }
+        }
+    }
+
+    fun showWholeTerrain() {
+        val overview = overviewTerrain ?: return
+        currentSourceBounds = NormalizedRasterBounds.Full
+        _isDetailedTerrain.value = false
+        _terrainDetailMessage.value = "Showing the complete point-cloud footprint."
+        applyCustomTerrain(overview)
     }
 
     fun setCustomGrid(grid: ElevationGrid) {

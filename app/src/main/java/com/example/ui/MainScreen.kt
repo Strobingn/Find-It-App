@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,9 +35,11 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.NormalizedRasterBounds
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.LidarControlPanel
 import com.example.ui.components.LidarCanvasMode
@@ -148,6 +152,12 @@ private fun TerrainTab(
     val featureScale by viewModel.featureScaleMeters.collectAsStateWithLifecycle()
     val sensitivity by viewModel.analysisSensitivity.collectAsStateWithLifecycle()
     val contourInterval by viewModel.contourIntervalMeters.collectAsStateWithLifecycle()
+    val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
+    val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
+    val isDetailed by viewModel.isDetailedTerrain.collectAsStateWithLifecycle()
+    val detailMessage by viewModel.terrainDetailMessage.collectAsStateWithLifecycle()
+    val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
+    val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val showControls = rememberSaveable { mutableStateOf(false) }
     val viewportResetKey = rememberSaveable { mutableIntStateOf(0) }
 
@@ -172,6 +182,10 @@ private fun TerrainTab(
             viewportResetKey = viewportResetKey.intValue,
             showSurveyCursor = false,
             showCoordinateHud = false,
+            onViewportChanged = { bounds, zoom ->
+                visibleBounds.value = bounds
+                zoomLevel.value = zoom
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(if (focusMode) 0.dp else 8.dp)
@@ -239,6 +253,42 @@ private fun TerrainTab(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+
+        if (canRefine) Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            tonalElevation = 6.dp,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(10.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "${zoomLevel.value.format(1)}× · pan to your target area",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Button(
+                    onClick = { viewModel.refineTerrain(visibleBounds.value) },
+                    enabled = zoomLevel.value >= 1.5f && !isRefining,
+                ) {
+                    Text(if (isRefining) "Reading original LAZ…" else "Load detail here")
+                }
+                if (isDetailed) TextButton(onClick = viewModel::showWholeTerrain) {
+                    Text("Whole file")
+                }
+                detailMessage?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                    )
+                }
             }
         }
 
@@ -325,8 +375,8 @@ private fun ImportTab(viewModel: HillshadeViewModel, padding: PaddingValues, onI
     LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
         item {
             CustomFileLoader(
-                onCustomTerrainLoaded = {
-                    viewModel.setCustomTerrain(it)
+                onCustomTerrainLoaded = { result, source ->
+                    viewModel.setCustomTerrain(result, source)
                     onImported()
                 },
                 modifier = Modifier.fillMaxWidth(),

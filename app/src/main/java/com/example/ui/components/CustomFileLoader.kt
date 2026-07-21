@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
 import com.example.data.LidarImportOptions
+import com.example.data.TerrainImportSource
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -59,7 +60,7 @@ private val supportedExtensions = setOf("las", "laz", "tif", "tiff", "asc", "xyz
 
 @Composable
 fun CustomFileLoader(
-    onCustomTerrainLoaded: (DemGenerator.TerrainLoadResult) -> Unit,
+    onCustomTerrainLoaded: (DemGenerator.TerrainLoadResult, TerrainImportSource?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -81,14 +82,18 @@ fun CustomFileLoader(
         smoothingRadius = smoothingRadius,
     )
 
-    fun showResult(result: DemGenerator.TerrainLoadResult?, name: String) {
+    fun showResult(
+        result: DemGenerator.TerrainLoadResult?,
+        name: String,
+        source: TerrainImportSource? = null,
+    ) {
         isWorking = false
         progress = null
         if (result == null) {
             isError = true
             message = "Could not parse $name. Supported: LAZ, LAS, GeoTIFF, ASC, XYZ, CSV/text matrices, or ZIP."
         } else {
-            onCustomTerrainLoaded(result)
+            onCustomTerrainLoaded(result, source)
             isError = false
             message = "$name loaded as ${result.grid.width} × ${result.grid.height}. ${result.summary}"
         }
@@ -98,13 +103,25 @@ fun CustomFileLoader(
         if (uri == null) return@rememberLauncherForActivityResult
         val name = displayName(context, uri)
         val options = importOptions()
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
         isWorking = true
         message = "Reading $name…"
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching { parseContentUri(context, uri, name, options) }.getOrNull()
             }
-            showResult(result, name)
+            val extension = name.substringAfterLast('.', "").lowercase(Locale.US)
+            val source = if (result != null && extension in setOf("las", "laz")) {
+                TerrainImportSource(uri.toString(), name, options)
+            } else {
+                null
+            }
+            showResult(result, name, source)
         }
     }
 

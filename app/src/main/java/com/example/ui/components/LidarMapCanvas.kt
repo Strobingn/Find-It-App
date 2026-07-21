@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary
 import kotlin.math.min
@@ -65,6 +66,7 @@ fun LidarMapCanvas(
     viewportResetKey: Int = 0,
     showSurveyCursor: Boolean = true,
     showCoordinateHud: Boolean = true,
+    onViewportChanged: (NormalizedRasterBounds, Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     // Cache ImageBitmap — recreating every drag frame can crash if Bitmap is mid-render
@@ -84,11 +86,34 @@ fun LidarMapCanvas(
         pan = Offset.Zero
     }
 
+    LaunchedEffect(zoom, pan, viewportSize, imageBitmap) {
+        val image = imageBitmap ?: return@LaunchedEffect
+        val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
+        val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
+        val fit = min(viewportWidth / image.width, viewportHeight / image.height)
+        val displayWidth = image.width * fit * zoom
+        val displayHeight = image.height * fit * zoom
+        val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
+        val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
+        val bounds = NormalizedRasterBounds(
+            left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
+            top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
+            right = ((viewportWidth - imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
+            bottom = ((viewportHeight - imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
+        ).sanitized()
+        onViewportChanged(bounds, zoom)
+    }
+
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         if (mode == LidarCanvasMode.EXPLORE) {
-            val nextZoom = (zoom * zoomChange).coerceIn(1f, 8f)
-            val maxPanX = viewportSize.width * (nextZoom - 1f) * 0.5f
-            val maxPanY = viewportSize.height * (nextZoom - 1f) * 0.5f
+            val nextZoom = (zoom * zoomChange).coerceIn(1f, 32f)
+            val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
+            val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
+            val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
+            val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
+            val fit = min(viewportWidth / sourceWidth, viewportHeight / sourceHeight)
+            val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
+            val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
             zoom = nextZoom
             pan = Offset(
                 x = (pan.x + panChange.x).coerceIn(-maxPanX, maxPanX),

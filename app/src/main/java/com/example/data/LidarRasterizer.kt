@@ -3,19 +3,27 @@ package com.example.data
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /** Memory-bounded point-cloud binning shared by the LAS and LAZ readers. */
 internal class LidarRasterizer(
-    private val minX: Double,
-    private val maxX: Double,
-    private val minY: Double,
-    private val maxY: Double,
+    minX: Double,
+    maxX: Double,
+    minY: Double,
+    maxY: Double,
     options: LidarImportOptions,
     declaredPointCount: Long,
 ) {
     private val options = options.sanitized()
-    private val rangeX = (maxX - minX).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
-    private val rangeY = (maxY - minY).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+    private val sourceRangeX = (maxX - minX).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+    private val sourceRangeY = (maxY - minY).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+    private val focus = this.options.focusBounds
+    private val cropMinX = focus?.let { minX + it.left * sourceRangeX } ?: minX
+    private val cropMaxX = focus?.let { minX + it.right * sourceRangeX } ?: maxX
+    private val cropMinY = focus?.let { minY + (1.0 - it.bottom) * sourceRangeY } ?: minY
+    private val cropMaxY = focus?.let { minY + (1.0 - it.top) * sourceRangeY } ?: maxY
+    private val rangeX = (cropMaxX - cropMinX).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+    private val rangeY = (cropMaxY - cropMinY).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val longSide = this.options.rasterResolution
     val width: Int
     val height: Int
@@ -26,11 +34,12 @@ internal class LidarRasterizer(
     private val allMax: FloatArray
     private val allCount: IntArray
     private val classHistogram = IntArray(256)
-    private val sampleStride = ceil(
-        declaredPointCount.coerceAtLeast(1L).toDouble() / MAX_BINNED_POINTS,
-    ).toInt().coerceAtLeast(1)
+    private val estimatedPointsInFocus = declaredPointCount.coerceAtLeast(1L).toDouble() *
+        ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
+        ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
+    private val sampleStride = ceil(estimatedPointsInFocus / MAX_BINNED_POINTS).toInt().coerceAtLeast(1)
 
-    var pointsDecoded: Int = 0
+    var pointsDecoded: Long = 0
         private set
     var pointsBinned: Int = 0
         private set
@@ -51,15 +60,15 @@ internal class LidarRasterizer(
         allCount = IntArray(width * height)
     }
 
-    /** Returns false after the mobile safety ceiling has been reached. */
+    /** Streams every return while sampling bins evenly across the complete file. */
     fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
-        if (pointsDecoded >= MAX_DECODED_POINTS) return false
         val pointIndex = pointsDecoded++
-        if (pointIndex % sampleStride != 0) return true
         if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return true
+        if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return true
+        if (pointIndex % sampleStride.toLong() != 0L) return true
 
-        val gx = (((x - minX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
-        val gy = ((1.0 - (y - minY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
+        val gx = (((x - cropMinX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
+        val gy = ((1.0 - (y - cropMinY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
         val index = gy * width + gx
         if (z < allMin[index]) allMin[index] = z
         if (z > allMax[index]) allMax[index] = z
@@ -105,6 +114,7 @@ internal class LidarRasterizer(
             else -> allCount
         }
 
+        val coverageMask = buildCoverageMask(allCount, width, height)
         val surface = FloatArray(width * height)
         for (index in surface.indices) {
             surface[index] = if (sourceCounts[index] > 0) source[index] else Float.NaN
@@ -133,9 +143,7 @@ internal class LidarRasterizer(
         val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
-        val capped = pointsDecoded >= MAX_DECODED_POINTS
         val samplingNote = when {
-            capped -> "mobile safety limit reached at $pointsDecoded decoded points"
             sampleStride > 1 -> "binned every ${sampleStride}th return across $pointsDecoded decoded points"
             else -> "$pointsDecoded points decoded"
         }
@@ -149,6 +157,7 @@ internal class LidarRasterizer(
             }
             GroundSurfaceMode.SURFACE_MODEL -> "highest-return surface model (vegetation and structures included)"
         }
+        val focusNote = if (focus == null) "complete footprint" else "detailed viewport"
         val smoothingNote = if (options.smoothingRadius == 0) "unsmoothed" else "smoothing radius ${options.smoothingRadius}"
         val classNote = classHistogram.withIndex()
             .filter { it.value > 0 }
@@ -157,8 +166,8 @@ internal class LidarRasterizer(
             .joinToString(prefix = "classes ", separator = ", ") { "${it.index}:${it.value}" }
 
         return DemGenerator.LasLoadResult(
-            grid = ElevationGrid(width, height, bareEarth, canopy, cellSize),
-            totalPointsRead = pointsDecoded,
+            grid = ElevationGrid(width, height, bareEarth, canopy, cellSize, coverageMask),
+            totalPointsRead = pointsDecoded.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             groundPointsUsed = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
             } else {
@@ -166,11 +175,11 @@ internal class LidarRasterizer(
             },
             usedClassificationFilter = appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED,
             pointFormat = pointFormat,
-            note = "$sourceLabel · $modeNote · $classNote · $samplingNote · ${width}×$height $smoothingNote",
+            note = "$sourceLabel · $focusNote · $modeNote · $classNote · $samplingNote · ${width}×$height $smoothingNote",
             requestedGroundMode = requestedMode,
             appliedGroundMode = appliedMode,
             sampledPoints = pointsBinned,
-            wasTruncated = capped,
+            wasTruncated = false,
         )
     }
 
@@ -179,41 +188,81 @@ internal class LidarRasterizer(
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12
         private const val MAX_BINNED_POINTS = 8_000_000.0
-        private const val MAX_DECODED_POINTS = 30_000_000
     }
 }
 
 internal fun fillMissingNearest(grid: FloatArray, width: Int, height: Int) {
-    if (grid.none { it.isFinite() }) {
+    val queue = IntArray(grid.size)
+    var head = 0
+    var tail = 0
+    for (index in grid.indices) {
+        if (grid[index].isFinite()) queue[tail++] = index
+    }
+    if (tail == 0) {
         grid.fill(0f)
         return
     }
-    // Four directional propagation passes fill large holes without a radius-dependent O(n*r²) search.
-    repeat(2) { pass ->
-        val yRange = if (pass == 0) 0 until height else height - 1 downTo 0
-        val xRange = if (pass == 0) 0 until width else width - 1 downTo 0
-        for (y in yRange) {
-            for (x in xRange) {
-                val index = y * width + x
-                if (grid[index].isFinite()) continue
-                val neighbors = intArrayOf(
-                    if (x > 0) index - 1 else -1,
-                    if (x + 1 < width) index + 1 else -1,
-                    if (y > 0) index - width else -1,
-                    if (y + 1 < height) index + width else -1,
-                )
-                for (neighbor in neighbors) {
-                    if (neighbor >= 0 && grid[neighbor].isFinite()) {
-                        grid[index] = grid[neighbor]
-                        break
-                    }
-                }
+
+    // Multi-source propagation grows from every measured cell at once. Unlike directional scan
+    // filling, this cannot smear the first value in a row across large parts of the raster.
+    while (head < tail) {
+        val index = queue[head++]
+        val x = index % width
+        val y = index / width
+        for (dy in -1..1) {
+            for (dx in -1..1) {
+                if (dx == 0 && dy == 0) continue
+                val nx = x + dx
+                val ny = y + dy
+                if (nx !in 0 until width || ny !in 0 until height) continue
+                val neighbor = ny * width + nx
+                if (grid[neighbor].isFinite()) continue
+                grid[neighbor] = grid[index]
+                queue[tail++] = neighbor
             }
         }
     }
-    // A pathological isolated hole can survive the passes only if no data existed, handled above.
-    val fallback = grid.firstOrNull { it.isFinite() } ?: 0f
-    for (index in grid.indices) if (!grid[index].isFinite()) grid[index] = fallback
+}
+
+internal fun buildCoverageMask(counts: IntArray, width: Int, height: Int): BooleanArray {
+    require(counts.size == width * height)
+    val populated = counts.count { it > 0 }
+    if (populated == 0) return BooleanArray(counts.size)
+
+    // Bridge ordinary raster-bin gaps, but keep large holes and space outside irregular flight
+    // footprints transparent. Radius adapts to sampled point density and remains tightly bounded.
+    val averageSpacing = sqrt(counts.size.toDouble() / populated)
+    val radius = (ceil(averageSpacing * 2.0).toInt()).coerceIn(2, 8)
+    val distance = IntArray(counts.size) { Int.MAX_VALUE }
+    val queue = IntArray(counts.size)
+    var head = 0
+    var tail = 0
+    for (index in counts.indices) {
+        if (counts[index] > 0) {
+            distance[index] = 0
+            queue[tail++] = index
+        }
+    }
+    while (head < tail) {
+        val index = queue[head++]
+        val nextDistance = distance[index] + 1
+        if (nextDistance > radius) continue
+        val x = index % width
+        val y = index / width
+        for (dy in -1..1) {
+            for (dx in -1..1) {
+                if (dx == 0 && dy == 0) continue
+                val nx = x + dx
+                val ny = y + dy
+                if (nx !in 0 until width || ny !in 0 until height) continue
+                val neighbor = ny * width + nx
+                if (nextDistance >= distance[neighbor]) continue
+                distance[neighbor] = nextDistance
+                queue[tail++] = neighbor
+            }
+        }
+    }
+    return BooleanArray(counts.size) { distance[it] <= radius }
 }
 
 private fun suppressIsolatedLowNoise(source: FloatArray, width: Int, height: Int): FloatArray {

@@ -18,11 +18,13 @@ class ElevationGrid(
     val bareEarth: FloatArray,
     val canopySpikes: FloatArray,
     val cellSizeMeters: Float = 1f,
+    val validData: BooleanArray = BooleanArray(width * height) { true },
 ) {
     init {
         require(width > 0 && height > 0) { "Grid dimensions must be positive" }
         require(bareEarth.size == width * height) { "bareEarth size must be width * height" }
         require(canopySpikes.size == width * height) { "canopySpikes size must be width * height" }
+        require(validData.size == width * height) { "validData size must be width * height" }
     }
 
     /** 0 shows the full surface model; 1 shows the extracted bare-earth model. */
@@ -84,9 +86,15 @@ class ElevationGrid(
 
         var minElevation = Float.MAX_VALUE
         var maxElevation = -Float.MAX_VALUE
-        for (elevation in elevations) {
+        for (index in elevations.indices) {
+            if (!validData[index]) continue
+            val elevation = elevations[index]
             if (elevation < minElevation) minElevation = elevation
             if (elevation > maxElevation) maxElevation = elevation
+        }
+        if (minElevation == Float.MAX_VALUE) {
+            minElevation = 0f
+            maxElevation = 1f
         }
         val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
         val azimuth = normalizeDegrees(sunAzimuth)
@@ -97,6 +105,10 @@ class ElevationGrid(
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val index = y * width + x
+                if (!validData[index]) {
+                    pixels[index] = Color.TRANSPARENT
+                    continue
+                }
                 val gradient = hornGradient(elevations, x, y, cellDistance, zMultiplier)
                 val slopeRadians = atan(sqrt(gradient.dx * gradient.dx + gradient.dy * gradient.dy))
                 val primaryShade = shade(gradient.dx, gradient.dy, azimuth, altitude)
