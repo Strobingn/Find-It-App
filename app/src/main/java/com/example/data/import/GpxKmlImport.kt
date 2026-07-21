@@ -421,27 +421,35 @@ object KmlParser {
     
     private fun parseCoordinates(coords: String): List<SurveyPoint> {
         val result = mutableListOf<SurveyPoint>()
-        val lines = coords.split('\n')
-        val whitespaceRegex = Regex("\\s+")
-        
-        for (line in lines) {
-            val parts = line.trim().split(',', whitespaceRegex)
-            if (parts.size >= 2) {
-                try {
-                    val lon = parts[0].toDouble()
-                    val lat = parts[1].toDouble()
-                    val elevation = parts.getOrNull(2)?.toDoubleOrNull()
-                    result.add(SurveyPoint(
-                        latitude = lat,
-                        longitude = lon,
-                        elevation = elevation
-                    ))
-                } catch (e: NumberFormatException) {
-                    // Skip invalid coordinates
-                }
+        val coordinateTuples = coords.trim()
+            .split(Regex("""\s+"""))
+            .filter { it.isNotEmpty() }
+
+        for (tuple in coordinateTuples) {
+            val parts = tuple.split(',')
+            val longitude = parts.getOrNull(0)?.toDoubleOrNull()
+            val latitude = parts.getOrNull(1)?.toDoubleOrNull()
+            val elevation = parts.getOrNull(2)?.toDoubleOrNull()
+                ?.takeIf { it.isFinite() }
+            if (
+                longitude == null ||
+                latitude == null ||
+                !longitude.isFinite() ||
+                !latitude.isFinite() ||
+                longitude !in -180.0..180.0 ||
+                latitude !in -90.0..90.0
+            ) {
+                continue
             }
+            result.add(
+                SurveyPoint(
+                    latitude = latitude,
+                    longitude = longitude,
+                    elevation = elevation,
+                ),
+            )
         }
-        
+
         return result
     }
 }
