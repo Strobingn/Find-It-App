@@ -41,7 +41,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.uni
+t.sp
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary
@@ -94,7 +95,8 @@ fun LidarMapCanvas(
         val displayWidth = image.width * fit * zoom
         val displayHeight = image.height * fit * zoom
         val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
-        val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
+        val imageTop = (view
+portHeight - displayHeight) * 0.5f + pan.y
         val bounds = NormalizedRasterBounds(
             left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
             top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
@@ -111,7 +113,7 @@ fun LidarMapCanvas(
             val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
             val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
             val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
-            val fit = min(viewportWidth / sourceWidth, viewportHeight / sourceHeight)
+            val fit = viewportWidth / sourceWidth
             val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
             val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
             zoom = nextZoom
@@ -132,13 +134,14 @@ fun LidarMapCanvas(
         if (imageBitmap != null && bitmap != null) {
             val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
                 Modifier.transformable(transformState)
-            } else {
+   
+         } else {
                 Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val canvasWidth = size.width.toFloat().coerceAtLeast(1f)
                         val canvasHeight = size.height.toFloat().coerceAtLeast(1f)
-                        val fit = min(canvasWidth / bitmap.width, canvasHeight / bitmap.height)
+                        val fit = canvasWidth / bitmap.width
                         val imageWidth = bitmap.width * fit
                         val imageHeight = bitmap.height * fit
                         val imageLeft = (canvasWidth - imageWidth) * 0.5f
@@ -168,11 +171,12 @@ fun LidarMapCanvas(
                     .fillMaxSize()
                     .onSizeChanged { viewportSize = it }
                     .then(interactionModifier)
-                    .testTag("lidar_canvas"),
+                    .testTag("lidar_canv
+as"),
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
-                val fit = min(canvasWidth / imageBitmap.width, canvasHeight / imageBitmap.height)
+                val fit = canvasWidth / imageBitmap.width
                 val fittedWidth = imageBitmap.width * fit
                 val fittedHeight = imageBitmap.height * fit
                 val displayWidth = fittedWidth * zoom
@@ -206,7 +210,8 @@ fun LidarMapCanvas(
                             color = Color(0xFF29B6F6),
                             start = Offset(imageLeft, py),
                             end = Offset(imageLeft + displayWidth, py),
-                            strokeWidth = 1f,
+                      
+      strokeWidth = 1f,
                             alpha = 0.35f,
                         )
                     }
@@ -252,7 +257,8 @@ fun LidarMapCanvas(
                     drawLine(
                         color = Color(0xFFFFD700),
                         start = Offset(sx - 10f, sy),
-                        end = Offset(sx + 10f, sy),
+                        end =
+ Offset(sx + 10f, sy),
                         strokeWidth = 2f,
                         alpha = 0.8f,
                     )
@@ -302,7 +308,8 @@ fun LidarMapCanvas(
                     .padding(10.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xE60D0E12))
-                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
+                    .bord
+er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
                     .padding(8.dp),
             ) {
                 if (currentLat != null && currentLon != null) {
@@ -348,7 +355,8 @@ fun LidarMapCanvas(
         }
 
         if (isRendering) {
-            Box(
+         
+   Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.4f)),
