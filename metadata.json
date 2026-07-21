@@ -1,6 +1,6 @@
 {
-  "name": "Lidar Metal Detector",
-  "description": "Hillshade LiDAR elevation viewer and ground classifier layered with metal detector sweeping, magnetometer signal logging, and historic archaeological structures.",
+  "name": "Find It",
+  "description": "On-device LAZ/LAS terrain viewer with ground-surface extraction, interactive hillshade lighting, local-relief and disturbance screening, and field-survey logging.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

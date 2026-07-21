@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">Lidar Metal Detector</string>
+    <string name="app_name">Find It</string>
+    <string name="app_name_long">Find It · LiDAR Field Survey</string>
 </resources>

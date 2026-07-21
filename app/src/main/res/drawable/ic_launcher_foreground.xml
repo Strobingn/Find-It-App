@@ -1,57 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    
-    <!-- Background grid lines for GIS feel -->
+
+    <!-- LiDAR terrain grid -->
     <path
-        android:pathData="M18,18 L90,18 M18,36 L90,36 M18,54 L90,54 M18,72 L90,72 M18,90 L90,90 M18,18 L18,90 M36,18 L36,90 M54,18 L54,90 M72,18 L72,90 M90,18 L90,90"
-        android:strokeColor="#1E2C35"
+        android:pathData="M22,22 V86 M38,22 V86 M54,22 V86 M70,22 V86 M86,22 V86 M22,22 H86 M22,38 H86 M22,54 H86 M22,70 H86 M22,86 H86"
         android:strokeWidth="1"
-        android:strokeAlpha="0.4" />
-
-    <!-- Radar Sweep Signal Beam (Quarter wedge) -->
-    <path
-        android:pathData="M54,54 L54,24 A30,30 0 0,1 84,54 Z"
-        android:fillColor="#00E676"
-        android:fillAlpha="0.15" />
-
-    <!-- Outer Search Coil Ring -->
-    <path
-        android:pathData="M 54,24 A 30,30 0 1,1 53.99,24 Z"
-        android:strokeColor="#FFD700"
-        android:strokeWidth="4"
-        android:strokeLineCap="round" />
-
-    <!-- Inner Coil Ring -->
-    <path
-        android:pathData="M 54,38 A 16,16 0 1,1 53.99,38 Z"
-        android:strokeColor="#FFD700"
-        android:strokeWidth="2.5"
-        android:strokeLineCap="round" />
-
-    <!-- Horizontal Crosshair -->
-    <path
-        android:pathData="M 16,54 L 92,54"
         android:strokeColor="#00E676"
-        android:strokeWidth="2"
-        android:strokeAlpha="0.8" />
+        android:strokeAlpha="0.22"
+        android:fillColor="#00000000" />
 
-    <!-- Vertical Crosshair -->
+    <!-- Shaded relief -->
     <path
-        android:pathData="M 54,16 L 54,92"
+        android:pathData="M18,79 C28,66 36,70 45,54 C55,36 64,46 73,29 C84,42 90,60 94,79 Z"
+        android:fillColor="#FFD700"
+        android:fillAlpha="0.24" />
+    <path
+        android:pathData="M18,79 C28,66 36,70 45,54 C55,36 64,46 73,29 C84,42 90,60 94,79"
+        android:strokeWidth="3.2"
+        android:strokeColor="#FFD700"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+
+    <!-- Topographic contour lines -->
+    <path
+        android:pathData="M20,84 C34,74 47,82 60,70 C71,60 82,67 91,57"
+        android:strokeWidth="2.2"
         android:strokeColor="#00E676"
-        android:strokeWidth="2"
-        android:strokeAlpha="0.8" />
-
-    <!-- Solid Core Target Indicator -->
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
     <path
-        android:pathData="M 54,49 A 5,5 0 1,1 53.99,49 Z"
-        android:fillColor="#FFFFFF" />
-        
-    <!-- Hotspot Anomaly Indicator (glowing coin dot) -->
+        android:pathData="M25,72 C37,61 45,68 54,57 C64,45 76,55 85,44"
+        android:strokeWidth="2.2"
+        android:strokeColor="#00E676"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
     <path
-        android:pathData="M 72,40 A 3.5,3.5 0 1,1 71.99,40 Z"
-        android:fillColor="#FFD700" />
+        android:pathData="M37,59 C47,48 53,51 60,42 C66,35 72,38 77,34"
+        android:strokeWidth="2.2"
+        android:strokeColor="#FFFFFF"
+        android:strokeAlpha="0.9"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
 </vector>

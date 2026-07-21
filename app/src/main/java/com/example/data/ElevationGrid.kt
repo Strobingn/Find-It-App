@@ -2,49 +2,46 @@ package com.example.data
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import kotlin.math.abs
 import kotlin.math.atan
-import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/**
- * Represents a 2D grid of elevation points.
- * Supports ground point classification filtering, hillshading computations,
- * and high-performance Bitmap rendering.
- */
+/** A memory-bounded elevation raster used for terrain visualization and screening. */
 class ElevationGrid(
     val width: Int,
     val height: Int,
-    val bareEarth: FloatArray, // Bare earth elevation values (DEM)
-    val canopySpikes: FloatArray // Height of trees/vegetation on top of bare earth (DSM)
+    val bareEarth: FloatArray,
+    val canopySpikes: FloatArray,
+    val cellSizeMeters: Float = 1f,
+    val validData: BooleanArray = BooleanArray(width * height) { true },
 ) {
     init {
+        require(width > 0 && height > 0) { "Grid dimensions must be positive" }
         require(bareEarth.size == width * height) { "bareEarth size must be width * height" }
         require(canopySpikes.size == width * height) { "canopySpikes size must be width * height" }
+        require(validData.size == width * height) { "validData size must be width * height" }
     }
 
-    /**
-     * Gets the elevation at a specific coordinate (col, row),
-     * applying the vegetation filter (0.0 = show full trees, 1.0 = fully classified bare ground).
-     */
+    /** 0 shows the full surface model; 1 shows the extracted bare-earth model. */
     fun getElevationAt(col: Int, row: Int, vegetationFilter: Float): Float {
         val c = col.coerceIn(0, width - 1)
         val r = row.coerceIn(0, height - 1)
-        val idx = r * width + c
-        // As vegetationFilter goes to 1.0, the vegetation spikes are filtered out
-        return bareEarth[idx] + canopySpikes[idx] * (1.0f - vegetationFilter)
+        val index = r * width + c
+        return bareEarth[index] + canopySpikes[index] * (1f - vegetationFilter.coerceIn(0f, 1f))
     }
 
     /**
-     * Generates a hillshaded visual representation of the grid as a Bitmap.
-     * Uses Horn's formula for slope and aspect calculation.
+     * Render a terrain-analysis bitmap.
      *
-     * @param sunAzimuth Angle of the sun in degrees (0-360, 0 is North, 90 is East)
-     * @param sunAltitude Angle of the sun above the horizon in degrees (0-90)
-     * @param vegetationFilter Strength of vegetation filtering (0.0 to 1.0)
-     * @param palette Color theme for the elevation tinting (0 = Slate-Grey Clay, 1 = Lidar Copper, 2 = Terra Earth)
-     * @param contrast Contrast multiplier for hillshade shadow depth (1.0 to 2.5)
+     * Modes: 0 single hillshade, 1 multi-directional hillshade, 2 slope, 3 local relief,
+     * 4 curvature, 5 disturbance candidates, 6 aspect, 7 elevation, and 8 canopy height.
+     * Candidate views are screening aids, not proof of
+     * archaeological origin; field verification and source-quality review remain essential.
      */
     fun renderHillshade(
         sunAzimuth: Float,
@@ -52,253 +49,383 @@ class ElevationGrid(
         vegetationFilter: Float,
         palette: Int,
         contrast: Float = 1.5f,
-        visualizationMode: Int = 0, // 0 = Standard, 1 = Multi-Directional Relief, 2 = Slope Map
-        overlayType: Int = 0, // 0 = None, 1 = 1880s Homestead Plat, 2 = 1940s Contour Lines
+        visualizationMode: Int = 0,
+        overlayType: Int = 0,
         overlayOpacity: Float = 0.5f,
-        zScale: Float = 1.0f
+        zScale: Float = 1f,
+        featureScaleMeters: Float = 6f,
+        analysisSensitivity: Float = 1.2f,
+        contourIntervalMeters: Float = 0f,
     ): Bitmap {
-        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
-
-        // Convert sun angles to radians
-        val sunAzRad1 = Math.toRadians((360.0 - sunAzimuth + 90.0) % 360.0).toFloat()
-        // Opposite sun angle for secondary direction in Multi-Directional Relief
-        val sunAzRad2 = Math.toRadians((360.0 - ((sunAzimuth + 180f) % 360f) + 90.0) % 360.0).toFloat()
-        val sunAltRad = Math.toRadians(sunAltitude.toDouble()).toFloat()
-
-        val cosSunAlt = cos(sunAltRad)
-        val sinSunAlt = sin(sunAltRad)
-
-        // Constants for Horn's method gradient cell size
-        val cellDistance = 1.0f
-
-        // Precompute elevations with vegetation filter applied to speed up loops
-        val filteredElevations = FloatArray(width * height)
-        for (i in 0 until width * height) {
-            filteredElevations[i] = bareEarth[i] + canopySpikes[i] * (1.0f - vegetationFilter)
+        val cellDistance = cellSizeMeters.coerceAtLeast(0.001f)
+        val elevations = FloatArray(width * height)
+        for (index in elevations.indices) {
+            elevations[index] = bareEarth[index] +
+                canopySpikes[index] * (1f - vegetationFilter.coerceIn(0f, 1f))
         }
 
-        // Find min and max elevations for hypsometric tinting
-        var minElev = Float.MAX_VALUE
-        var maxElev = Float.MIN_VALUE
-        for (e in filteredElevations) {
-            if (e < minElev) minElev = e
-            if (e > maxElev) maxElev = e
+        val analysisRadius = (featureScaleMeters.coerceAtLeast(cellDistance) / cellDistance)
+            .toInt()
+            .coerceIn(1, max(1, min(width, height) / 4))
+        val local = if (visualizationMode == 3 || visualizationMode == 5) {
+            localStatistics(elevations, analysisRadius)
+        } else {
+            null
         }
-        val elevRange = if (maxElev - minElev > 0f) maxElev - minElev else 1f
+        val curvature = if (visualizationMode == 4 || visualizationMode == 5) {
+            curvature(elevations, cellDistance)
+        } else {
+            null
+        }
+        val residualScale = local?.residual?.let(::robustMagnitudeScale) ?: 1f
+        val roughnessScale = local?.roughness?.let(::robustMagnitudeScale) ?: 1f
+        val curvatureScale = curvature?.let(::robustMagnitudeScale) ?: 1f
+        val canopyScale = robustPositiveScale(canopySpikes)
+
+        var minElevation = Float.MAX_VALUE
+        var maxElevation = -Float.MAX_VALUE
+        for (index in elevations.indices) {
+            if (!validData[index]) continue
+            val elevation = elevations[index]
+            if (elevation < minElevation) minElevation = elevation
+            if (elevation > maxElevation) maxElevation = elevation
+        }
+        if (minElevation == Float.MAX_VALUE) {
+            minElevation = 0f
+            maxElevation = 1f
+        }
+        val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
+        val azimuth = normalizeDegrees(sunAzimuth)
+        val altitude = sunAltitude.coerceIn(1f, 89f)
+        val contrastValue = contrast.coerceIn(0.5f, 4f)
+        val zMultiplier = zScale.coerceIn(0.25f, 8f)
 
         for (y in 0 until height) {
             for (x in 0 until width) {
-                // Get 3x3 neighbors for Horn's slope algorithm
-                val z00 = filteredElevations[coerceIndex(x - 1, y - 1)]
-                val z01 = filteredElevations[coerceIndex(x, y - 1)]
-                val z02 = filteredElevations[coerceIndex(x + 1, y - 1)]
-                val z10 = filteredElevations[coerceIndex(x - 1, y)]
-                val z12 = filteredElevations[coerceIndex(x + 1, y)]
-                val z20 = filteredElevations[coerceIndex(x - 1, y + 1)]
-                val z21 = filteredElevations[coerceIndex(x, y + 1)]
-                val z22 = filteredElevations[coerceIndex(x + 1, y + 1)]
+                val index = y * width + x
+                if (!validData[index]) {
+                    pixels[index] = Color.TRANSPARENT
+                    continue
+                }
+                val gradient = hornGradient(elevations, x, y, cellDistance, zMultiplier)
+                val slopeRadians = atan(sqrt(gradient.dx * gradient.dx + gradient.dy * gradient.dy))
+                val primaryShade = shade(gradient.dx, gradient.dy, azimuth, altitude)
+                val multiShade = multiDirectionalShade(gradient.dx, gradient.dy, azimuth, altitude)
+                val elevationPercent = ((elevations[index] - minElevation) / elevationRange).coerceIn(0f, 1f)
 
-                // Horn's method for rate of change (scaled by zScale for vertical exaggeration)
-                val dz_dx = (((z02 + 2f * z12 + z22) - (z00 + 2f * z10 + z20)) / (8f * cellDistance)) * zScale
-                val dz_dy = (((z20 + 2f * z21 + z22) - (z00 + 2f * z01 + z02)) / (8f * cellDistance)) * zScale
-
-                // Slope and Aspect
-                val slope = atan(sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
-                val aspect = if (dz_dx != 0f) {
-                    atan2(dz_dy, -dz_dx)
-                } else {
-                    if (dz_dy > 0) Math.PI.toFloat() / 2f else -Math.PI.toFloat() / 2f
+                var color = when (visualizationMode.coerceIn(0, 8)) {
+                    1 -> shadePalette(getPaletteColor(palette, elevationPercent), multiShade, contrastValue)
+                    2 -> slopeColor(getPaletteColor(palette, elevationPercent), slopeRadians)
+                    3 -> {
+                        val normalized = (requireNotNull(local).residual[index] / residualScale).coerceIn(-1f, 1f)
+                        shadePalette(divergingReliefColor(normalized), multiShade, contrastValue * 0.75f)
+                    }
+                    4 -> {
+                        val normalized = (requireNotNull(curvature)[index] / curvatureScale).coerceIn(-1f, 1f)
+                        shadePalette(divergingCurvatureColor(normalized), multiShade, contrastValue * 0.6f)
+                    }
+                    5 -> {
+                        val stats = requireNotNull(local)
+                        val residual = abs(stats.residual[index]) / residualScale
+                        val roughness = stats.roughness[index] / roughnessScale
+                        val bend = abs(requireNotNull(curvature)[index]) / curvatureScale
+                        val score = ((residual * 0.58f + bend * 0.27f + roughness * 0.15f) *
+                            analysisSensitivity.coerceIn(0.4f, 2.5f)).coerceIn(0f, 1f)
+                        disturbanceCandidateColor(score, multiShade)
+                    }
+                    6 -> aspectColor(gradient.dx, gradient.dy, slopeRadians, multiShade)
+                    7 -> getPaletteColor(palette, elevationPercent)
+                    8 -> canopyHeightColor(canopySpikes[index], canopyScale, multiShade)
+                    else -> shadePalette(getPaletteColor(palette, elevationPercent), primaryShade, contrastValue)
                 }
 
-                // Elevation percentage for color tinting
-                val currentElev = filteredElevations[y * width + x]
-                val elevPct = ((currentElev - minElev) / elevRange).coerceIn(0f, 1f)
-
-                // Determine base color based on palette
-                val baseColor = getPaletteColor(palette, elevPct)
-
-                var finalColor = baseColor
-
-                if (visualizationMode == 2) {
-                    // STYLE 2: Slope Map (Neon Orange/Red highlighting steep gradients, otherwise dark steel clay)
-                    val slopePct = (slope / 0.4f).coerceIn(0f, 1f)
-                    
-                    // High-contrast slope coloring: blend the base color into red-orange based on slope
-                    val rSlope = (255 * slopePct + Color.red(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
-                    val gSlope = (70 * slopePct + Color.green(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
-                    val bSlope = (0 * slopePct + Color.blue(baseColor) * (1f - slopePct)).toInt().coerceIn(0, 255)
-                    finalColor = Color.rgb(rSlope, gSlope, bSlope)
-                } else {
-                    // STYLE 0 & 1: Hillshading calculations
-                    var hillshade = if (visualizationMode == 1) {
-                        // Multi-directional relief: combine primary (NW) and secondary (SE) shadow shading
-                        val h1 = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad1 - aspect)
-                        val h2 = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad2 - aspect)
-                        ((h1.coerceIn(0f, 1f) + h2.coerceIn(0f, 1f)) / 2f)
-                    } else {
-                        // Standard Hillshade
-                        val h = cosSunAlt * cos(slope) + sinSunAlt * sin(slope) * cos(sunAzRad1 - aspect)
-                        h.coerceIn(0f, 1f)
-                    }
-
-                    // Apply contrast/intensity to shadow relief
-                    if (contrast != 1.0f) {
-                        hillshade = ((hillshade - 0.5f) * contrast + 0.5f).coerceIn(0f, 1f)
-                    }
-
-                    // Blend base color with hillshade
-                    val r = (Color.red(baseColor) * hillshade).toInt().coerceIn(0, 255)
-                    val g = (Color.green(baseColor) * hillshade).toInt().coerceIn(0, 255)
-                    val b = (Color.blue(baseColor) * hillshade).toInt().coerceIn(0, 255)
-                    finalColor = Color.rgb(r, g, b)
-                }
-
-                // Blend Historical Overlay if requested
                 if (overlayType > 0 && overlayOpacity > 0f) {
-                    var isOverlayPixel = false
-                    var overlayColor = Color.BLACK
-
-                    if (overlayType == 1) {
-                        // OVERLAY 1: 1880s Homestead Plat Overlay (Vintage Sepia boundaries, structures, and roads)
-                        // A. Plat grid line divisions (e.g. sections every 50 grid lines)
-                        val isSectionLine = (x % 50 == 0) || (y % 50 == 0)
-                        
-                        // B. Old Homestead Carriage Road (Wavy path crossing screen)
-                        val roadY = height * 0.65f + sin(x * 0.08f) * 12f
-                        val isRoad = Math.abs(y - roadY) < 1.5f
-                        
-                        // C. Property boundary fences (rectangular layout at center)
-                        val isFence = (x in 20..80 && (y == 25 || y == 75)) || (y in 25..75 && (x == 20 || x == 80))
-
-                        // D. Old ruined Homestead structure plots (small squares representing cellar holes)
-                        val isHomesteadPlot = (x in 40..45 && y in 41..44) || (x in 24..27 && y in 63..66)
-
-                        if (isSectionLine) {
-                            isOverlayPixel = true
-                            overlayColor = Color.rgb(180, 150, 110) // Light vintage sepia
-                        } else if (isFence) {
-                            isOverlayPixel = true
-                            overlayColor = Color.rgb(139, 90, 43) // Dark vintage brown
-                        } else if (isRoad) {
-                            isOverlayPixel = true
-                            overlayColor = Color.rgb(160, 130, 90) // Medium sepia dashed carriage road
-                        } else if (isHomesteadPlot) {
-                            isOverlayPixel = true
-                            overlayColor = Color.rgb(200, 50, 50) // Red warning foundation overlay
-                        }
-                    } else if (overlayType == 2) {
-                        // OVERLAY 2: 1940s Vintage Topographic Contour Lines (Brown hand-styled contours)
-                        val elevInt = currentElev.toInt()
-                        val isContour = (elevInt % 12 == 0) && (filteredElevations[coerceIndex(x - 1, y)].toInt() % 12 != 0 || filteredElevations[coerceIndex(x, y - 1)].toInt() % 12 != 0)
-                        
-                        // Old coordinate meridian line
-                        val isGridMeridian = (x == width / 2) || (y == height / 2)
-
-                        if (isContour) {
-                            isOverlayPixel = true
-                            overlayColor = Color.rgb(115, 80, 50) // Vintage Topographic Brown
-                        } else if (isGridMeridian) {
-                            isOverlayPixel = true
-                            overlayColor = Color.rgb(50, 80, 115) // Deep ocean surveyor grid blue
-                        }
-                    }
-
-                    if (isOverlayPixel) {
-                        val ro = Color.red(overlayColor)
-                        val go = Color.green(overlayColor)
-                        val bo = Color.blue(overlayColor)
-
-                        val rf = (ro * overlayOpacity + Color.red(finalColor) * (1f - overlayOpacity)).toInt().coerceIn(0, 255)
-                        val gf = (go * overlayOpacity + Color.green(finalColor) * (1f - overlayOpacity)).toInt().coerceIn(0, 255)
-                        val bf = (bo * overlayOpacity + Color.blue(finalColor) * (1f - overlayOpacity)).toInt().coerceIn(0, 255)
-                        finalColor = Color.rgb(rf, gf, bf)
+                    historicalOverlayColor(
+                        x = x,
+                        y = y,
+                        elevations = elevations,
+                        currentElevation = elevations[index],
+                        overlayType = overlayType,
+                    )?.let { overlay ->
+                        color = blend(color, overlay, overlayOpacity.coerceIn(0f, 1f))
                     }
                 }
 
-                pixels[y * width + x] = finalColor
+                val contourInterval = contourIntervalMeters.coerceAtLeast(0f)
+                if (contourInterval >= 0.05f && isContourPixel(elevations, x, y, contourInterval)) {
+                    color = blend(color, Color.rgb(235, 244, 255), 0.72f)
+                }
+                pixels[index] = color
             }
         }
 
-        bmp.setPixels(pixels, 0, width, 0, 0, width, height)
-        return bmp
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        return bitmap
     }
 
-    private fun coerceIndex(x: Int, y: Int): Int {
-        val cx = x.coerceIn(0, width - 1)
-        val cy = y.coerceIn(0, height - 1)
-        return cy * width + cx
+    private fun hornGradient(
+        elevations: FloatArray,
+        x: Int,
+        y: Int,
+        cellDistance: Float,
+        zScale: Float,
+    ): Gradient {
+        fun at(px: Int, py: Int): Float = elevations[index(px, py)]
+        val z00 = at(x - 1, y - 1)
+        val z01 = at(x, y - 1)
+        val z02 = at(x + 1, y - 1)
+        val z10 = at(x - 1, y)
+        val z12 = at(x + 1, y)
+        val z20 = at(x - 1, y + 1)
+        val z21 = at(x, y + 1)
+        val z22 = at(x + 1, y + 1)
+        return Gradient(
+            dx = ((z02 + 2f * z12 + z22) - (z00 + 2f * z10 + z20)) /
+                (8f * cellDistance) * zScale,
+            dy = ((z20 + 2f * z21 + z22) - (z00 + 2f * z01 + z02)) /
+                (8f * cellDistance) * zScale,
+        )
     }
 
-    /**
-     * Color palettes for LiDAR elevation mapping.
-     */
-    private fun getPaletteColor(palette: Int, pct: Float): Int {
-        return when (palette) {
-            // 0: Clay / Greyscale (Excellent for archeology foundations)
-            0 -> {
-                val shade = (150 + (pct * 60)).toInt().coerceIn(0, 255)
-                Color.rgb(shade, shade, shade)
+    /** Dot product of a terrain normal and a light vector; azimuth is clockwise from north. */
+    private fun shade(dx: Float, dy: Float, azimuthDegrees: Float, altitudeDegrees: Float): Float {
+        val azimuth = Math.toRadians(azimuthDegrees.toDouble())
+        val altitude = Math.toRadians(altitudeDegrees.toDouble())
+        val normalLength = sqrt(dx * dx + dy * dy + 1f)
+        val nx = -dx / normalLength
+        val ny = -dy / normalLength
+        val nz = 1f / normalLength
+        val horizontal = cos(altitude).toFloat()
+        val lx = (sin(azimuth) * horizontal).toFloat()
+        // Raster y increases south, hence north has a negative y component.
+        val ly = (-cos(azimuth) * horizontal).toFloat()
+        val lz = sin(altitude).toFloat()
+        return (nx * lx + ny * ly + nz * lz).coerceIn(0f, 1f)
+    }
+
+    private fun multiDirectionalShade(dx: Float, dy: Float, azimuth: Float, altitude: Float): Float {
+        val primary = shade(dx, dy, azimuth, altitude)
+        val right = shade(dx, dy, azimuth + 90f, altitude)
+        val opposite = shade(dx, dy, azimuth + 180f, altitude)
+        val left = shade(dx, dy, azimuth + 270f, altitude)
+        return (primary * 0.45f + right * 0.2f + opposite * 0.15f + left * 0.2f)
+            .coerceIn(0f, 1f)
+    }
+
+    private fun shadePalette(baseColor: Int, rawShade: Float, contrast: Float): Int {
+        val adjusted = ((rawShade - 0.5f) * contrast + 0.5f).coerceIn(0f, 1f)
+        val illumination = 0.18f + adjusted * 0.82f
+        return Color.rgb(
+            (Color.red(baseColor) * illumination).toInt().coerceIn(0, 255),
+            (Color.green(baseColor) * illumination).toInt().coerceIn(0, 255),
+            (Color.blue(baseColor) * illumination).toInt().coerceIn(0, 255),
+        )
+    }
+
+    private fun slopeColor(baseColor: Int, slopeRadians: Float): Int {
+        val strength = (slopeRadians / Math.toRadians(35.0).toFloat()).coerceIn(0f, 1f)
+        return blend(baseColor, Color.rgb(255, 70, 0), strength)
+    }
+
+    private fun localStatistics(elevations: FloatArray, radius: Int): LocalStatistics {
+        val stride = width + 1
+        val sum = DoubleArray((width + 1) * (height + 1))
+        val squareSum = DoubleArray(sum.size)
+        for (y in 0 until height) {
+            var rowSum = 0.0
+            var rowSquareSum = 0.0
+            for (x in 0 until width) {
+                val value = elevations[y * width + x].toDouble()
+                rowSum += value
+                rowSquareSum += value * value
+                sum[(y + 1) * stride + x + 1] = sum[y * stride + x + 1] + rowSum
+                squareSum[(y + 1) * stride + x + 1] = squareSum[y * stride + x + 1] + rowSquareSum
             }
-            // 1: LiDAR Copper (Deep Navy blue/black to hot glowing copper)
-            1 -> {
-                // Multi-stop gradient: Navy (0) -> Maroon (0.3) -> Copper (0.7) -> Gold (1.0)
-                if (pct < 0.3f) {
-                    val p = pct / 0.3f
-                    Color.rgb(
-                        (15 * (1f - p) + 80 * p).toInt(),
-                        (20 * (1f - p) + 15 * p).toInt(),
-                        (45 * (1f - p) + 20 * p).toInt()
-                    )
-                } else if (pct < 0.7f) {
-                    val p = (pct - 0.3f) / 0.4f
-                    Color.rgb(
-                        (80 * (1f - p) + 200 * p).toInt(),
-                        (15 * (1f - p) + 90 * p).toInt(),
-                        (20 * (1f - p) + 40 * p).toInt()
-                    )
-                } else {
-                    val p = (pct - 0.7f) / 0.3f
-                    Color.rgb(
-                        (200 * (1f - p) + 250 * p).toInt(),
-                        (90 * (1f - p) + 180 * p).toInt(),
-                        (40 * (1f - p) + 70 * p).toInt()
-                    )
-                }
+        }
+        val residual = FloatArray(elevations.size)
+        val roughness = FloatArray(elevations.size)
+        for (y in 0 until height) {
+            val y0 = (y - radius).coerceAtLeast(0)
+            val y1 = (y + radius).coerceAtMost(height - 1)
+            for (x in 0 until width) {
+                val x0 = (x - radius).coerceAtLeast(0)
+                val x1 = (x + radius).coerceAtMost(width - 1)
+                val count = (x1 - x0 + 1) * (y1 - y0 + 1)
+                val localSum = rectangleSum(sum, stride, x0, y0, x1, y1)
+                val localSquareSum = rectangleSum(squareSum, stride, x0, y0, x1, y1)
+                val mean = localSum / count
+                val variance = max(0.0, localSquareSum / count - mean * mean)
+                val index = y * width + x
+                residual[index] = (elevations[index] - mean).toFloat()
+                roughness[index] = sqrt(variance).toFloat()
             }
-            // 2: Terra / Topographical (Green valleys to brown mountains, white peaks)
-            2 -> {
-                if (pct < 0.2f) { // Valley: Deep green
-                    val p = pct / 0.2f
-                    Color.rgb(
-                        (34 * (1f - p) + 46 * p).toInt(),
-                        (112 * (1f - p) + 139 * p).toInt(),
-                        (63 * (1f - p) + 87 * p).toInt()
-                    )
-                } else if (pct < 0.6f) { // Forest/Plain: Olive Green to Yellow
-                    val p = (pct - 0.2f) / 0.4f
-                    Color.rgb(
-                        (46 * (1f - p) + 196 * p).toInt(),
-                        (139 * (1f - p) + 183 * p).toInt(),
-                        (87 * (1f - p) + 101 * p).toInt()
-                    )
-                } else if (pct < 0.85f) { // Slopes: Yellow to Terracotta Brown
-                    val p = (pct - 0.6f) / 0.25f
-                    Color.rgb(
-                        (196 * (1f - p) + 130 * p).toInt(),
-                        (183 * (1f - p) + 80 * p).toInt(),
-                        (101 * (1f - p) + 40 * p).toInt()
-                    )
-                } else { // Peaks: Mountain Dark Brown to Snow-ish Grey
-                    val p = (pct - 0.85f) / 0.15f
-                    Color.rgb(
-                        (130 * (1f - p) + 210 * p).toInt(),
-                        (80 * (1f - p) + 210 * p).toInt(),
-                        (40 * (1f - p) + 215 * p).toInt()
-                    )
-                }
+        }
+        return LocalStatistics(residual, roughness)
+    }
+
+    private fun curvature(elevations: FloatArray, cellDistance: Float): FloatArray {
+        val output = FloatArray(elevations.size)
+        val divisor = cellDistance * cellDistance
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val center = elevations[index(x, y)]
+                output[y * width + x] = (
+                    elevations[index(x - 1, y)] + elevations[index(x + 1, y)] +
+                        elevations[index(x, y - 1)] + elevations[index(x, y + 1)] - 4f * center
+                    ) / divisor
             }
-            else -> Color.GRAY
+        }
+        return output
+    }
+
+    private fun robustMagnitudeScale(values: FloatArray): Float {
+        var magnitudeSum = 0.0
+        var maximum = 0f
+        for (value in values) {
+            val magnitude = abs(value)
+            magnitudeSum += magnitude
+            if (magnitude > maximum) maximum = magnitude
+        }
+        val mean = (magnitudeSum / values.size.coerceAtLeast(1)).toFloat()
+        return max(max(mean * 4.5f, maximum * 0.08f), 1e-5f)
+    }
+
+    private fun isContourPixel(elevations: FloatArray, x: Int, y: Int, interval: Float): Boolean {
+        if (x == 0 && y == 0) return false
+        val level = floor(elevations[index(x, y)] / interval).toInt()
+        return (x > 0 && floor(elevations[index(x - 1, y)] / interval).toInt() != level) ||
+            (y > 0 && floor(elevations[index(x, y - 1)] / interval).toInt() != level)
+    }
+
+    private fun historicalOverlayColor(
+        x: Int,
+        y: Int,
+        elevations: FloatArray,
+        currentElevation: Float,
+        overlayType: Int,
+    ): Int? {
+        if (overlayType == 1) {
+            val sectionX = max(1, width / 2)
+            val sectionY = max(1, height / 2)
+            val isSectionLine = x % sectionX == 0 || y % sectionY == 0
+            val roadY = height * 0.65f + sin(x * 0.08f) * height * 0.12f
+            val isRoad = abs(y - roadY) < max(1.5f, height / 100f)
+            if (isSectionLine) return Color.rgb(180, 150, 110)
+            if (isRoad) return Color.rgb(160, 130, 90)
+        } else if (overlayType == 2) {
+            val isContour = currentElevation.toInt() % 12 == 0 &&
+                (elevations[index(x - 1, y)].toInt() % 12 != 0 ||
+                    elevations[index(x, y - 1)].toInt() % 12 != 0)
+            if (isContour) return Color.rgb(115, 80, 50)
+            if (x == width / 2 || y == height / 2) return Color.rgb(50, 80, 115)
+        }
+        return null
+    }
+
+    private fun divergingReliefColor(value: Float): Int {
+        val neutral = Color.rgb(198, 198, 194)
+        return if (value < 0f) {
+            blend(neutral, Color.rgb(32, 116, 210), -value)
+        } else {
+            blend(neutral, Color.rgb(232, 82, 30), value)
         }
     }
+
+    private fun divergingCurvatureColor(value: Float): Int {
+        val neutral = Color.rgb(190, 190, 184)
+        return if (value < 0f) {
+            blend(neutral, Color.rgb(24, 180, 196), -value)
+        } else {
+            blend(neutral, Color.rgb(208, 48, 146), value)
+        }
+    }
+
+    private fun disturbanceCandidateColor(score: Float, shade: Float): Int {
+        val base = Color.rgb(42, 49, 53)
+        val heat = when {
+            score < 0.35f -> blend(base, Color.rgb(44, 102, 126), score / 0.35f)
+            score < 0.7f -> blend(Color.rgb(44, 102, 126), Color.rgb(255, 204, 52), (score - 0.35f) / 0.35f)
+            else -> blend(Color.rgb(255, 204, 52), Color.rgb(230, 42, 38), (score - 0.7f) / 0.3f)
+        }
+        return shadePalette(heat, 0.3f + shade * 0.7f, 0.8f)
+    }
+
+    private fun aspectColor(dx: Float, dy: Float, slopeRadians: Float, shade: Float): Int {
+        if (slopeRadians < Math.toRadians(1.0).toFloat()) return Color.rgb(148, 148, 148)
+        val degrees = ((Math.toDegrees(kotlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
+        val vivid = Color.HSVToColor(floatArrayOf(degrees, 0.82f, 0.95f))
+        return shadePalette(vivid, 0.35f + shade * 0.65f, 0.72f)
+    }
+
+    private fun canopyHeightColor(heightMeters: Float, scale: Float, shade: Float): Int {
+        val normalized = (heightMeters.coerceAtLeast(0f) / scale).coerceIn(0f, 1f)
+        val base = when {
+            normalized < 0.08f -> Color.rgb(82, 74, 62)
+            normalized < 0.45f -> blend(Color.rgb(82, 74, 62), Color.rgb(46, 139, 87), normalized / 0.45f)
+            else -> blend(Color.rgb(46, 139, 87), Color.rgb(8, 58, 32), (normalized - 0.45f) / 0.55f)
+        }
+        return shadePalette(base, 0.4f + shade * 0.6f, 0.65f)
+    }
+
+    private fun robustPositiveScale(values: FloatArray): Float {
+        var sum = 0.0
+        var maximum = 0f
+        var count = 0
+        for (value in values) {
+            if (!value.isFinite() || value <= 0f) continue
+            sum += value
+            maximum = max(maximum, value)
+            count++
+        }
+        if (count == 0) return 1f
+        return max((sum / count).toFloat() * 3.5f, maximum * 0.15f).coerceAtLeast(0.1f)
+    }
+
+    private fun getPaletteColor(palette: Int, percent: Float): Int = when (palette) {
+        0 -> {
+            val shade = (150 + percent * 60).toInt().coerceIn(0, 255)
+            Color.rgb(shade, shade, shade)
+        }
+        1 -> when {
+            percent < 0.3f -> blend(Color.rgb(15, 20, 45), Color.rgb(80, 15, 20), percent / 0.3f)
+            percent < 0.7f -> blend(Color.rgb(80, 15, 20), Color.rgb(200, 90, 40), (percent - 0.3f) / 0.4f)
+            else -> blend(Color.rgb(200, 90, 40), Color.rgb(250, 180, 70), (percent - 0.7f) / 0.3f)
+        }
+        2 -> when {
+            percent < 0.2f -> blend(Color.rgb(34, 112, 63), Color.rgb(46, 139, 87), percent / 0.2f)
+            percent < 0.6f -> blend(Color.rgb(46, 139, 87), Color.rgb(196, 183, 101), (percent - 0.2f) / 0.4f)
+            percent < 0.85f -> blend(Color.rgb(196, 183, 101), Color.rgb(130, 80, 40), (percent - 0.6f) / 0.25f)
+            else -> blend(Color.rgb(130, 80, 40), Color.rgb(210, 210, 215), (percent - 0.85f) / 0.15f)
+        }
+        else -> Color.GRAY
+    }
+
+    private fun blend(background: Int, foreground: Int, amount: Float): Int {
+        val fraction = amount.coerceIn(0f, 1f)
+        return Color.rgb(
+            (Color.red(background) * (1f - fraction) + Color.red(foreground) * fraction).toInt(),
+            (Color.green(background) * (1f - fraction) + Color.green(foreground) * fraction).toInt(),
+            (Color.blue(background) * (1f - fraction) + Color.blue(foreground) * fraction).toInt(),
+        )
+    }
+
+    private fun index(x: Int, y: Int): Int =
+        y.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)
+
+    private fun rectangleSum(
+        integral: DoubleArray,
+        stride: Int,
+        x0: Int,
+        y0: Int,
+        x1: Int,
+        y1: Int,
+    ): Double = integral[(y1 + 1) * stride + x1 + 1] - integral[y0 * stride + x1 + 1] -
+        integral[(y1 + 1) * stride + x0] + integral[y0 * stride + x0]
+
+    private fun normalizeDegrees(value: Float): Float = ((value % 360f) + 360f) % 360f
+
+    private data class Gradient(val dx: Float, val dy: Float)
+    private data class LocalStatistics(val residual: FloatArray, val roughness: FloatArray)
 }
