@@ -2,6 +2,7 @@ package com.example.data
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import androidx.core.graphics.createBitmap
 import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -20,6 +21,8 @@ class ElevationGrid(
     val canopySpikes: FloatArray // Height of trees/vegetation on top of bare earth (DSM)
 ) {
     init {
+        require(width > 0) { "width must be positive" }
+        require(height > 0) { "height must be positive" }
         require(bareEarth.size == width * height) { "bareEarth size must be width * height" }
         require(canopySpikes.size == width * height) { "canopySpikes size must be width * height" }
     }
@@ -57,7 +60,7 @@ class ElevationGrid(
         overlayOpacity: Float = 0.5f,
         zScale: Float = 1.0f
     ): Bitmap {
-        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bmp = createBitmap(width, height)
         val pixels = IntArray(width * height)
 
         // Convert sun angles to radians
@@ -80,7 +83,7 @@ class ElevationGrid(
 
         // Find min and max elevations for hypsometric tinting
         var minElev = Float.MAX_VALUE
-        var maxElev = Float.MIN_VALUE
+        var maxElev = -Float.MAX_VALUE
         for (e in filteredElevations) {
             if (e < minElev) minElev = e
             if (e > maxElev) maxElev = e

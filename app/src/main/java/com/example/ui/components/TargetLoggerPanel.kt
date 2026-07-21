@@ -24,7 +24,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Flag
-import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -88,7 +88,7 @@ fun TargetLoggerPanel(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    imageVector = Icons.Default.FormatListBulleted,
+                    imageVector = Icons.AutoMirrored.Filled.FormatListBulleted,
                     contentDescription = null,
                     tint = Color(0xFFFFD700),
                     modifier = Modifier.size(18.dp)

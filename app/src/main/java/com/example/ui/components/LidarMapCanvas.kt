@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import java.util.Locale
+
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -278,7 +280,7 @@ fun LidarMapCanvas(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "UTM10: E ${String.format("%.1f", utm.first)}m | N ${String.format("%.1f", utm.second)}m",
+                        text = "UTM10: E ${String.format(Locale.US, "%.1f", utm.first)}m | N ${String.format(Locale.US, "%.1f", utm.second)}m",
                         color = Color(0xFF29B6F6),
                         fontSize = 8.sp,
                         fontFamily = FontFamily.Monospace
@@ -318,7 +320,7 @@ fun LidarMapCanvas(
                         }
                         Spacer(modifier = Modifier.height(1.dp))
                         Text(
-                            text = "${String.format("%.1f", realMeters)}m",
+                            text = "${String.format(Locale.US, "%.1f", realMeters)}m",
                             color = Color.White,
                             fontSize = 8.5.sp,
                             fontWeight = FontWeight.Bold,

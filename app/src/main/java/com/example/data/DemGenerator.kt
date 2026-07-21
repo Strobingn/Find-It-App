@@ -186,58 +186,50 @@ object DemGenerator {
      * Robustly handles different sizes and formats, fallback to default.
      */
     fun parseCustomGrid(csvText: String): ElevationGrid? {
-        try {
-            val lines = csvText.lines()
-                .map { it.trim() }
+        val lines = csvText.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+
+        if (lines.isEmpty()) return null
+
+        val rowData = ArrayList<FloatArray>(lines.size)
+        var colCount = -1
+
+        for (line in lines) {
+            val tokens = line.split(Regex("[,\\s]+"))
                 .filter { it.isNotEmpty() }
+            if (tokens.isEmpty()) continue
 
-            if (lines.isEmpty()) return null
-
-            val rowData = ArrayList<FloatArray>()
-            var colCount = -1
-
-            for (line in lines) {
-                // Split by commas, tabs, or spaces
-                val tokens = line.split(Regex("[,\\s\\t]+"))
-                    .filter { it.isNotEmpty() }
-                
-                if (tokens.isEmpty()) continue
-
-                val floats = FloatArray(tokens.size)
-                for (i in tokens.indices) {
-                    floats[i] = tokens[i].toFloatOrNull() ?: 0f
-                }
-
-                if (colCount == -1) {
-                    colCount = floats.size
-                } else if (floats.size != colCount) {
-                    // Non-matching columns, truncate or pad to maintain grid
-                    val adjustedFloats = FloatArray(colCount)
-                    System.arraycopy(floats, 0, adjustedFloats, 0, Math.min(floats.size, colCount))
-                    rowData.add(adjustedFloats)
-                    continue
-                }
-                rowData.add(floats)
+            val floats = FloatArray(tokens.size)
+            for (i in tokens.indices) {
+                val value = tokens[i].toFloatOrNull() ?: return null
+                if (!value.isFinite()) return null
+                floats[i] = value
             }
 
-            if (rowData.isEmpty() || colCount <= 0) return null
-
-            val width = colCount
-            val height = rowData.size
-
-            val bareEarth = FloatArray(width * height)
-            val canopySpikes = FloatArray(width * height) // Custom files don't have separate canopy, so 0
-
-            for (r in 0 until height) {
-                val row = rowData[r]
-                System.arraycopy(row, 0, bareEarth, r * width, width)
+            if (colCount == -1) {
+                colCount = floats.size
+            } else if (floats.size != colCount) {
+                return null
             }
-
-            return ElevationGrid(width, height, bareEarth, canopySpikes)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return null
+            rowData.add(floats)
         }
+
+        if (rowData.isEmpty() || colCount <= 0) return null
+        val cellCount = colCount.toLong() * rowData.size
+        if (cellCount > 4_000_000L) return null
+
+        val width = colCount
+        val height = rowData.size
+        val bareEarth = FloatArray(cellCount.toInt())
+        val canopySpikes = FloatArray(cellCount.toInt())
+
+        for (r in 0 until height) {
+            System.arraycopy(rowData[r], 0, bareEarth, r * width, width)
+        }
+
+        return ElevationGrid(width, height, bareEarth, canopySpikes)
     }
 
     private fun readIntLE(bytes: ByteArray, offset: Int): Int {
@@ -273,14 +265,16 @@ object DemGenerator {
             if (readBytes < 227) return null
 
             // Check signature "LASF"
-            if (header[0].toChar() != 'L' || header[1].toChar() != 'A' || header[2].toChar() != 'S' || header[3].toChar() != 'F') {
+            if (header[0] != 'L'.code.toByte() || header[1] != 'A'.code.toByte() || header[2] != 'S'.code.toByte() || header[3] != 'F'.code.toByte()) {
                 return null
             }
 
-            val offsetToPoints = readIntLE(header, 96)
+            val offsetToPoints = readIntLE(header, 96).toLong() and 0xFFFF_FFFFL
             val pointFormat = header[104].toInt() and 0xFF
             val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
             val legacyNumPoints = readIntLE(header, 107)
+
+            if ((pointFormat and 0xC0) != 0 || pointRecordLength < 12) return null
 
             val scaleX = readDoubleLE(header, 131)
             val scaleY = readDoubleLE(header, 139)
@@ -299,10 +293,10 @@ object DemGenerator {
 
             // Reset and skip to point data
             bis.reset()
-            var bytesToSkip = offsetToPoints.toLong()
+            var bytesToSkip = offsetToPoints
             while (bytesToSkip > 0) {
                 val skipped = bis.skip(bytesToSkip)
-                if (skipped <= 0) break
+                if (skipped <= 0) return null
                 bytesToSkip -= skipped
             }
 
@@ -310,11 +304,12 @@ object DemGenerator {
             val gridW = 100
             val gridH = 100
             val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
-            val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
+            val maxGrid = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
             val countGrid = IntArray(gridW * gridH)
 
             val pointBuf = ByteArray(pointRecordLength)
             val pointsToProcess = Math.min(if (legacyNumPoints <= 0) 100000 else legacyNumPoints, 250000)
+            var processedPoints = 0
 
             // Bounding box range
             val rangeX = if (maxX - minX > 0) maxX - minX else 1.0
@@ -346,7 +341,10 @@ object DemGenerator {
                 if (realZ < minGrid[idx]) minGrid[idx] = realZ
                 if (realZ > maxGrid[idx]) maxGrid[idx] = realZ
                 countGrid[idx]++
+                processedPoints++
             }
+
+            if (processedPoints == 0) return null
 
             // Interpolate missing cells to make a continuous terrain
             val bareEarth = FloatArray(gridW * gridH)
@@ -445,7 +443,9 @@ object DemGenerator {
                 if (parts.size >= 2) {
                     val key = parts[0].lowercase()
                     val value = parts[1]
-                    if (key == "ncols" || key == "nrows" || key == "xllcorner" || key == "yllcorner" || key == "cellsize" || key == "nodata_value") {
+                    if (key in setOf(
+                            "ncols", "nrows", "xllcorner", "yllcorner", "xllcenter", "yllcenter", "cellsize", "nodata_value"
+                        )) {
                         headerMap[key] = value
                         headerLines++
                     } else {
@@ -462,8 +462,10 @@ object DemGenerator {
             nodata = headerMap["nodata_value"]?.toFloat() ?: -9999f
             
             if (ncols <= 0 || nrows <= 0) return null
-            
-            val tempGrid = FloatArray(ncols * nrows)
+            val cellCount = ncols.toLong() * nrows
+            if (cellCount > 4_000_000L) return null
+
+            val tempGrid = FloatArray(cellCount.toInt())
             var index = 0
             
             // If we broke on a data line, we need to process it first
@@ -472,13 +474,15 @@ object DemGenerator {
                 val tokens = dataLine.trim().split(Regex("\\s+"))
                 for (token in tokens) {
                     if (token.isNotEmpty() && index < tempGrid.size) {
-                        val v = token.toFloatOrNull() ?: 0f
+                        val v = token.toFloatOrNull() ?: return null
+                        if (!v.isFinite()) return null
                         tempGrid[index++] = if (v == nodata) 0f else v
                     }
                 }
                 dataLine = reader.readLine()
             }
-            
+            if (index != tempGrid.size) return null
+
             val gridW = 100
             val gridH = 100
             val bareEarth = FloatArray(gridW * gridH)
@@ -503,25 +507,26 @@ object DemGenerator {
         try {
             val points = ArrayList<FloatArray>()
             var minX = Float.MAX_VALUE
-            var maxX = Float.MIN_VALUE
+            var maxX = -Float.MAX_VALUE
             var minY = Float.MAX_VALUE
-            var maxY = Float.MIN_VALUE
+            var maxY = -Float.MAX_VALUE
             
             var lineCount = 0
             reader.forEachLine { line ->
-                if (lineCount < 300000) { // Limit to 300k points
+                lineCount++
+                if (lineCount <= 300000) { // Limit to 300k input lines
                     val tokens = line.trim().split(Regex("[,\\s\\t]+"))
                     if (tokens.size >= 3) {
                         val x = tokens[0].toFloatOrNull()
                         val y = tokens[1].toFloatOrNull()
                         val z = tokens[2].toFloatOrNull()
-                        if (x != null && y != null && z != null) {
+                        if (x != null && y != null && z != null && x.isFinite() && y.isFinite() && z.isFinite()) {
                             points.add(floatArrayOf(x, y, z))
                             if (x < minX) minX = x
                             if (x > maxX) maxX = x
                             if (y < minY) minY = y
                             if (y > maxY) maxY = y
-                            lineCount++
+
                         }
                     }
                 }
@@ -532,7 +537,7 @@ object DemGenerator {
             val gridW = 100
             val gridH = 100
             val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
-            val maxGrid = FloatArray(gridW * gridH) { Float.MIN_VALUE }
+            val maxGrid = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
             val countGrid = IntArray(gridW * gridH)
             
             val rangeX = if (maxX - minX > 0) (maxX - minX) else 1f
@@ -609,27 +614,26 @@ object DemGenerator {
             parseLasStream(inputStream)
         } else {
             val bis = java.io.BufferedInputStream(inputStream)
-            bis.mark(4096)
-            val reader = java.io.BufferedReader(java.io.InputStreamReader(bis))
-            val firstLine = reader.readLine() ?: ""
-            bis.reset()
-            
-            val cleanLine = firstLine.trim().lowercase()
-            if (cleanLine.startsWith("ncols ") || cleanLine.startsWith("ncols\t")) {
-                parseAscDem(java.io.BufferedReader(java.io.InputStreamReader(bis)))
-            } else {
+            return try {
+                bis.mark(65_536)
+                val reader = java.io.BufferedReader(java.io.InputStreamReader(bis))
+                val firstLine = reader.readLine() ?: ""
                 val secondLine = reader.readLine() ?: ""
                 bis.reset()
-                
-                val tokens1 = firstLine.trim().split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
-                val tokens2 = secondLine.trim().split(Regex("[,\\s\\t]+")).filter { it.isNotEmpty() }
-                
-                if (tokens1.size == 3 && tokens2.size == 3) {
+
+                val cleanLine = firstLine.trim().lowercase()
+                if (cleanLine.startsWith("ncols ") || cleanLine.startsWith("ncols\t")) {
+                    parseAscDem(java.io.BufferedReader(java.io.InputStreamReader(bis)))
+                } else if (listOf(firstLine, secondLine).all { candidate ->
+                        candidate.trim().split(Regex("[,\\s]+")).filter { it.isNotEmpty() }.size == 3
+                    }) {
                     parseXyzStream(java.io.BufferedReader(java.io.InputStreamReader(bis)))
                 } else {
                     val entireText = java.io.BufferedReader(java.io.InputStreamReader(bis)).readText()
                     parseCustomGrid(entireText)
                 }
+            } catch (_: java.io.IOException) {
+                null
             }
         }
     }

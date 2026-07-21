@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlin.math.sqrt
 
 class HillshadeViewModel(application: Application) : AndroidViewModel(application) {
@@ -119,7 +118,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     // Tone Generator for real-time audio pings
     private var toneGenerator: ToneGenerator? = null
     private var audioJob: Job? = null
-    private val vibrator = application.getSystemService(Application.VIBRATOR_SERVICE) as Vibrator
+    private val vibrator = application.getSystemService(Vibrator::class.java)
+    private var renderJob: Job? = null
+    private var renderGeneration = 0L
 
     // Preloaded "Hidden Target Treasures" for each site
     // Keeps track of where the metal objects are so we can trigger proximity alerts
@@ -151,9 +152,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (e: Exception) {
             e.printStackTrace()
         }
-
-        // Auto-listen to the physical magnetometer
-        magnetometerMonitor.startListening()
 
         // Sync rendering whenever options change
         viewModelScope.launch {
@@ -187,38 +185,34 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun triggerRender() {
+        val generation = ++renderGeneration
+        renderJob?.cancel()
         _isRendering.value = true
-        viewModelScope.launch(Dispatchers.Default) {
-            val grid = _elevationGrid.value
-            val az = _sunAzimuth.value
-            val alt = _sunAltitude.value
-            val veg = _vegetationFilter.value
-            val pal = _paletteType.value
-            val ct = _contrast.value
-            val vis = _visualizationMode.value
-            val over = _overlayType.value
-            val opac = _overlayOpacity.value
-            val zs = _zScale.value
+        renderJob = viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val grid = _elevationGrid.value
+                val bmp = grid.renderHillshade(
+                    sunAzimuth = _sunAzimuth.value,
+                    sunAltitude = _sunAltitude.value,
+                    vegetationFilter = _vegetationFilter.value,
+                    palette = _paletteType.value,
+                    contrast = _contrast.value,
+                    visualizationMode = _visualizationMode.value,
+                    overlayType = _overlayType.value,
+                    overlayOpacity = _overlayOpacity.value,
+                    zScale = _zScale.value
+                )
 
-            val bmp = grid.renderHillshade(
-                sunAzimuth = az,
-                sunAltitude = alt,
-                vegetationFilter = veg,
-                palette = pal,
-                contrast = ct,
-                visualizationMode = vis,
-                overlayType = over,
-                overlayOpacity = opac,
-                zScale = zs
-            )
-
-            withContext(Dispatchers.Main) {
-                _hillshadeBitmap.value = bmp
-                _isRendering.value = false
+                if (generation == renderGeneration) {
+                    _hillshadeBitmap.value = bmp
+                }
+            } finally {
+                if (generation == renderGeneration) {
+                    _isRendering.value = false
+                }
             }
         }
     }
-
     // Setters
     fun updateZScale(scale: Float) {
         _zScale.value = scale
@@ -302,7 +296,15 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun togglePhysicalSensor(enabled: Boolean) {
-        _usePhysicalSensor.value = enabled
+        val shouldEnable = enabled && isPhysicalSensorAvailable.value
+        _usePhysicalSensor.value = shouldEnable
+        if (shouldEnable) {
+            magnetometerMonitor.startListening()
+        } else {
+            magnetometerMonitor.stopListening()
+            _detectorSignalStrength.value = 0f
+            _detectedMetalType.value = null
+        }
     }
 
     fun toggleAudioPing(enabled: Boolean) {
@@ -445,7 +447,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     // Audio Ping Tone generator beep frequency.
                     // Stronger signal -> Higher pitch and faster pings!
                     if (_audioPingEnabled.value) {
-                        val pitch = (500 + (strength * 12)).toInt() // 500Hz to 1700Hz
                         val duration = (30 + (strength * 0.8f)).toInt() // 30ms to 110ms
 
                         // Play audio beep
@@ -469,11 +470,16 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun triggerVibe(ms: Long) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(ms)
+        val service = vibrator ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                service.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                service.vibrate(ms)
+            }
+        } catch (_: SecurityException) {
+            // Vibration is optional; continue without haptic feedback if the service rejects it.
         }
     }
 
@@ -481,6 +487,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         super.onCleared()
         magnetometerMonitor.stopListening()
         audioJob?.cancel()
+        renderJob?.cancel()
         try {
             toneGenerator?.release()
         } catch (e: Exception) {

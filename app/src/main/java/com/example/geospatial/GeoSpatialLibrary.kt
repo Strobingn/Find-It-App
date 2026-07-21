@@ -1,5 +1,7 @@
 package com.example.geospatial
 
+import java.util.Locale
+
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -161,6 +163,6 @@ object GeoSpatialLibrary {
         val d = absDeg.toInt()
         val m = ((absDeg - d) * 60.0).toInt()
         val s = (absDeg - d - m / 60.0) * 3600.0
-        return String.format("%d°%02d'%04.1f\"%s", d, m, s, direction)
+        return String.format(Locale.US, "%d°%02d'%04.1f\"%s", d, m, s, direction)
     }
 }

@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import java.util.Locale
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -454,7 +456,7 @@ fun LidarControlPanel(
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(text = "Shadow Contrast Depth", color = Color.Gray, fontSize = 11.sp)
             }
-            Text(text = "${String.format("%.1f", contrast)}x", color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            Text(text = "${String.format(Locale.US, "%.1f", contrast)}x", color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
         }
         Slider(
             value = contrast,
@@ -479,7 +481,7 @@ fun LidarControlPanel(
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(text = "Vertical Exaggeration (Z-Scale)", color = Color.Gray, fontSize = 11.sp)
             }
-            Text(text = "${String.format("%.1f", zScale)}x", color = Color(0xFF29B6F6), fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            Text(text = "${String.format(Locale.US, "%.1f", zScale)}x", color = Color(0xFF29B6F6), fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
         }
         Slider(
             value = zScale,

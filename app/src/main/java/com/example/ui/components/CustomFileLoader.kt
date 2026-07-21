@@ -18,7 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.CloudDownload
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +53,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import android.net.Uri
+import androidx.core.net.toUri
 import android.provider.OpenableColumns
 import android.content.Intent
 import com.example.data.DemGenerator
@@ -114,26 +115,25 @@ fun CustomFileLoader(
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
-        uri?.let {
+        uri ?: return@rememberLauncherForActivityResult
+        val fileName = getFileName(context, uri)
+        coroutineScope.launch {
             try {
-                val fileName = getFileName(context, it)
-                val inputStream = context.contentResolver.openInputStream(it)
-                if (inputStream != null) {
-                    val grid = DemGenerator.parseFromStream(fileName, inputStream)
-                    if (grid != null) {
-                        onCustomGridLoaded(grid)
-                        successMessage = "File '$fileName' loaded successfully! ${grid.width}x${grid.height} grid processed."
-                        errorMessage = null
-                    } else {
-                        errorMessage = "Failed to parse '$fileName'. Verify it's a valid LAS, ASC, XYZ, or direct elevation grid text file."
-                        successMessage = null
+                val grid = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        DemGenerator.parseFromStream(fileName, input)
                     }
+                }
+                if (grid != null) {
+                    onCustomGridLoaded(grid)
+                    successMessage = "File '$fileName' loaded successfully! ${grid.width}x${grid.height} grid processed."
+                    errorMessage = null
                 } else {
-                    errorMessage = "Could not open selected file."
+                    errorMessage = "Failed to parse '$fileName'. Verify it's a valid LAS, ASC, XYZ, or direct elevation grid text file."
                     successMessage = null
                 }
             } catch (e: Exception) {
-                errorMessage = "Error reading file: ${e.localizedMessage}"
+                errorMessage = "Error reading file: ${e.localizedMessage ?: "Unknown error"}"
                 successMessage = null
             }
         }
@@ -428,7 +428,7 @@ fun CustomFileLoader(
                 Button(
                     onClick = {
                         try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://coast.noaa.gov/dataviewer/#/lidar/search/where/id/10206"))
+                            val intent = Intent(Intent.ACTION_VIEW, "https://coast.noaa.gov/dataviewer/#/lidar/search/where/id/10206".toUri())
                             context.startActivity(intent)
                             successMessage = "Opening NOAA Coastal Data Portal (ID 10206) in your default web browser..."
                             errorMessage = null
@@ -450,7 +450,7 @@ fun CustomFileLoader(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(text = "OPEN NOAA DATA VIEWER PORTAL", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.width(4.dp))
-                    Icon(Icons.Default.OpenInNew, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(12.dp))
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(12.dp))
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -614,19 +614,25 @@ fun CustomFileLoader(
                             downloadAndProcessLidar(
                                 urlString = noaaUrlInput,
                                 onProgress = { progress ->
-                                    downloadProgress = progress
-                                    downloadStatusText = if (progress >= 0f) "Downloading: ${(progress * 100).toInt()}%" else "Streaming Lidar files..."
+                                    coroutineScope.launch {
+                                        downloadProgress = progress
+                                        downloadStatusText = if (progress >= 0f) "Downloading: ${(progress * 100).toInt()}%" else "Streaming Lidar files..."
+                                    }
                                 },
                                 onSuccess = { grid, name ->
-                                    onCustomGridLoaded(grid)
-                                    successMessage = "Download complete! '$name' parsed successfully with ${grid.width}x${grid.height} cells."
-                                    errorMessage = null
-                                    isDownloading = false
+                                    coroutineScope.launch {
+                                        onCustomGridLoaded(grid)
+                                        successMessage = "Download complete! '$name' parsed successfully with ${grid.width}x${grid.height} cells."
+                                        errorMessage = null
+                                        isDownloading = false
+                                    }
                                 },
                                 onError = { error ->
-                                    errorMessage = error
-                                    successMessage = null
-                                    isDownloading = false
+                                    coroutineScope.launch {
+                                        errorMessage = error
+                                        successMessage = null
+                                        isDownloading = false
+                                    }
                                 }
                             )
                         }
@@ -673,6 +679,9 @@ fun CustomFileLoader(
     }
 }
 
+private const val MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+private const val MAX_ZIP_ENTRY_BYTES = 20 * 1024 * 1024
+
 // Background downloader and unzipper logic
 private suspend fun downloadAndProcessLidar(
     urlString: String,
@@ -683,11 +692,15 @@ private suspend fun downloadAndProcessLidar(
     withContext(Dispatchers.IO) {
         try {
             val url = URL(urlString)
+            if (url.protocol != "https") {
+                onError("Only secure HTTPS download links are supported.")
+                return@withContext
+            }
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.connectTimeout = 20000
             connection.readTimeout = 20000
-            connection.instanceFollowRedirects = true
+            connection.instanceFollowRedirects = false
 
             var status = connection.responseCode
             var redirectUrl = urlString
@@ -700,14 +713,18 @@ private suspend fun downloadAndProcessLidar(
                     status == HttpURLConnection.HTTP_SEE_OTHER) && limit < 5) {
                 val newUrl = conn.getHeaderField("Location") ?: break
                 conn.disconnect()
-                val u = URL(newUrl)
+                val u = URL(conn.url, newUrl)
+                if (u.protocol != "https") {
+                    onError("Download redirected to an insecure URL.")
+                    return@withContext
+                }
                 conn = u.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 20000
                 conn.readTimeout = 20000
-                conn.instanceFollowRedirects = true
+                conn.instanceFollowRedirects = false
                 status = conn.responseCode
-                redirectUrl = newUrl
+                redirectUrl = u.toString()
                 limit++
             }
 
@@ -718,6 +735,11 @@ private suspend fun downloadAndProcessLidar(
             }
 
             val contentLength = conn.contentLength
+            if (contentLength > MAX_DOWNLOAD_BYTES) {
+                onError("Download is larger than the 50 MB safety limit.")
+                conn.disconnect()
+                return@withContext
+            }
             val inputStream = conn.inputStream
             val bis = BufferedInputStream(inputStream)
             val outputBytes = ByteArrayOutputStream()
@@ -728,6 +750,12 @@ private suspend fun downloadAndProcessLidar(
             while (bis.read(buffer).also { bytesRead = it } != -1) {
                 outputBytes.write(buffer, 0, bytesRead)
                 totalBytesRead += bytesRead
+                if (totalBytesRead > MAX_DOWNLOAD_BYTES) {
+                    bis.close()
+                    conn.disconnect()
+                    onError("Download exceeded the 50 MB safety limit.")
+                    return@withContext
+                }
                 if (contentLength > 0) {
                     onProgress(totalBytesRead.toFloat() / contentLength)
                 } else {
@@ -735,6 +763,7 @@ private suspend fun downloadAndProcessLidar(
                 }
             }
 
+            bis.close()
             conn.disconnect()
             val fileData = outputBytes.toByteArray()
 
@@ -770,6 +799,9 @@ private suspend fun downloadAndProcessLidar(
                             var eRead: Int
                             while (zipStream.read(entryBuffer).also { eRead = it } != -1) {
                                 entryOutput.write(entryBuffer, 0, eRead)
+                                if (entryOutput.size() > MAX_ZIP_ENTRY_BYTES) {
+                                    throw java.io.IOException("ZIP entry exceeds the 20 MB safety limit")
+                                }
                             }
                             val entryBytes = entryOutput.toByteArray()
                             val grid = DemGenerator.parseFromStream(entry.name, ByteArrayInputStream(entryBytes))
