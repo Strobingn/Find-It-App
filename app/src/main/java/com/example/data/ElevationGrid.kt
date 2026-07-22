@@ -263,8 +263,7 @@ roughness[index] / roughnessScale
                 val mean = localSum / count
                 val variance = max(0.0, localSquareSum / count - mean * mean)
                 val index = y * width + x
-                residual[i
-ndex] = (elevations[index] - mean).toFloat()
+                residual[index] = (elevations[index] - mean).toFloat()
                 roughness[index] = sqrt(variance).toFloat()
             }
         }
@@ -315,8 +314,7 @@ ndex] = (elevations[index] - mean).toFloat()
         if (overlayType == 1) {
             val sectionX = max(1, width / 2)
             val sectionY = max(1, height / 2)
-            val isSectionLine = x % sectionX == 0 || y % se
-ctionY == 0
+            val isSectionLine = x % sectionX == 0 || y % sectionY == 0
             val roadY = height * 0.65f + sin(x * 0.08f) * height * 0.12f
             val isRoad = abs(y - roadY) < max(1.5f, height / 100f)
             if (isSectionLine) return Color.rgb(180, 150, 110)
@@ -361,8 +359,7 @@ ctionY == 0
 
     private fun aspectColor(dx: Float, dy: Float, slopeRadians: Float, shade: Float): Int {
         if (slopeRadians < Math.toRadians(1.0).toFloat()) return Color.rgb(148, 148, 148)
-        val degrees = ((Math.toDegrees(ko
-tlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
+        val degrees = ((Math.toDegrees(kotlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
         val vivid = Color.HSVToColor(floatArrayOf(degrees, 0.82f, 0.95f))
         return shadePalette(vivid, 0.35f + shade * 0.65f, 0.72f)
     }
