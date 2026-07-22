@@ -40,8 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.uni
-t.sp
+import androidx.compose.ui.unit.sp
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary
@@ -89,8 +88,7 @@ fun LidarMapCanvas(
         val displayWidth = image.width * fit * zoom
         val displayHeight = image.height * fit * zoom
         val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
-        val imageTop = (view
-portHeight - displayHeight) * 0.5f + pan.y
+        val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
         val bounds = NormalizedRasterBounds(
             left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
             top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
@@ -126,8 +124,7 @@ portHeight - displayHeight) * 0.5f + pan.y
         if (imageBitmap != null && bitmap != null) {
             val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
                 Modifier.transformable(transformState)
-   
-         } else {
+            } else {
                 Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
@@ -163,8 +160,7 @@ portHeight - displayHeight) * 0.5f + pan.y
                     .fillMaxSize()
                     .onSizeChanged { viewportSize = it }
                     .then(interactionModifier)
-                    .testTag("lidar_canv
-as"),
+                    .testTag("lidar_canvas"),
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
@@ -200,8 +196,7 @@ as"),
                             color = Color(0xFF29B6F6),
                             start = Offset(imageLeft, py),
                             end = Offset(imageLeft + displayWidth, py),
-                      
-      strokeWidth = 1f,
+                            strokeWidth = 1f,
                             alpha = 0.35f,
                         )
                     }
@@ -244,8 +239,7 @@ as"),
                     drawLine(
                         color = Color(0xFFFFD700),
                         start = Offset(sx - 10f, sy),
-                        end =
- Offset(sx + 10f, sy),
+                        end = Offset(sx + 10f, sy),
                         strokeWidth = 2f,
                         alpha = 0.8f,
                     )
@@ -293,8 +287,7 @@ as"),
                     .padding(10.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xE60D0E12))
-                    .bord
-er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
+                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
                     .padding(8.dp),
             ) {
                 if (currentLat != null && currentLon != null) {
@@ -339,8 +332,7 @@ er(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
             }
         }
         if (isRendering) {
-         
-   Box(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.4f)),
