@@ -1,6 +1,4 @@
 name: Find-it-appAPK
-
-# Manual: repo → Actions → this workflow → Run workflow → pick branch
       - mitral-V16
       - mitral-v15
       - Mistral-V17
