@@ -70,6 +70,18 @@ android {
   }
 }
 
+// Give the APK a self-identifying filename so downloads can't be confused
+// with other apps' app-debug.apk artifacts.
+androidComponents {
+  onVariants(selector().all()) { variant ->
+    variant.outputs
+      .filterIsInstance<com.android.build.api.variant.ApkVariantOutput>()
+      .forEach { output ->
+        output.outputFileName = "findit-${variant.buildType}.apk"
+      }
+  }
+}
+
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)
@@ -88,7 +100,6 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.core)
   implementation(libs.laszip4j)
   implementation(libs.nga.tiff)
   testImplementation(libs.androidx.compose.ui.test.junit4)
