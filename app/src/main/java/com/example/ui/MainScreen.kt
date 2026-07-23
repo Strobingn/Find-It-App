@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.GpsNotFixed
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
@@ -193,6 +194,7 @@ private fun TerrainTab(
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val showControls = rememberSaveable { mutableStateOf(false) }
+    val autoDetailArmed = rememberSaveable { mutableStateOf(true) }
     val localViewportResetKey = rememberSaveable { mutableIntStateOf(0) }
     val viewportResetKey = vmViewportReset + localViewportResetKey.intValue
     val context = LocalContext.current
@@ -200,8 +202,8 @@ private fun TerrainTab(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }
 
-    // The canvas already waits for the pinch/pan gesture to settle before publishing these values.
-    // Imported LAS/LAZ detail is therefore loaded once, automatically, after 1.5x zoom.
+    // First refinement happens at 1.5x. Each rendered detail tile resets the canvas to 1x;
+    // zooming that new tile to 2x arms and triggers another refinement of its visible viewport.
     LaunchedEffect(
         visibleBounds.value,
         zoomLevel.value,
@@ -209,9 +211,22 @@ private fun TerrainTab(
         isDetailed,
         isRefining,
     ) {
-        if (canRefine && !isDetailed && !isRefining && zoomLevel.value >= AUTO_DETAIL_ZOOM) {
+        val threshold = if (isDetailed) REPEATED_AUTO_DETAIL_ZOOM else INITIAL_AUTO_DETAIL_ZOOM
+        if (zoomLevel.value < threshold - AUTO_DETAIL_REARM_MARGIN) {
+            autoDetailArmed.value = true
+        }
+        if (
+            canRefine &&
+            !isRefining &&
+            autoDetailArmed.value &&
+            zoomLevel.value >= threshold
+        ) {
+            autoDetailArmed.value = false
             delay(250)
-            viewModel.refineTerrain(visibleBounds.value)
+            val latestThreshold = if (isDetailed) REPEATED_AUTO_DETAIL_ZOOM else INITIAL_AUTO_DETAIL_ZOOM
+            if (canRefine && !isRefining && zoomLevel.value >= latestThreshold) {
+                viewModel.refineTerrain(visibleBounds.value)
+            }
         }
     }
 
@@ -283,6 +298,15 @@ private fun TerrainTab(
                 IconButton(onClick = { localViewportResetKey.intValue++ }) {
                     Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit terrain")
                 }
+                IconButton(
+                    enabled = canRefine && !isRefining,
+                    onClick = {
+                        autoDetailArmed.value = false
+                        viewModel.refineTerrain(visibleBounds.value)
+                    },
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Rerender visible LiDAR viewport")
+                }
                 IconButton(onClick = { showControls.value = !showControls.value }) {
                     Icon(Icons.Default.Tune, contentDescription = "Terrain controls")
                 }
@@ -341,7 +365,8 @@ private fun TerrainTab(
                 Text(
                     when {
                         showControls.value -> "Controls open"
-                        canRefine && !isDetailed -> "Pinch past 1.5× for automatic point-cloud detail"
+                        canRefine && !isDetailed -> "Auto detail at 1.5× · refresh button rerenders viewport"
+                        canRefine -> "Auto detail again at 2.0× · refresh button rerenders viewport"
                         else -> "Pinch to zoom · drag to pan · Tune for analysis"
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -487,4 +512,6 @@ private fun compassLabel(azimuth: Float): String {
     }
 }
 
-private const val AUTO_DETAIL_ZOOM = 1.5f
+private const val INITIAL_AUTO_DETAIL_ZOOM = 1.5f
+private const val REPEATED_AUTO_DETAIL_ZOOM = 2.0f
+private const val AUTO_DETAIL_REARM_MARGIN = 0.05f
