@@ -1,5 +1,9 @@
 package com.example.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -19,6 +23,8 @@ import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.GpsFixed
+import androidx.compose.material.icons.filled.GpsNotFixed
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
@@ -29,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -47,11 +54,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.NormalizedRasterBounds
 import com.example.ui.components.CustomFileLoader
@@ -156,10 +165,22 @@ private fun TerrainTab(
     val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
     val isDetailed by viewModel.isDetailedTerrain.collectAsStateWithLifecycle()
     val detailMessage by viewModel.terrainDetailMessage.collectAsStateWithLifecycle()
+    val gpsEnabled by viewModel.gpsEnabled.collectAsStateWithLifecycle()
+    val hasLocationPermission by viewModel.hasLocationPermission.collectAsStateWithLifecycle()
+    val devicePosition by viewModel.deviceGridPosition.collectAsStateWithLifecycle()
+    val heatmapEnabled by viewModel.heatmapEnabled.collectAsStateWithLifecycle()
+    val basemapEnabled by viewModel.basemapEnabled.collectAsStateWithLifecycle()
+    val basemapOpacity by viewModel.basemapOpacity.collectAsStateWithLifecycle()
+    val basemapBitmap by viewModel.basemapBitmap.collectAsStateWithLifecycle()
+    val basemapStatus by viewModel.basemapStatus.collectAsStateWithLifecycle()
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val showControls = rememberSaveable { mutableStateOf(false) }
     val viewportResetKey = rememberSaveable { mutableIntStateOf(0) }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> viewModel.onLocationPermissionResult(granted) }
+    val context = LocalContext.current
 
     BoxWithConstraints(
         modifier = Modifier
@@ -186,6 +207,12 @@ private fun TerrainTab(
                 visibleBounds.value = bounds
                 zoomLevel.value = zoom
             },
+            showHeatmap = heatmapEnabled,
+            basemapBitmap = basemapBitmap,
+            showBasemap = basemapEnabled,
+            basemapOpacity = basemapOpacity,
+            basemapStatus = basemapStatus,
+            deviceGridPosition = devicePosition,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(if (focusMode) 0.dp else 8.dp)
@@ -225,6 +252,22 @@ private fun TerrainTab(
                 }
                 IconButton(onClick = { showControls.value = !showControls.value }) {
                     Icon(Icons.Default.Tune, contentDescription = "Show terrain controls")
+                }
+                IconButton(onClick = {
+                    val alreadyGranted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.ACCESS_FINE_LOCATION,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!alreadyGranted && !gpsEnabled) {
+                        locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                    }
+                    viewModel.toggleGpsTracking(!gpsEnabled)
+                }) {
+                    Icon(
+                        if (gpsEnabled && hasLocationPermission) Icons.Default.GpsFixed else Icons.Default.GpsNotFixed,
+                        contentDescription = if (gpsEnabled) "Stop showing my location" else "Show my location",
+                        tint = if (gpsEnabled && hasLocationPermission) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                    )
                 }
                 IconButton(onClick = { onFocusModeChanged(!focusMode) }) {
                     Icon(
@@ -344,6 +387,13 @@ private fun TerrainTab(
                             onAnalysisSensitivityChanged = viewModel::updateAnalysisSensitivity,
                             contourIntervalMeters = contourInterval,
                             onContourIntervalChanged = viewModel::updateContourInterval,
+                            heatmapEnabled = heatmapEnabled,
+                            onHeatmapEnabledChanged = viewModel::setHeatmapEnabled,
+                            basemapEnabled = basemapEnabled,
+                            onBasemapEnabledChanged = viewModel::setBasemapEnabled,
+                            basemapOpacity = basemapOpacity,
+                            onBasemapOpacityChanged = viewModel::setBasemapOpacity,
+                            basemapStatus = basemapStatus,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }

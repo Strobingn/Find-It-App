@@ -11,6 +11,11 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+// Below this pixel count, thread creation/join overhead outweighs the parallel win — the
+// built-in 100x100 demo sites and default 320x320 imports stay on the single-threaded path;
+// only larger refined-detail grids (up to 1024x1024) actually parallelize.
+private const val MIN_PIXELS_FOR_PARALLEL_RENDER = 200_000
+
 /** A memory-bounded elevation raster used for terrain visualization and screening. */
 class ElevationGrid(
     val width: Int,
@@ -26,6 +31,22 @@ class ElevationGrid(
         require(canopySpikes.size == width * height) { "canopySpikes size must be width * height" }
         require(validData.size == width * height) { "validData size must be width * height" }
     }
+
+    // Sun angle, contrast, palette, zScale, overlay and contour sliders change on nearly every
+    // drag frame but don't affect these intermediates — only vegetationFilter/featureScaleMeters do.
+    // Caching them here avoids redundant O(width*height) work on the majority of render calls.
+    // Invariant: callers must serialize renderHillshade() per instance (HillshadeViewModel does
+    // this via renderMutex) — concurrent calls would race these fields and corrupt the cache.
+    private var cachedIntermediateKey: Pair<Float, Float>? = null
+    private var cachedElevations: FloatArray? = null
+    private var cachedMinElevation = 0f
+    private var cachedMaxElevation = 1f
+    private var cachedLocal: LocalStatistics? = null
+    private var cachedResidualScale = 1f
+    private var cachedRoughnessScale = 1f
+    private var cachedCurvature: FloatArray? = null
+    private var cachedCurvatureScale = 1f
+    private val cachedCanopyScale: Float by lazy { robustPositiveScale(canopySpikes) }
 
     /** 0 shows the full surface model; 1 shows the extracted bare-earth model. */
     fun getElevationAt(col: Int, row: Int, vegetationFilter: Float): Float {
@@ -61,49 +82,74 @@ class ElevationGrid(
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
         val cellDistance = cellSizeMeters.coerceAtLeast(0.001f)
-        val elevations = FloatArray(width * height)
-        for (index in elevations.indices) {
-            elevations[index] = bareEarth[index] +
-                canopySpikes[index] * (1f - vegetationFilter.coerceIn(0f, 1f))
+
+        val intermediateKey = vegetationFilter to featureScaleMeters
+        if (cachedIntermediateKey != intermediateKey) {
+            cachedIntermediateKey = intermediateKey
+            cachedElevations = null
+            cachedLocal = null
+            cachedCurvature = null
+        }
+        val elevations = cachedElevations ?: run {
+            val arr = FloatArray(width * height)
+            for (index in arr.indices) {
+                arr[index] = bareEarth[index] +
+                    canopySpikes[index] * (1f - vegetationFilter.coerceIn(0f, 1f))
+            }
+            var minElevation = Float.MAX_VALUE
+            var maxElevation = -Float.MAX_VALUE
+            for (index in arr.indices) {
+                if (!validData[index]) continue
+                val elevation = arr[index]
+                if (elevation < minElevation) minElevation = elevation
+                if (elevation > maxElevation) maxElevation = elevation
+            }
+            if (minElevation == Float.MAX_VALUE) {
+                minElevation = 0f
+                maxElevation = 1f
+            }
+            cachedMinElevation = minElevation
+            cachedMaxElevation = maxElevation
+            cachedElevations = arr
+            arr
         }
 
         val analysisRadius = (featureScaleMeters.coerceAtLeast(cellDistance) / cellDistance)
             .toInt()
             .coerceIn(1, max(1, min(width, height) / 4))
         val local = if (visualizationMode == 3 || visualizationMode == 5) {
-            localStatistics(elevations, analysisRadius)
+            cachedLocal ?: localStatistics(elevations, analysisRadius).also { stats ->
+                cachedLocal = stats
+                cachedResidualScale = robustMagnitudeScale(stats.residual)
+                cachedRoughnessScale = robustMagnitudeScale(stats.roughness)
+            }
         } else {
             null
         }
-        val curvature = if (visualizationMode == 4 || visualizationMode == 5) {
-            curvature(elevations, cellDistance)
+        val curvatureArr = if (visualizationMode == 4 || visualizationMode == 5) {
+            cachedCurvature ?: curvature(elevations, cellDistance).also { arr ->
+                cachedCurvature = arr
+                cachedCurvatureScale = robustMagnitudeScale(arr)
+            }
         } else {
             null
         }
-        val residualScale = local?.residual?.let(::robustMagnitudeScale) ?: 1f
-        val roughnessScale = local?.roughness?.let(::robustMagnitudeScale) ?: 1f
-        val curvatureScale = curvature?.let(::robustMagnitudeScale) ?: 1f
-        val canopyScale = robustPositiveScale(canopySpikes)
+        val residualScale = cachedResidualScale
+        val roughnessScale = cachedRoughnessScale
+        val curvatureScale = cachedCurvatureScale
+        val canopyScale = cachedCanopyScale
 
-        var minElevation = Float.MAX_VALUE
-        var maxElevation = -Float.MAX_VALUE
-        for (index in elevations.indices) {
-            if (!validData[index]) continue
-            val elevation = elevations[index]
-            if (elevation < minElevation) minElevation = elevation
-            if (elevation > maxElevation) maxElevation = elevation
-        }
-        if (minElevation == Float.MAX_VALUE) {
-            minElevation = 0f
-            maxElevation = 1f
-        }
+        val minElevation = cachedMinElevation
+        val maxElevation = cachedMaxElevation
         val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
         val azimuth = normalizeDegrees(sunAzimuth)
         val altitude = sunAltitude.coerceIn(1f, 89f)
         val contrastValue = contrast.coerceIn(0.5f, 4f)
         val zMultiplier = zScale.coerceIn(0.25f, 8f)
+        val contourInterval = contourIntervalMeters.coerceAtLeast(0f)
+        val boundedMode = visualizationMode.coerceIn(0, 8)
 
-        for (y in 0 until height) {
+        fun renderRow(y: Int) {
             for (x in 0 until width) {
                 val index = y * width + x
                 if (!validData[index]) {
@@ -116,7 +162,7 @@ class ElevationGrid(
                 val multiShade = multiDirectionalShade(gradient.dx, gradient.dy, azimuth, altitude)
                 val elevationPercent = ((elevations[index] - minElevation) / elevationRange).coerceIn(0f, 1f)
 
-                var color = when (visualizationMode.coerceIn(0, 8)) {
+                var color = when (boundedMode) {
                     1 -> shadePalette(getPaletteColor(palette, elevationPercent), multiShade, contrastValue)
                     2 -> slopeColor(getPaletteColor(palette, elevationPercent), slopeRadians)
                     3 -> {
@@ -124,14 +170,14 @@ class ElevationGrid(
                         shadePalette(divergingReliefColor(normalized), multiShade, contrastValue * 0.75f)
                     }
                     4 -> {
-                        val normalized = (requireNotNull(curvature)[index] / curvatureScale).coerceIn(-1f, 1f)
+                        val normalized = (requireNotNull(curvatureArr)[index] / curvatureScale).coerceIn(-1f, 1f)
                         shadePalette(divergingCurvatureColor(normalized), multiShade, contrastValue * 0.6f)
                     }
                     5 -> {
                         val stats = requireNotNull(local)
                         val residual = abs(stats.residual[index]) / residualScale
                         val roughness = stats.roughness[index] / roughnessScale
-                        val bend = abs(requireNotNull(curvature)[index]) / curvatureScale
+                        val bend = abs(requireNotNull(curvatureArr)[index]) / curvatureScale
                         val score = ((residual * 0.58f + bend * 0.27f + roughness * 0.15f) *
                             analysisSensitivity.coerceIn(0.4f, 2.5f)).coerceIn(0f, 1f)
                         disturbanceCandidateColor(score, multiShade)
@@ -154,7 +200,6 @@ class ElevationGrid(
                     }
                 }
 
-                val contourInterval = contourIntervalMeters.coerceAtLeast(0f)
                 if (contourInterval >= 0.05f && isContourPixel(elevations, x, y, contourInterval)) {
                     color = blend(color, Color.rgb(235, 244, 255), 0.72f)
                 }
@@ -162,8 +207,27 @@ class ElevationGrid(
             }
         }
 
+        renderRowsInParallel(::renderRow)
+
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
         return bitmap
+    }
+
+    /** Splits row rendering across available cores; each thread writes disjoint pixel rows. */
+    private fun renderRowsInParallel(renderRow: (Int) -> Unit) {
+        val threadCount = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+        if (threadCount <= 1 || width * height < MIN_PIXELS_FOR_PARALLEL_RENDER || height < threadCount) {
+            for (y in 0 until height) renderRow(y)
+            return
+        }
+        val rowsPerThread = (height + threadCount - 1) / threadCount
+        (0 until threadCount).map { chunk ->
+            val startY = chunk * rowsPerThread
+            val endY = min(startY + rowsPerThread, height)
+            Thread {
+                for (y in startY until endY) renderRow(y)
+            }.apply { start() }
+        }.forEach { it.join() }
     }
 
     private fun hornGradient(

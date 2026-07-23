@@ -89,6 +89,25 @@ object GeoSpatialLibrary {
         return lat to lon
     }
 
+    /**
+     * Inverse of [gridToGeographic]: places a real-world fix onto the 0-100 grid used by the
+     * terrain canvas. Returns null when the grid has no geographic bounds, or when the fix falls
+     * outside the mapped area (the caller decides whether "off the edge" is worth showing).
+     */
+    fun geographicToGrid(
+        lat: Double,
+        lon: Double,
+        metadata: GeoSpatialMetadata,
+    ): Pair<Float, Float>? {
+        val bounds = metadata.bounds ?: return null
+        val latRange = bounds.maxLat - bounds.minLat
+        val lonRange = bounds.maxLon - bounds.minLon
+        if (latRange <= 0.0 || lonRange <= 0.0) return null
+        val y = (lat - bounds.minLat) / latRange
+        val x = (lon - bounds.minLon) / lonRange
+        return (x * 100.0).toFloat() to (100.0 - y * 100.0).toFloat()
+    }
+
     fun calculateGeodesicDistance(
         lat1: Double,
         lon1: Double,

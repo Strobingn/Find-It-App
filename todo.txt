@@ -1,0 +1,205 @@
+n
+AI/ML Features — Gemini Integration Plan
+Wire up Firebase AI (Gemini) and add three AI-powered features to Find-It-App.
+
+Current State
+What	Status
+firebase-bom + firebase-ai	✅ Declared in libs.versions.toml — NOT wired into app/build.gradle.kts
+google-services plugin	✅ Declared in libs.versions.toml — NOT applied in either build file
+google-services.json	❌ Missing — required for Firebase to initialize
+googleServices.missing.passthrough=true	✅ Already set in gradle.properties — build won't fail without the JSON
+AI/Gemini source code	❌ Zero — no imports, no model, no prompts
+DetectionSource enum	Has SIMULATED, MAGNETOMETER, MANUAL — no AI source
+metadata.json	Declares MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API — not implemented
+IMPORTANT
+
+You need a Firebase project with the Gemini API enabled. Steps:
+
+Go to console.firebase.google.com → Create a project (or use an existing one)
+Add an Android app with package com.aistudio.lidardetector.pkrxtz
+Enable "AI Logic" (Gemini API) in the Firebase console under Build → AI Logic
+Download google-services.json and drop it into app/
+The build will compile without it (thanks to passthrough=true), but AI features will show "Firebase not configured" until it's added.
+
+Open Questions
+IMPORTANT
+
+Which Gemini model tier? I'll default to gemini-2.0-flash (fast, cheap, multimodal). Let me know if you prefer gemini-2.5-flash (smarter, thinking) or gemini-2.5-pro (most capable, higher cost).
+
+NOTE
+
+App Check: For development I'll use the Debug App Check provider. For production/Play Store you'll want to switch to Play Integrity — I'll leave a TODO for that.
+
+Proposed Features
+Feature 1: 🔬 AI Terrain Analyst
+What it does: Takes the current hillshade bitmap and sends it to Gemini as a multimodal prompt. Gemini analyzes the terrain image for:
+
+Linear features (foundations, walls, roads, ditches, trenches)
+Circular/oval anomalies (wells, pits, burial mounds, gun emplacements)
+Geometric patterns suggesting human modification
+Natural vs. anthropogenic classification
+Confidence level and recommended next steps (where to dig, what to look for)
+User flow:
+
+User loads terrain, adjusts visualization (local relief, slope, disturbance mode, etc.)
+Taps "🤖 AI Analyze" button on the terrain toolbar
+App captures the current hillshadeBitmap + context metadata (grid size, cell size, viz mode, coordinates if available)
+Sends to Gemini as content { image(bitmap); text(systemPrompt + context) }
+Response streams in real-time into a bottom sheet with markdown-style text
+User can tap "📌 Pin finding" to save identified features as TargetSignal entries with source = AI_TERRAIN_SCAN
+System prompt: Instructs Gemini to act as an archaeological remote sensing specialist analyzing LiDAR-derived terrain models, using domain-specific vocabulary (local relief model, slope-break, micro-topography, residual anomaly, etc.).
+
+Feature 2: 🎯 Smart Anomaly Scanner
+What it does: Combines the existing disturbance-candidate heuristic (visualization mode 5: residual + curvature + roughness scoring) with Gemini classification:
+
+Runs the existing ElevationGrid analysis to compute per-cell disturbance scores
+Clusters adjacent high-scoring cells into discrete anomaly regions using connected-component labeling
+Extracts a cropped bitmap of each region (with some surrounding context)
+Sends the top N regions (≤8) to Gemini in a single batch prompt
+Gemini returns structured classifications per region: Foundation, Ditch/Trench, Pit/Well, Mound, Road/Path, Natural erosion, Modern disturbance, Uncertain
+User flow:
+
+User is in disturbance-candidate mode (viz mode 5), adjusts sensitivity
+Taps "🎯 Classify" button
+Loading spinner → results appear as labeled pins on the terrain
+Each pin saved as TargetSignal with source = AI_TERRAIN_SCAN and AI notes
+Feature 3: 💬 AI Field Assistant Chat
+What it does: A contextual chatbot that knows everything about the current session:
+
+Current grid dimensions, cell size, CRS/coordinates
+Current visualization mode and all settings (azimuth, altitude, contrast, etc.)
+All logged signals and their metadata
+Can "see" the hillshade bitmap when asked
+Example queries:
+
+"What am I looking at?" → Describes visible terrain features
+"Where should I dig test pits?" → Suggests locations based on anomaly patterns
+"Is this natural or man-made?" → Analyzes current view
+"What historical period could these be from?" → Contextual analysis
+"Optimize my lighting for finding walls" → Suggests sun azimuth/altitude
+"Generate a summary report" → Text report of all findings
+User flow:
+
+FAB button (💬) opens a chat bottom sheet
+Quick-action chips at the top: "What's here?", "Find features", "Suggest settings"
+User types or taps a chip → response streams in real-time
+Multi-turn conversation with full session context
+Proposed Changes
+Build Setup
+[MODIFY] 
+build.gradle.kts
+ (root)
+Add google-services plugin with apply false:
+kotlin
+
+alias(libs.plugins.google.services) apply false
+[MODIFY] 
+app/build.gradle.kts
+Apply google-services plugin
+Add dependencies:
+kotlin
+
+implementation(platform(libs.firebase.bom))
+implementation(libs.firebase.ai)
+implementation(libs.firebase.appcheck.recaptcha)
+Data Layer — New AI Service
+[NEW] 
+GeminiRepository.kt
+Singleton service wrapping Firebase AI
+Initializes Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel("gemini-2.0-flash")
+Graceful error if Firebase isn't configured (catches IllegalStateException from missing google-services.json)
+Methods:
+analyzeTerrainImage(bitmap, metadata) → Flow<String> — streaming multimodal terrain analysis
+classifyAnomalyRegions(regions, metadata) → List<AnomalyClassification> — batch anomaly classification
+chat(history, userMessage, sessionContext) → Flow<String> — multi-turn contextual chat
+Debug App Check initialization
+[NEW] 
+AnomalyClusterer.kt
+Pure Kotlin, no AI dependency — just spatial analysis
+Takes ElevationGrid + disturbance parameters → computes per-cell scores
+Connected-component labeling on cells above threshold
+Extracts bounding box, mean score, centroid for each cluster
+Crops a context-padded bitmap for each region
+Returns List<AnomalyRegion>
+[NEW] 
+AiModels.kt
+Data classes:
+AnomalyRegion(centerCol, centerRow, bounds, meanScore, croppedBitmap)
+AnomalyClassification(region, label, confidence, description)
+AiAnalysisState — sealed: Idle, Analyzing, Streaming(text), Complete(text), Error(message)
+ChatMessage(role, content, timestamp)
+Data Layer — Enum Update
+[MODIFY] 
+TargetSignal.kt
+Add AI_TERRAIN_SCAN to DetectionSource enum:
+kotlin
+
+enum class DetectionSource {
+    SIMULATED,
+    MAGNETOMETER,
+    MANUAL,
+    AI_TERRAIN_SCAN,
+}
+ViewModel Changes
+[MODIFY] 
+HillshadeViewModel.kt
+Add GeminiRepository instance
+New state flows:
+aiAnalysisState: StateFlow<AiAnalysisState> — terrain analysis progress/result
+anomalyClassifications: StateFlow<List<AnomalyClassification>> — scanner results
+chatMessages: StateFlow<List<ChatMessage>> — chat history
+isChatStreaming: StateFlow<Boolean>
+New methods:
+analyzeCurrentTerrain() — captures bitmap + builds context → calls GeminiRepository.analyzeTerrainImage
+classifyAnomalies() — runs AnomalyClusterer → calls GeminiRepository.classifyAnomalyRegions → saves as signals
+sendChatMessage(text) — builds session context → calls GeminiRepository.chat
+clearChat()
+pinAiFinding(gridX, gridY, notes) — saves signal with source = AI_TERRAIN_SCAN
+New UI Components
+[NEW] 
+AiTerrainAnalysisSheet.kt
+Material3 ModalBottomSheet
+Shows streaming text response with typing indicator
+"Pin finding" button to save identified locations
+"Re-analyze" button to retry with current view
+Dismissible
+[NEW] 
+AiChatSheet.kt
+Material3 ModalBottomSheet with chat UI
+Message bubbles (user = right/primary, AI = left/surface)
+Text input field + send button at bottom
+Quick-action chips row at top
+Streaming response with animated dots indicator
+Scrolls to bottom on new messages
+[MODIFY] 
+MainScreen.kt
+Add "🤖 AI Analyze" IconButton in the terrain toolbar row
+Add "🎯 Classify" button (visible only when visualizationMode == 5)
+Add chat FAB (💬) floating over the terrain canvas
+Wire up AiTerrainAnalysisSheet and AiChatSheet with show/hide state
+Connect all to ViewModel AI methods
+File Summary
+Action	File	Purpose
+MODIFY	build.gradle.kts (root)	Add google-services plugin declaration
+MODIFY	app/build.gradle.kts	Apply plugin + add Firebase AI deps
+NEW	data/ai/GeminiRepository.kt	Firebase AI service: analyze, classify, chat
+NEW	data/ai/AnomalyClusterer.kt	On-device spatial clustering of disturbance hotspots
+NEW	data/ai/AiModels.kt	Data classes for AI states and results
+MODIFY	data/TargetSignal.kt	Add AI_TERRAIN_SCAN to DetectionSource
+MODIFY	ui/HillshadeViewModel.kt	AI state management + action methods
+NEW	ui/components/AiTerrainAnalysisSheet.kt	Streaming terrain analysis bottom sheet
+NEW	ui/components/AiChatSheet.kt	AI field assistant chat bottom sheet
+MODIFY	ui/MainScreen.kt	Wire AI buttons, FAB, and bottom sheets
+Verification Plan
+Automated Tests
+bash
+
+./gradlew :app:compileDebugKotlin
+Verify the full build compiles with all new code
+Manual Verification
+Without google-services.json: Verify AI buttons appear but show "Firebase not configured — add google-services.json" toast/snackbar
+With google-services.json:
+Terrain Analyst: Load a LAZ file → tap Analyze → verify streaming response
+Anomaly Scanner: Switch to mode 5 → tap Classify → verify labeled pins appear
+Chat: Open chat → type question → verify streaming response with context
+Signal persistence: Verify AI-generated signals saved to Room DB with source = AI_TERRAIN_SCAN

@@ -102,6 +102,7 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.laszip4j)
   implementation(libs.nga.tiff)
+  implementation(libs.okhttp)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

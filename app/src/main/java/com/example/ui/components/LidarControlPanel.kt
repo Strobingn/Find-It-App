@@ -56,6 +56,13 @@ fun LidarControlPanel(
     onAnalysisSensitivityChanged: (Float) -> Unit,
     contourIntervalMeters: Float,
     onContourIntervalChanged: (Float) -> Unit,
+    heatmapEnabled: Boolean = false,
+    onHeatmapEnabledChanged: (Boolean) -> Unit = {},
+    basemapEnabled: Boolean = false,
+    onBasemapEnabledChanged: (Boolean) -> Unit = {},
+    basemapOpacity: Float = 0.6f,
+    onBasemapOpacityChanged: (Float) -> Unit = {},
+    basemapStatus: String? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -244,6 +251,51 @@ fun LidarControlPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+
+        ControlCard("Live overlays") {
+            Text(
+                "Dig priority heatmap",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            OptionGrid(
+                options = listOf(Option(0, "Off", "No density layer"), Option(1, "On", "Unexcavated finds")),
+                selected = if (heatmapEnabled) 1 else 0,
+                onSelected = { onHeatmapEnabledChanged(it == 1) },
+                tagPrefix = "heatmap",
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Offline basemap",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            OptionGrid(
+                options = listOf(Option(0, "Off", "Terrain only"), Option(1, "On", "OpenStreetMap tiles")),
+                selected = if (basemapEnabled) 1 else 0,
+                onSelected = { onBasemapEnabledChanged(it == 1) },
+                tagPrefix = "basemap",
+            )
+            if (basemapEnabled) {
+                Spacer(Modifier.height(4.dp))
+                LabeledSlider(
+                    label = "Basemap opacity",
+                    displayValue = "${(basemapOpacity * 100).toInt()}%",
+                    value = basemapOpacity,
+                    range = 0.1f..1f,
+                    onValueChange = onBasemapOpacityChanged,
+                    modifier = Modifier.testTag("basemap_opacity_slider"),
+                )
+                basemapStatus?.let {
+                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    "Tiles are fetched once per site and cached on-device — later views work offline.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
 
         ControlCard("Elevation palette") {

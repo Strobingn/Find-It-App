@@ -18,6 +18,8 @@ import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
+import com.example.geospatial.LocationTracker
+import com.example.geospatial.OsmTileRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -104,6 +106,16 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val _currentLon = MutableStateFlow<Double?>(null)
     val currentLon: StateFlow<Double?> = _currentLon.asStateFlow()
 
+    private val locationTracker = LocationTracker(application)
+    private val _gpsEnabled = MutableStateFlow(false)
+    val gpsEnabled: StateFlow<Boolean> = _gpsEnabled.asStateFlow()
+    private val _hasLocationPermission = MutableStateFlow(locationTracker.hasLocationPermission())
+    val hasLocationPermission: StateFlow<Boolean> = _hasLocationPermission.asStateFlow()
+    private val _deviceGridPosition = MutableStateFlow<Pair<Float, Float>?>(null)
+    val deviceGridPosition: StateFlow<Pair<Float, Float>?> = _deviceGridPosition.asStateFlow()
+    private val _deviceLocationAccuracyMeters = MutableStateFlow<Float?>(null)
+    val deviceLocationAccuracyMeters: StateFlow<Float?> = _deviceLocationAccuracyMeters.asStateFlow()
+    private var locationJob: Job? = null
 
     init {
         loadSettings()
@@ -112,6 +124,97 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             signalDao.observeAll().collect { stored ->
                 _loggedSignals.value = stored.map { it.toDomain() }
+            }
+        }
+    }
+
+    /** Called by the UI after a runtime permission dialog resolves. */
+    fun onLocationPermissionResult(granted: Boolean) {
+        _hasLocationPermission.value = granted || locationTracker.hasLocationPermission()
+        if (_gpsEnabled.value && _hasLocationPermission.value) startLocationUpdates()
+    }
+
+    fun toggleGpsTracking(enabled: Boolean) {
+        _gpsEnabled.value = enabled
+        viewModelScope.launch { settingsRepo.saveBoolean(SettingsRepository.Keys.GPS_ENABLED, enabled) }
+        if (enabled && _hasLocationPermission.value) {
+            startLocationUpdates()
+        } else if (!enabled) {
+            stopLocationUpdates()
+        }
+    }
+
+    private fun startLocationUpdates() {
+        if (locationJob?.isActive == true) return
+        locationJob = viewModelScope.launch {
+            locationTracker.locationUpdates().collect { fix ->
+                _deviceLocationAccuracyMeters.value = fix.accuracyMeters
+                _deviceGridPosition.value =
+                    GeoSpatialLibrary.geographicToGrid(fix.latitude, fix.longitude, _activeGeoMetadata.value)
+            }
+        }
+    }
+
+    private fun stopLocationUpdates() {
+        locationJob?.cancel()
+        locationJob = null
+        _deviceGridPosition.value = null
+        _deviceLocationAccuracyMeters.value = null
+    }
+
+    private val _heatmapEnabled = MutableStateFlow(false)
+    val heatmapEnabled: StateFlow<Boolean> = _heatmapEnabled.asStateFlow()
+
+    fun setHeatmapEnabled(enabled: Boolean) {
+        _heatmapEnabled.value = enabled
+        viewModelScope.launch { settingsRepo.saveBoolean(SettingsRepository.Keys.HEATMAP_ENABLED, enabled) }
+    }
+
+    private val osmTileRepository = OsmTileRepository(application)
+    private val _basemapEnabled = MutableStateFlow(false)
+    val basemapEnabled: StateFlow<Boolean> = _basemapEnabled.asStateFlow()
+    private val _basemapOpacity = MutableStateFlow(0.6f)
+    val basemapOpacity: StateFlow<Float> = _basemapOpacity.asStateFlow()
+    private val _basemapBitmap = MutableStateFlow<Bitmap?>(null)
+    val basemapBitmap: StateFlow<Bitmap?> = _basemapBitmap.asStateFlow()
+    private val _basemapStatus = MutableStateFlow<String?>(null)
+    val basemapStatus: StateFlow<String?> = _basemapStatus.asStateFlow()
+    private var basemapJob: Job? = null
+
+    fun setBasemapEnabled(enabled: Boolean) {
+        _basemapEnabled.value = enabled
+        viewModelScope.launch { settingsRepo.saveBoolean(SettingsRepository.Keys.BASEMAP_ENABLED, enabled) }
+        if (enabled) {
+            refreshBasemapTiles()
+        } else {
+            basemapJob?.cancel()
+            _basemapBitmap.value = null
+            _basemapStatus.value = null
+        }
+    }
+
+    fun setBasemapOpacity(value: Float) {
+        _basemapOpacity.value = value.coerceIn(0.1f, 1f)
+        viewModelScope.launch { settingsRepo.saveFloat(SettingsRepository.Keys.BASEMAP_OPACITY, _basemapOpacity.value) }
+    }
+
+    private fun refreshBasemapTiles() {
+        val bounds = _activeGeoMetadata.value.bounds
+        if (bounds == null) {
+            _basemapBitmap.value = null
+            _basemapStatus.value = "This terrain has no geographic coordinates — basemap unavailable."
+            return
+        }
+        basemapJob?.cancel()
+        basemapJob = viewModelScope.launch {
+            _basemapStatus.value = "Loading basemap tiles…"
+            val result = runCatching { osmTileRepository.loadBasemap(bounds) }.getOrNull()
+            _basemapBitmap.value = result?.bitmap
+            _basemapStatus.value = when {
+                result?.bitmap != null -> null
+                result?.blockedByServer == true ->
+                    "OpenStreetMap's tile server rejected these requests — basemap unavailable here."
+                else -> "Couldn't load basemap tiles — showing terrain view only."
             }
         }
     }
@@ -164,6 +267,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
         updateCoordinates()
         scheduleRender(immediate = true)
+        if (_basemapEnabled.value) refreshBasemapTiles()
     }
 
     fun setCustomTerrain(
@@ -200,6 +304,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _zScale.value = 2f
         updateCoordinates()
         scheduleRender(immediate = true)
+        if (_basemapEnabled.value) refreshBasemapTiles()
     }
 
 
@@ -353,6 +458,12 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             _currentSiteIndex.value = settingsRepo.getInt(SettingsRepository.Keys.CURRENT_SITE_INDEX, 0)
             _sweepX.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_X, 50f)
             _sweepY.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_Y, 50f)
+            _gpsEnabled.value = settingsRepo.getBoolean(SettingsRepository.Keys.GPS_ENABLED, false)
+            _heatmapEnabled.value = settingsRepo.getBoolean(SettingsRepository.Keys.HEATMAP_ENABLED, false)
+            _basemapEnabled.value = settingsRepo.getBoolean(SettingsRepository.Keys.BASEMAP_ENABLED, false)
+            _basemapOpacity.value = settingsRepo.getFloat(SettingsRepository.Keys.BASEMAP_OPACITY, 0.6f)
+            if (_gpsEnabled.value && _hasLocationPermission.value) startLocationUpdates()
+            if (_basemapEnabled.value) refreshBasemapTiles()
         }
     }
 
@@ -379,6 +490,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         renderJob?.cancel()
+        locationJob?.cancel()
+        basemapJob?.cancel()
         super.onCleared()
     }
 

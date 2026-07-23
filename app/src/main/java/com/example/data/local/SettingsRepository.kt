@@ -23,6 +23,10 @@ class SettingsRepository(private val settingDao: SettingDao) {
         const val CURRENT_SITE_INDEX = "current_site_index"
         const val SWEEP_X = "sweep_x"
         const val SWEEP_Y = "sweep_y"
+        const val GPS_ENABLED = "gps_enabled"
+        const val HEATMAP_ENABLED = "heatmap_enabled"
+        const val BASEMAP_ENABLED = "basemap_enabled"
+        const val BASEMAP_OPACITY = "basemap_opacity"
     }
 
     suspend fun saveString(key: String, value: String) {

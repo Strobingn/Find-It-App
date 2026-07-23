@@ -43,7 +43,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
+import com.example.data.computeDigPriorityHeatmap
 import com.example.geospatial.GeoSpatialLibrary
+import androidx.compose.ui.graphics.lerp
 enum class LidarCanvasMode { SURVEY, EXPLORE }
 @Composable
 fun LidarMapCanvas(
@@ -63,6 +65,12 @@ fun LidarMapCanvas(
     showSurveyCursor: Boolean = true,
     showCoordinateHud: Boolean = true,
     onViewportChanged: (NormalizedRasterBounds, Float) -> Unit = { _, _ -> },
+    showHeatmap: Boolean = false,
+    basemapBitmap: Bitmap? = null,
+    showBasemap: Boolean = false,
+    basemapOpacity: Float = 0.6f,
+    basemapStatus: String? = null,
+    deviceGridPosition: Pair<Float, Float>? = null,
     modifier: Modifier = Modifier,
 ) {
     // Cache ImageBitmap — recreating every drag frame can crash if Bitmap is mid-render
@@ -72,6 +80,16 @@ fun LidarMapCanvas(
         } catch (_: Exception) {
             null
         }
+    }
+    val basemapImageBitmap = remember(basemapBitmap) {
+        try {
+            basemapBitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
+        } catch (_: Exception) {
+            null
+        }
+    }
+    val heatmapCells = remember(loggedSignals, showHeatmap) {
+        if (showHeatmap) computeDigPriorityHeatmap(loggedSignals, HEATMAP_BINS) else null
     }
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
@@ -176,6 +194,30 @@ fun LidarMapCanvas(
                     dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
                     dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
                 )
+                if (showBasemap && basemapImageBitmap != null) {
+                    drawImage(
+                        image = basemapImageBitmap,
+                        dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
+                        dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
+                        alpha = basemapOpacity.coerceIn(0f, 1f),
+                    )
+                }
+                if (heatmapCells != null) {
+                    val cellWidth = displayWidth / HEATMAP_BINS
+                    val cellHeight = displayHeight / HEATMAP_BINS
+                    for (row in 0 until HEATMAP_BINS) {
+                        for (col in 0 until HEATMAP_BINS) {
+                            val intensity = heatmapCells[row * HEATMAP_BINS + col]
+                            if (intensity <= 0.03f) continue
+                            drawRect(
+                                color = heatmapColor(intensity),
+                                topLeft = Offset(imageLeft + col * cellWidth, imageTop + row * cellHeight),
+                                size = androidx.compose.ui.geometry.Size(cellWidth, cellHeight),
+                                alpha = 0.18f + intensity * 0.5f,
+                            )
+                        }
+                    }
+                }
                 // Search grid (avoid huge loops if spacing tiny)
                 if (gridSpacing >= 1f) {
                     val cols = (100f / gridSpacing).toInt().coerceIn(1, 50)
@@ -252,6 +294,15 @@ fun LidarMapCanvas(
                     )
                     drawCircle(color = Color.White, radius = 3f, center = coil)
                 }
+                val devicePosition = deviceGridPosition
+                if (devicePosition != null && devicePosition.first in 0f..100f && devicePosition.second in 0f..100f) {
+                    val dx = imageLeft + (devicePosition.first / 100f) * displayWidth
+                    val dy = imageTop + (devicePosition.second / 100f) * displayHeight
+                    val here = Offset(dx, dy)
+                    drawCircle(color = Color(0xFF2196F3), radius = 26f, center = here, alpha = 0.25f)
+                    drawCircle(color = Color(0xFF2196F3), radius = 10f, center = here)
+                    drawCircle(color = Color.White, radius = 10f, center = here, style = Stroke(width = 2.5f))
+                }
             }
             // --- GEOSPATIAL GIS HUD ---
             Box(
@@ -278,6 +329,14 @@ fun LidarMapCanvas(
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
+                    if (showBasemap && basemapStatus != null) {
+                        Text(
+                            text = basemapStatus,
+                            color = Color(0xFF64B5F6),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
             if (showCoordinateHud) Column(
@@ -319,6 +378,19 @@ fun LidarMapCanvas(
                     )
                 }
             }
+            if (showBasemap && basemapImageBitmap != null) {
+                Text(
+                    text = "© OpenStreetMap contributors",
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xB0000000))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                )
+            }
         } else {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -342,4 +414,12 @@ fun LidarMapCanvas(
             }
         }
     }
+}
+
+private const val HEATMAP_BINS = 24
+
+private fun heatmapColor(intensity: Float): Color = if (intensity < 0.5f) {
+    lerp(Color(0xFF1565C0), Color(0xFFFFC107), intensity / 0.5f)
+} else {
+    lerp(Color(0xFFFFC107), Color(0xFFE53935), (intensity - 0.5f) / 0.5f)
 }
