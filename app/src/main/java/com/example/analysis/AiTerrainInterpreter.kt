@@ -36,13 +36,15 @@ class AiTerrainInterpreter(
                 .put("analysisSummary", layer.aiSummary())
                 .put("question", userQuestion.take(1_000))
 
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(proxyUrl)
                 .post(requestJson.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .header("Accept", "application/json")
-                .build()
+            BuildConfig.OPENAI_PROXY_TOKEN.trim()
+                .takeIf { it.isNotBlank() }
+                ?.let { requestBuilder.header("X-FindIt-Token", it) }
 
-            client.newCall(request).execute().use { response ->
+            client.newCall(requestBuilder.build()).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     val message = runCatching { JSONObject(body).optString("error") }.getOrNull()
