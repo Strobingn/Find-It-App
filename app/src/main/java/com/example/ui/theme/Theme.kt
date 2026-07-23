@@ -8,8 +8,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Color
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFFBB86FC),
-    primaryContainer = Color(0xFF3700B3),
+    primary = Color(0xFFBDBDBD),
+    primaryContainer = Color(0xFF424242),
     onPrimary = Color(0xFF000000),
     onPrimaryContainer = Color.White,
     secondary = Color(0xFF424242),
@@ -28,14 +28,14 @@ private val DarkColorScheme = darkColorScheme(
     outlineVariant = Color(0xFF2A2A2A),
     scrim = Color.Black.copy(alpha = 0.6f),
     inverseOnSurface = Color(0xFF212121),
-    inversePrimary = Color(0xFFEADDFF),
+    inversePrimary = Color(0xFF616161),
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF6200EE),
-    primaryContainer = Color(0xFFEADDFF),
+    primary = Color(0xFF616161),
+    primaryContainer = Color(0xFFE0E0E0),
     onPrimary = Color(0xFFFFFFFF),
-    onPrimaryContainer = Color(0xFF21005E),
+    onPrimaryContainer = Color(0xFF212121),
     secondary = Color(0xFF616161),
     onSecondary = Color(0xFFF5F5F5),
     secondaryContainer = Color(0xFFE0E0E0),
@@ -52,7 +52,7 @@ private val LightColorScheme = lightColorScheme(
     outlineVariant = Color(0xFF9E9E9E),
     scrim = Color.Black.copy(alpha = 0.4f),
     inverseOnSurface = Color(0xFFFAFAFA),
-    inversePrimary = Color(0xFFEADDFF),
+    inversePrimary = Color(0xFFBDBDBD),
 )
 
 @Composable

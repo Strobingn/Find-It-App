@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.NormalizedRasterBounds
+import kotlinx.coroutines.delay
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.LidarControlPanel
 import com.example.ui.components.LidarCanvasMode
@@ -181,6 +183,19 @@ private fun TerrainTab(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }
     val context = LocalContext.current
+
+    // Auto-load higher-resolution detail from the original LAZ/LAS once the user zooms/pans into
+    // a small enough area — debounced so continuous pinch/pan gestures don't each trigger a
+    // reparse; only fires once the viewport settles. The manual "Load detail here" button stays
+    // available for an immediate re-trigger.
+    LaunchedEffect(visibleBounds.value, zoomLevel.value, canRefine) {
+        if (canRefine && zoomLevel.value >= 1.5f) {
+            delay(600)
+            if (!isRefining) {
+                viewModel.refineTerrain(visibleBounds.value)
+            }
+        }
+    }
 
     BoxWithConstraints(
         modifier = Modifier

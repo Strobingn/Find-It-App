@@ -27,14 +27,16 @@ val LightBackground = Color(0xFFF5F5F5)  // Very light grey
 val LightSurface = Color(0xFFFFFFFF)    // White
 val LightSurfaceVariant = Color(0xFFE0E0E0)
 
-// Accent colors for interactive elements
-val PrimaryLight = Color(0xFF6200EE)  // Subtle purple for primary actions
-val PrimaryContainerLight = Color(0xFFEADDFF)
+// Accent colors for interactive elements — neutral grey, no purple
+val PrimaryLight = Color(0xFF616161)  // Grey700
+val PrimaryContainerLight = Color(0xFFE0E0E0)  // Grey300
 val OnPrimaryLight = Color(0xFFFFFFFF)
+val OnPrimaryContainerLight = Color(0xFF212121)  // Grey900
 
-val PrimaryDark = Color(0xFFBB86FC)  // Lighter purple for dark theme
-val PrimaryContainerDark = Color(0xFF3700B3)
+val PrimaryDark = Color(0xFFBDBDBD)  // Grey400
+val PrimaryContainerDark = Color(0xFF424242)  // Grey800
 val OnPrimaryDark = Color(0xFF000000)
+val OnPrimaryContainerDark = Color(0xFFFFFFFF)
 
 // Status colors
 val Success = Color(0xFF4CAF50)
