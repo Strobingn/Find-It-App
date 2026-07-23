@@ -33,11 +33,13 @@ jobs:
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
           OPENAI_PROXY_URL: ${{ secrets.OPENAI_PROXY_URL }}
+          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
         run: |
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
             printf 'OPENAI_PROXY_URL=%s\n' "$OPENAI_PROXY_URL"
+            printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
           } > "$GITHUB_WORKSPACE/local.properties"
           test -f "$GITHUB_WORKSPACE/local.properties"
 
@@ -61,6 +63,9 @@ jobs:
             cp .env.example .env
           fi
           touch .env
+
+      - name: Validate OpenAI proxy source
+        run: node --check backend/openai-proxy/server.mjs
 
       - name: Ensure Android debug keystore
         run: |
