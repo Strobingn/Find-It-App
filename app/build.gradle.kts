@@ -13,6 +13,7 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
+  id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin") version "2.0.1"
 }
 
 android {
@@ -27,6 +28,9 @@ android {
     versionName = "1.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    
+    // Add Google Maps API Key placeholder
+    manifestPlaceholders["com.google.android.geo.API_KEY"] = System.getenv("MAPS_API_KEY") ?: "YOUR_GOOGLE_MAPS_API_KEY"
   }
 
   signingConfigs {
@@ -103,6 +107,11 @@ dependencies {
   implementation(libs.laszip4j)
   implementation(libs.nga.tiff)
   implementation(libs.okhttp)
+  
+  // Google Maps SDK
+  implementation("com.google.maps.android:maps-compose:4.3.0")
+  implementation("com.google.android.gms:play-services-maps:18.2.0")
+  
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
