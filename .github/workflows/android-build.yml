@@ -42,6 +42,10 @@ jobs:
           test -f gradlew || { echo "gradlew missing on this branch"; ls -la; exit 1; }
           chmod +x ./gradlew
 
+      - name: Create local.properties
+        run: |
+          printf 'MAPS_API_KEY=%s\n' "${{ secrets.MAPS_API_KEY }}" > local.properties
+
       - name: Ensure .env for secrets plugin
         run: |
           if [ ! -f .env ] && [ -f .env.example ]; then
