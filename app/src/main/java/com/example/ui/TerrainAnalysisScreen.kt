@@ -54,6 +54,8 @@ fun TerrainAnalysisScreen(
     val status by analysisViewModel.status.collectAsStateWithLifecycle()
     val cacheEntryCount by analysisViewModel.cacheEntryCount.collectAsStateWithLifecycle()
     val lastResultWasCached by analysisViewModel.lastResultWasCached.collectAsStateWithLifecycle()
+    val exportStatus by analysisViewModel.exportStatus.collectAsStateWithLifecycle()
+    val isExporting by analysisViewModel.isExporting.collectAsStateWithLifecycle()
     val aiInterpretation by analysisViewModel.aiInterpretation.collectAsStateWithLifecycle()
     val isAiRunning by analysisViewModel.isAiRunning.collectAsStateWithLifecycle()
     val menuExpanded = remember { mutableStateOf(false) }
@@ -126,6 +128,7 @@ fun TerrainAnalysisScreen(
                         },
                         onClick = {
                             analysisViewModel.selectType(type)
+                            analysisViewModel.runAnalysis(grid)
                             menuExpanded.value = false
                         },
                     )
@@ -204,8 +207,10 @@ fun TerrainAnalysisScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text("Layer statistics", fontWeight = FontWeight.Bold)
+                    Text("Valid cells: ${result.validCellCount} (${format(result.coveragePercent)}%)")
                     Text("Minimum: ${format(result.minimum)} ${result.type.unit}")
                     Text("Mean: ${format(result.mean)} ${result.type.unit}")
+                    Text("Standard deviation: ${format(result.standardDeviation)} ${result.type.unit}")
                     Text("95th percentile: ${format(result.percentile95)} ${result.type.unit}")
                     Text("Maximum: ${format(result.maximum)} ${result.type.unit}")
                     HorizontalDivider()
@@ -213,19 +218,45 @@ fun TerrainAnalysisScreen(
                 }
             }
 
-            Button(
-                onClick = { analysisViewModel.requestAiInterpretation(terrainSummary) },
-                enabled = !isAiRunning,
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (isAiRunning) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.padding(end = 10.dp),
-                        strokeWidth = 2.dp,
-                    )
+                OutlinedButton(
+                    onClick = analysisViewModel::exportCurrentPng,
+                    enabled = !isExporting,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (isExporting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.padding(end = 8.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    Text(if (isExporting) "Saving…" else "Save PNG")
                 }
-                Text(if (isAiRunning) "Asking ChatGPT…" else "Interpret with ChatGPT")
+                Button(
+                    onClick = { analysisViewModel.requestAiInterpretation(terrainSummary) },
+                    enabled = !isAiRunning,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (isAiRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.padding(end = 8.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    Text(if (isAiRunning) "Analyzing…" else "ChatGPT")
+                }
             }
+        }
+
+        exportStatus?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         aiInterpretation?.let { interpretation ->
@@ -286,6 +317,11 @@ private fun AnalysisParameterControls(
                     onValueChange = { onDirectionCountChanged(it.roundToInt()) },
                 )
             }
+            Text(
+                text = "Tap Run after changing a parameter.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
