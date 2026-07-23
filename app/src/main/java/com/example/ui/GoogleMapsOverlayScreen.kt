@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -76,7 +77,11 @@ fun GoogleMapsOverlayScreen() {
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {}
+    ) {
         // Google Map
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
@@ -92,11 +97,6 @@ fun GoogleMapsOverlayScreen() {
                                 imagePosition.value += pan
                                 imageScale.value = (imageScale.value * zoom).coerceIn(0.1f, 5f)
                                 imageRotation.value += rotation
-                            }
-                        }
-                        .pointerInput(Unit) {
-                            detectDragGestures { change, _ ->
-                                imagePosition.value += Offset(change.position.x, change.position.y)
                             }
                         }
                 ) {
