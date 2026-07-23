@@ -40,9 +40,19 @@ class LocationTracker(context: Context) {
                 close()
                 return@callbackFlow
             }
+            // GPS_PROVIDER requires ACCESS_FINE_LOCATION specifically — a coarse-only grant still
+            // passes hasLocationPermission() above, so this must be checked separately or
+            // requestLocationUpdates() throws SecurityException at runtime (lint's
+            // @SuppressLint("MissingPermission") only silences the warning, not the actual throw).
+            val hasFineLocation = ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
             val provider = when {
-                locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
-                locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
+                hasFineLocation && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) ->
+                    LocationManager.GPS_PROVIDER
+                locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) ->
+                    LocationManager.NETWORK_PROVIDER
                 else -> null
             }
             if (provider == null) {
@@ -52,13 +62,19 @@ class LocationTracker(context: Context) {
             val listener = LocationListener { location: Location ->
                 trySend(LocationFix(location.latitude, location.longitude, location.accuracy))
             }
-            locationManager.requestLocationUpdates(
-                provider,
-                minIntervalMillis,
-                minDistanceMeters,
-                listener,
-                Looper.getMainLooper(),
-            )
+            val requested = runCatching {
+                locationManager.requestLocationUpdates(
+                    provider,
+                    minIntervalMillis,
+                    minDistanceMeters,
+                    listener,
+                    Looper.getMainLooper(),
+                )
+            }.isSuccess
+            if (!requested) {
+                close()
+                return@callbackFlow
+            }
             runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()?.let { last ->
                 trySend(LocationFix(last.latitude, last.longitude, last.accuracy))
             }

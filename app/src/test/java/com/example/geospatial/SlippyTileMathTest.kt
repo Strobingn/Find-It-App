@@ -38,4 +38,38 @@ class SlippyTileMathTest {
         val range = SlippyTileMath.boundsToTileRange(bounds, zoom)
         assertTrue(range.tileCount <= 36)
     }
+
+    @Test
+    fun fractionalCoordinateFloorsToTheSameIntegerTile() {
+        val zoom = 12
+        val lon = -124.408
+        val lat = 43.121
+
+        assertEquals(SlippyTileMath.lonToTileX(lon, zoom), Math.floor(SlippyTileMath.lonToTileXFraction(lon, zoom)).toInt())
+        assertEquals(SlippyTileMath.latToTileY(lat, zoom), Math.floor(SlippyTileMath.latToTileYFraction(lat, zoom)).toInt())
+    }
+
+    @Test
+    fun fractionalCoordinatesPlaceBoundsStrictlyInsideTheirTileRange() {
+        // A small bounds box (site-sized), not aligned to any tile boundary.
+        val bounds = GeoSpatialLibrary.GeographicBounds(minLat = 43.1201, maxLat = 43.1209, minLon = -124.4087, maxLon = -124.4077)
+        val zoom = 17
+        val range = SlippyTileMath.boundsToTileRange(bounds, zoom)
+
+        val xMinFrac = SlippyTileMath.lonToTileXFraction(bounds.minLon, zoom) - range.minX
+        val xMaxFrac = SlippyTileMath.lonToTileXFraction(bounds.maxLon, zoom) - range.minX
+        val yMinFrac = SlippyTileMath.latToTileYFraction(bounds.maxLat, zoom) - range.minY
+        val yMaxFrac = SlippyTileMath.latToTileYFraction(bounds.minLat, zoom) - range.minY
+
+        val tileSpanX = (range.maxX - range.minX + 1).toDouble()
+        val tileSpanY = (range.maxY - range.minY + 1).toDouble()
+        assertTrue(xMinFrac in 0.0..tileSpanX)
+        assertTrue(xMaxFrac in 0.0..tileSpanX)
+        assertTrue(yMinFrac in 0.0..tileSpanY)
+        assertTrue(yMaxFrac in 0.0..tileSpanY)
+        // The crop region should be narrower than the full stitched tile range whenever the
+        // bounds don't happen to exactly fill it — otherwise cropping would be a no-op.
+        assertTrue((xMaxFrac - xMinFrac) <= tileSpanX)
+        assertTrue((yMaxFrac - yMinFrac) <= tileSpanY)
+    }
 }

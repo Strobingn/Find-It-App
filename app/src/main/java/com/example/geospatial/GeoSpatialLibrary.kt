@@ -105,6 +105,7 @@ object GeoSpatialLibrary {
         if (latRange <= 0.0 || lonRange <= 0.0) return null
         val y = (lat - bounds.minLat) / latRange
         val x = (lon - bounds.minLon) / lonRange
+        if (x !in 0.0..1.0 || y !in 0.0..1.0) return null
         return (x * 100.0).toFloat() to (100.0 - y * 100.0).toFloat()
     }
 

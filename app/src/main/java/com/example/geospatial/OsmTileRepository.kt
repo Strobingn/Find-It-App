@@ -85,7 +85,30 @@ class OsmTileRepository(context: Context) {
                 TileFetch.Unavailable -> Unit
             }
         }
-        BasemapResult(bitmap = stitched.takeIf { anyTileLoaded }, blockedByServer = anyBlocked && !anyTileLoaded)
+        // boundsToTileRange snaps outward to whole tiles, so `stitched` covers more area than the
+        // requested bounds and is offset from it — crop to the exact bounds so the caller can draw
+        // this 1:1 over the terrain's bounding rect without the two disagreeing on geography.
+        val croppedBitmap = stitched.takeIf { anyTileLoaded }?.let { cropToBounds(it, bounds, range, zoom) }
+        BasemapResult(bitmap = croppedBitmap, blockedByServer = anyBlocked && !anyTileLoaded)
+    }
+
+    private fun cropToBounds(
+        stitched: Bitmap,
+        bounds: GeoSpatialLibrary.GeographicBounds,
+        range: SlippyTileMath.TileRange,
+        zoom: Int,
+    ): Bitmap {
+        val xMinFrac = SlippyTileMath.lonToTileXFraction(bounds.minLon, zoom) - range.minX
+        val xMaxFrac = SlippyTileMath.lonToTileXFraction(bounds.maxLon, zoom) - range.minX
+        // Northern (max) latitude maps to the smaller tile Y, same convention as boundsToTileRange.
+        val yMinFrac = SlippyTileMath.latToTileYFraction(bounds.maxLat, zoom) - range.minY
+        val yMaxFrac = SlippyTileMath.latToTileYFraction(bounds.minLat, zoom) - range.minY
+
+        val left = (xMinFrac * TILE_SIZE).toInt().coerceIn(0, stitched.width - 1)
+        val top = (yMinFrac * TILE_SIZE).toInt().coerceIn(0, stitched.height - 1)
+        val right = (xMaxFrac * TILE_SIZE).toInt().coerceIn(left + 1, stitched.width)
+        val bottom = (yMaxFrac * TILE_SIZE).toInt().coerceIn(top + 1, stitched.height)
+        return Bitmap.createBitmap(stitched, left, top, right - left, bottom - top)
     }
 
     private fun loadTile(zoom: Int, x: Int, y: Int): TileFetch {

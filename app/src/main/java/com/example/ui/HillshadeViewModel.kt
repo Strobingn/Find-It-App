@@ -27,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -147,11 +148,13 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private fun startLocationUpdates() {
         if (locationJob?.isActive == true) return
         locationJob = viewModelScope.launch {
-            locationTracker.locationUpdates().collect { fix ->
-                _deviceLocationAccuracyMeters.value = fix.accuracyMeters
-                _deviceGridPosition.value =
-                    GeoSpatialLibrary.geographicToGrid(fix.latitude, fix.longitude, _activeGeoMetadata.value)
-            }
+            locationTracker.locationUpdates()
+                .catch { /* provider unavailable or a platform SecurityException — stop tracking, don't crash */ }
+                .collect { fix ->
+                    _deviceLocationAccuracyMeters.value = fix.accuracyMeters
+                    _deviceGridPosition.value =
+                        GeoSpatialLibrary.geographicToGrid(fix.latitude, fix.longitude, _activeGeoMetadata.value)
+                }
         }
     }
 
@@ -199,13 +202,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun refreshBasemapTiles() {
+        basemapJob?.cancel()
+        basemapJob = null
         val bounds = _activeGeoMetadata.value.bounds
         if (bounds == null) {
             _basemapBitmap.value = null
             _basemapStatus.value = "This terrain has no geographic coordinates — basemap unavailable."
             return
         }
-        basemapJob?.cancel()
         basemapJob = viewModelScope.launch {
             _basemapStatus.value = "Loading basemap tiles…"
             val result = runCatching { osmTileRepository.loadBasemap(bounds) }.getOrNull()

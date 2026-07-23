@@ -14,17 +14,27 @@ object SlippyTileMath {
         val tileCount: Int get() = (maxX - minX + 1) * (maxY - minY + 1)
     }
 
+    /** Continuous (non-floored) tile-space X — needed to crop a stitched tile image to exact bounds. */
+    fun lonToTileXFraction(lon: Double, zoom: Int): Double {
+        val tilesAcross = 1 shl zoom
+        return (lon + 180.0) / 360.0 * tilesAcross
+    }
+
+    /** Continuous (non-floored) tile-space Y — needed to crop a stitched tile image to exact bounds. */
+    fun latToTileYFraction(lat: Double, zoom: Int): Double {
+        val tilesAcross = 1 shl zoom
+        val latRad = Math.toRadians(lat.coerceIn(-MAX_LATITUDE, MAX_LATITUDE))
+        return (1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * tilesAcross
+    }
+
     fun lonToTileX(lon: Double, zoom: Int): Int {
         val tilesAcross = 1 shl zoom
-        return floor((lon + 180.0) / 360.0 * tilesAcross).toInt().coerceIn(0, tilesAcross - 1)
+        return floor(lonToTileXFraction(lon, zoom)).toInt().coerceIn(0, tilesAcross - 1)
     }
 
     fun latToTileY(lat: Double, zoom: Int): Int {
         val tilesAcross = 1 shl zoom
-        val latRad = Math.toRadians(lat.coerceIn(-MAX_LATITUDE, MAX_LATITUDE))
-        return floor((1.0 - ln(tan(latRad) + 1.0 / cos(latRad)) / PI) / 2.0 * tilesAcross)
-            .toInt()
-            .coerceIn(0, tilesAcross - 1)
+        return floor(latToTileYFraction(lat, zoom)).toInt().coerceIn(0, tilesAcross - 1)
     }
 
     fun boundsToTileRange(bounds: GeoSpatialLibrary.GeographicBounds, zoom: Int): TileRange {
