@@ -74,10 +74,14 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
+      - name: Compute safe ref name for artifacts
+        id: safe_ref
+        run: echo "value=$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: lidar-metal-detector-debug-${{ github.ref_name }}-${{ github.run_number }}
+          name: lidar-metal-detector-debug-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
@@ -90,7 +94,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: lidar-metal-detector-release-${{ github.ref_name }}-${{ github.run_number }}
+          name: lidar-metal-detector-release-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
           retention-days: 14
