@@ -118,6 +118,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val deviceLocationAccuracyMeters: StateFlow<Float?> = _deviceLocationAccuracyMeters.asStateFlow()
     private var locationJob: Job? = null
 
+    // Bumped after successful refine / show-whole so the canvas forces zoom=1 + pan=0
+    // against the new high-res (or full) bitmap.
+    private val _viewportResetKey = MutableStateFlow(0)
+    val viewportResetKey: StateFlow<Int> = _viewportResetKey.asStateFlow()
+
     init {
         // loadSettings must finish before the first scheduleRender — scheduleRender saves the
         // *current* StateFlow values back to disk, and if that runs while loadSettings' reads are
@@ -291,10 +296,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _canRefineTerrain.value = source != null
         _isDetailedTerrain.value = false
         _terrainDetailMessage.value = null
-        applyCustomTerrain(result)
+        applyCustomTerrain(result, resetViewport = true)
     }
 
-    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult) {
+    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult, resetViewport: Boolean = false) {
         val grid = result.grid
         customGrid = result.grid
         _elevationGrid.value = result.grid
@@ -306,18 +311,16 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             resolutionMeters = grid.cellSizeMeters.toDouble(),
         )
         _activeTerrainSummary.value = result.summary
-        _vegetationFilter.value = if (result.isBareEarth) 1f else 0f
-        _visualizationMode.value = if (result.isBareEarth) 3 else 1
-        _contrast.value = 1.85f
-        _paletteType.value = 0
-        _sunAltitude.value = 28f
-        _sunAzimuth.value = 315f
-        _zScale.value = 2f
+        // IMPORTANT: do NOT force sun/palette/contrast/viz/zScale here.
+        // That was wiping every user preference on every import and every refine.
+        // User settings from Room are already loaded and must stick.
         updateCoordinates()
         scheduleRender(immediate = true)
         if (_basemapEnabled.value) refreshBasemapTiles()
+        if (resetViewport) {
+            _viewportResetKey.value = _viewportResetKey.value + 1
+        }
     }
-
 
     fun refineTerrain(viewport: NormalizedRasterBounds) {
         val source = terrainSource ?: return
@@ -352,7 +355,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     currentSourceBounds = absoluteBounds
                     _isDetailedTerrain.value = true
                     _terrainDetailMessage.value = "Detailed viewport loaded from the original point cloud."
-                    applyCustomTerrain(result)
+                    // The new bitmap *is* the previous viewport at full resolution.
+                    // Reset zoom/pan so the user sees exactly that area at 1× of the new high-res raster.
+                    applyCustomTerrain(result, resetViewport = true)
                 }
             }
         }
@@ -363,7 +368,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         currentSourceBounds = NormalizedRasterBounds.Full
         _isDetailedTerrain.value = false
         _terrainDetailMessage.value = "Showing the complete point-cloud footprint."
-        applyCustomTerrain(overview)
+        applyCustomTerrain(overview, resetViewport = true)
     }
 
     fun setCustomGrid(grid: ElevationGrid) {
@@ -465,7 +470,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _featureScaleMeters.value = settingsRepo.getFloat(SettingsRepository.Keys.FEATURE_SCALE_METERS, 6f)
         _analysisSensitivity.value = settingsRepo.getFloat(SettingsRepository.Keys.ANALYSIS_SENSITIVITY, 1.2f)
         _contourIntervalMeters.value = settingsRepo.getFloat(SettingsRepository.Keys.CONTOUR_INTERVAL_METERS, 0f)
-        _currentSiteIndex.value = settingsRepo.getInt(SettingsRepository.Keys.CURRENT_SITE_INDEX, 0)
+        val site = settingsRepo.getInt(SettingsRepository.Keys.CURRENT_SITE_INDEX, 0)
+        _currentSiteIndex.value = site
+        if (site in 0..2) {
+            _elevationGrid.value = DemGenerator.generateSite(site)
+            _activeGeoMetadata.value = GeoSpatialLibrary.SITES_METADATA[site]
+            _activeTerrainSummary.value = "Built-in simulated terrain"
+        }
+        // site == 3 (custom) is lost across process death — customGrid is in-memory only
         _sweepX.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_X, 50f)
         _sweepY.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_Y, 50f)
         _gpsEnabled.value = settingsRepo.getBoolean(SettingsRepository.Keys.GPS_ENABLED, false)
@@ -494,6 +506,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             settingsRepo.saveInt(SettingsRepository.Keys.CURRENT_SITE_INDEX, _currentSiteIndex.value)
             settingsRepo.saveFloat(SettingsRepository.Keys.SWEEP_X, _sweepX.value)
             settingsRepo.saveFloat(SettingsRepository.Keys.SWEEP_Y, _sweepY.value)
+            // also persist the ones that were only saved on toggle so a bulk save never loses them
+            settingsRepo.saveBoolean(SettingsRepository.Keys.GPS_ENABLED, _gpsEnabled.value)
+            settingsRepo.saveBoolean(SettingsRepository.Keys.HEATMAP_ENABLED, _heatmapEnabled.value)
+            settingsRepo.saveBoolean(SettingsRepository.Keys.BASEMAP_ENABLED, _basemapEnabled.value)
+            settingsRepo.saveFloat(SettingsRepository.Keys.BASEMAP_OPACITY, _basemapOpacity.value)
         }
     }
 
