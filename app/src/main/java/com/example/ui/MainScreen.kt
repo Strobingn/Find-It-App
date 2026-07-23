@@ -175,21 +175,23 @@ private fun TerrainTab(
     val basemapOpacity by viewModel.basemapOpacity.collectAsStateWithLifecycle()
     val basemapBitmap by viewModel.basemapBitmap.collectAsStateWithLifecycle()
     val basemapStatus by viewModel.basemapStatus.collectAsStateWithLifecycle()
+    val vmViewportReset by viewModel.viewportResetKey.collectAsStateWithLifecycle()
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val showControls = rememberSaveable { mutableStateOf(false) }
-    val viewportResetKey = rememberSaveable { mutableIntStateOf(0) }
+    val localViewportResetKey = rememberSaveable { mutableIntStateOf(0) }
+    // Combine local "fit" button with ViewModel-driven resets (after 2× detail load / show whole)
+    val viewportResetKey = vmViewportReset + localViewportResetKey.intValue
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }
     val context = LocalContext.current
 
-    // Auto-load higher-resolution detail from the original LAZ/LAS once the user zooms/pans into
-    // a small enough area — debounced so continuous pinch/pan gestures don't each trigger a
-    // reparse; only fires once the viewport settles. The manual "Load detail here" button stays
-    // available for an immediate re-trigger.
+    // Auto-load higher-resolution detail from the original LAZ/LAS once the user pinches to ≥2×
+    // and the viewport settles. Debounced so continuous gestures don't spam reparse.
+    // Manual "Load detail here" button still works for immediate trigger.
     LaunchedEffect(visibleBounds.value, zoomLevel.value, canRefine) {
-        if (canRefine && zoomLevel.value >= 1.5f) {
+        if (canRefine && zoomLevel.value >= 2.0f) {
             delay(600)
             if (!isRefining) {
                 viewModel.refineTerrain(visibleBounds.value)
@@ -215,7 +217,7 @@ private fun TerrainTab(
             currentLat = null,
             currentLon = null,
             mode = LidarCanvasMode.EXPLORE,
-            viewportResetKey = viewportResetKey.intValue,
+            viewportResetKey = viewportResetKey,
             showSurveyCursor = false,
             showCoordinateHud = false,
             onViewportChanged = { bounds, zoom ->
@@ -262,7 +264,7 @@ private fun TerrainTab(
                 IconButton(onClick = { viewModel.rotateSunAzimuth(45f) }) {
                     Icon(Icons.Default.RotateRight, contentDescription = "Rotate light 45 degrees right")
                 }
-                IconButton(onClick = { viewportResetKey.intValue++ }) {
+                IconButton(onClick = { localViewportResetKey.intValue++ }) {
                     Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit terrain to screen")
                 }
                 IconButton(onClick = { showControls.value = !showControls.value }) {
@@ -298,7 +300,7 @@ private fun TerrainTab(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
             modifier = Modifier.align(Alignment.BottomStart).padding(14.dp),
         ) {
-            Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+            Column(modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
                 val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
                 val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
                 Text(
@@ -332,7 +334,7 @@ private fun TerrainTab(
                 )
                 Button(
                     onClick = { viewModel.refineTerrain(visibleBounds.value) },
-                    enabled = zoomLevel.value >= 1.5f && !isRefining,
+                    enabled = zoomLevel.value >= 2.0f && !isRefining,
                 ) {
                     Text(if (isRefining) "Reading original LAZ…" else "Load detail here")
                 }
