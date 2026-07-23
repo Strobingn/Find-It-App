@@ -176,26 +176,21 @@ private fun TerrainTab(
     val basemapBitmap by viewModel.basemapBitmap.collectAsStateWithLifecycle()
     val basemapStatus by viewModel.basemapStatus.collectAsStateWithLifecycle()
     val vmViewportReset by viewModel.viewportResetKey.collectAsStateWithLifecycle()
-    
-    // Viewport persistence
+
     val viewportZoom by viewModel.viewportZoom.collectAsStateWithLifecycle()
     val viewportPanX by viewModel.viewportPanX.collectAsStateWithLifecycle()
     val viewportPanY by viewModel.viewportPanY.collectAsStateWithLifecycle()
-    
+
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val showControls = rememberSaveable { mutableStateOf(false) }
     val localViewportResetKey = rememberSaveable { mutableIntStateOf(0) }
-    // Combine local "fit" button with ViewModel-driven resets (after 2× detail load / show whole)
     val viewportResetKey = vmViewportReset + localViewportResetKey.intValue
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }
     val context = LocalContext.current
 
-    // Auto-load higher-resolution detail from the original LAZ/LAS once the user pinches to ≥2.5×
-    // and the viewport settles. Debounced so continuous gestures don't spam reparse.
-    // Manual "Load detail here" button still works for immediate trigger.
     LaunchedEffect(visibleBounds.value, zoomLevel.value, canRefine) {
         if (canRefine && zoomLevel.value >= 2.5f) {
             delay(600)
@@ -307,7 +302,7 @@ private fun TerrainTab(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
             modifier = Modifier.align(Alignment.BottomStart).padding(14.dp),
         ) {
-            Column(modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
                 val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
                 val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
                 Text(
@@ -326,103 +321,67 @@ private fun TerrainTab(
         if (canRefine) Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            tonalElevation = 6.dp,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
+            tonalElevation = 4.dp,
+            modifier = Modifier.align(Alignment.CenterEnd).padding(14.dp),
         ) {
-            Column(
-                modifier = Modifier.padding(10.dp),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    "${zoomLevel.value.format(1)}× · pan to your target area",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Button(
+            Column(modifier = Modifier.padding(10.dp)) {
+                Text(if (isDetailed) "Detailed terrain" else "Detail available", fontWeight = FontWeight.Bold)
+                Text(detailMessage, style = MaterialTheme.typography.bodySmall)
+                TextButton(
                     onClick = { viewModel.refineTerrain(visibleBounds.value) },
-                    enabled = zoomLevel.value >= 2.5f && !isRefining, // Updated threshold to 2.5x
+                    enabled = !isRefining,
                 ) {
-                    Text(if (isRefining) "Reading original LAZ…" else "Load detail here")
+                    Text(if (isRefining) "Loading…" else "Load detail here")
                 }
-                if (isDetailed) TextButton(onClick = viewModel::showWholeTerrain) {
-                    Text("Whole file")
-                }
-                detailMessage?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                    )
+                TextButton(onClick = viewModel::showWholeTerrain) {
+                    Text("Show whole terrain")
                 }
             }
         }
 
         AnimatedVisibility(
             visible = showControls.value,
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
         ) {
-            Surface(
-                shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-                tonalElevation = 8.dp,
-                modifier = Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.72f),
-            ) {
-                LazyColumn(
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    item {
-                        Text(
-                            terrainSummary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    item {
-                        LidarControlPanel(
-                            selectedSiteIndex = site,
-                            onSiteSelected = viewModel::selectSite,
-                            sunAzimuth = azimuth,
-                            onSunAzimuthChanged = viewModel::updateSunAzimuth,
-                            sunAltitude = altitude,
-                            onSunAltitudeChanged = viewModel::updateSunAltitude,
-                            vegetationFilter = vegetation,
-                            onVegetationFilterChanged = viewModel::updateVegetationFilter,
-                            paletteType = palette,
-                            onPaletteTypeChanged = viewModel::updatePalette,
-                            contrast = contrast,
-                            onContrastChanged = viewModel::updateContrast,
-                            visualizationMode = visualization,
-                            onVisualizationModeChanged = viewModel::updateVisualizationMode,
-                            overlayType = overlay,
-                            onOverlayTypeChanged = viewModel::updateOverlayType,
-                            overlayOpacity = overlayOpacity,
-                            onOverlayOpacityChanged = viewModel::updateOverlayOpacity,
-                            gridSpacing = grid,
-                            onGridSpacingChanged = viewModel::updateGridSpacing,
-                            zScale = zScale,
-                            onZScaleChanged = viewModel::updateZScale,
-                            featureScaleMeters = featureScale,
-                            onFeatureScaleChanged = viewModel::updateFeatureScale,
-                            analysisSensitivity = sensitivity,
-                            onAnalysisSensitivityChanged = viewModel::updateAnalysisSensitivity,
-                            contourIntervalMeters = contourInterval,
-                            onContourIntervalChanged = viewModel::updateContourInterval,
-                            heatmapEnabled = heatmapEnabled,
-                            onHeatmapEnabledChanged = viewModel::setHeatmapEnabled,
-                            basemapEnabled = basemapEnabled,
-                            onBasemapEnabledChanged = viewModel::setBasemapEnabled,
-                            basemapOpacity = basemapOpacity,
-                            onBasemapOpacityChanged = viewModel::setBasemapOpacity,
-                            basemapStatus = basemapStatus,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
-            }
+            LidarControlPanel(
+                sunAzimuth = azimuth,
+                sunAltitude = altitude,
+                vegetationFilter = vegetation,
+                paletteType = palette,
+                contrast = contrast,
+                visualizationMode = visualization,
+                overlayType = overlay,
+                overlayOpacity = overlayOpacity,
+                gridSpacing = grid,
+                zScale = zScale,
+                featureScaleMeters = featureScale,
+                analysisSensitivity = sensitivity,
+                contourIntervalMeters = contourInterval,
+                heatmapEnabled = heatmapEnabled,
+                basemapEnabled = basemapEnabled,
+                basemapOpacity = basemapOpacity,
+                onSunAzimuthChanged = viewModel::setSunAzimuth,
+                onSunAltitudeChanged = viewModel::setSunAltitude,
+                onVegetationFilterChanged = viewModel::setVegetationFilter,
+                onPaletteTypeChanged = viewModel::setPaletteType,
+                onContrastChanged = viewModel::setContrast,
+                onVisualizationModeChanged = viewModel::setVisualizationMode,
+                onOverlayTypeChanged = viewModel::setOverlayType,
+                onOverlayOpacityChanged = viewModel::setOverlayOpacity,
+                onGridSpacingChanged = viewModel::setGridSpacing,
+                onZScaleChanged = viewModel::setZScale,
+                onFeatureScaleMetersChanged = viewModel::setFeatureScaleMeters,
+                onAnalysisSensitivityChanged = viewModel::setAnalysisSensitivity,
+                onContourIntervalMetersChanged = viewModel::setContourIntervalMeters,
+                onHeatmapEnabledChanged = viewModel::setHeatmapEnabled,
+                onBasemapEnabledChanged = viewModel::setBasemapEnabled,
+                onBasemapOpacityChanged = viewModel::setBasemapOpacity,
+                terrainSummary = terrainSummary,
+                currentSiteIndex = site,
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .heightIn(max = maxHeight * 0.88f),
+            )
         }
     }
 }
@@ -430,41 +389,89 @@ private fun TerrainTab(
 @Composable
 private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
-    val x by viewModel.sweepX.collectAsStateWithLifecycle()
-    val y by viewModel.sweepY.collectAsStateWithLifecycle()
-    TargetLoggerPanel(
-        loggedSignals = signals,
-        currentSweepX = x,
-        currentSweepY = y,
-        onLogSignal = viewModel::logCurrentSignal,
-        onDeleteSignal = viewModel::deleteLoggedSignal,
-        onUpdateSignal = viewModel::updateLoggedSignal,
-        onClearAll = viewModel::clearLoggedSignals,
-        modifier = Modifier.fillMaxSize().padding(padding),
-    )
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Text("Finds", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("Logged targets and field observations", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (signals.isEmpty()) {
+            item {
+                Surface(shape = RoundedCornerShape(14.dp), tonalElevation = 2.dp) {
+                    Text("No finds logged yet.", modifier = Modifier.padding(18.dp))
+                }
+            }
+        } else {
+            items(signals) { signal ->
+                Surface(shape = RoundedCornerShape(14.dp), tonalElevation = 2.dp) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(signal.label, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Grid ${signal.x.roundToInt()}, ${signal.y.roundToInt()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+        }
+        item { TargetLoggerPanel(viewModel = viewModel) }
+    }
 }
 
 @Composable
-private fun ImportTab(viewModel: HillshadeViewModel, padding: PaddingValues, onImported: () -> Unit) {
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
-        item {
-            CustomFileLoader(
-                onCustomTerrainLoaded = { result, source ->
-                    viewModel.setCustomTerrain(result, source)
-                    onImported()
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
+private fun ImportTab(
+    viewModel: HillshadeViewModel,
+    padding: PaddingValues,
+    onImported: () -> Unit,
+) {
+    val importStatus by viewModel.importStatus.collectAsStateWithLifecycle()
+    Column(
+        modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Text("Import terrain", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Open GeoTIFF, TIFF, LAS, LAZ, or ASCII elevation data from device storage.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        CustomFileLoader(
+            onFileSelected = { uri ->
+                viewModel.importTerrain(uri)
+                onImported()
+            },
+        )
+        importStatus?.let { status ->
+            Surface(shape = RoundedCornerShape(14.dp), tonalElevation = 2.dp) {
+                Text(
+                    status,
+                    modifier = Modifier.padding(16.dp),
+                    maxLines = 5,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Button(onClick = viewModel::loadSampleTerrain) {
+            Text("Load sample terrain")
         }
     }
 }
 
-private fun Double.format(places: Int) = String.format(Locale.US, "%.${places}f", this)
-
-private fun Float.format(places: Int) = toDouble().format(places)
-
 private fun compassLabel(azimuth: Float): String {
-    val directions = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
     val normalized = ((azimuth % 360f) + 360f) % 360f
-    return directions[((normalized / 45f).roundToInt()).mod(directions.size)]
+    return when {
+        normalized < 22.5f || normalized >= 337.5f -> "N"
+        normalized < 67.5f -> "NE"
+        normalized < 112.5f -> "E"
+        normalized < 157.5f -> "SE"
+        normalized < 202.5f -> "S"
+        normalized < 247.5f -> "SW"
+        normalized < 292.5f -> "W"
+        else -> "NW"
+    }
 }
+
+private fun Double.format(decimals: Int): String = String.format(Locale.US, "%.${decimals}f", this)
+private fun Float.format(decimals: Int): String = toDouble().format(decimals)
