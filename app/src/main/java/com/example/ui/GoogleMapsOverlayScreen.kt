@@ -26,7 +26,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -38,6 +37,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.rememberCameraPositionState
@@ -47,47 +47,42 @@ import kotlinx.coroutines.delay
 fun GoogleMapsOverlayScreen() {
     val context = LocalContext.current
     val cameraPositionState = rememberCameraPositionState {
-        position = LatLng(37.422, -122.084) // Default: Google HQ
+        position = CameraPosition.fromLatLngZoom(
+            LatLng(37.422, -122.084),
+            15f,
+        )
     }
-    
-    // Image state
+
     val imageBitmap = remember { mutableStateOf<Bitmap?>(null) }
-    val imagePosition = remember { mutableStateOf<Offset>(Offset.Zero) }
+    val imagePosition = remember { mutableStateOf(Offset.Zero) }
     val imageRotation = remember { mutableStateOf(0f) }
     val imageScale = remember { mutableStateOf(1f) }
     val imageOpacity = remember { mutableStateOf(0.7f) }
-    
-    // Image picker
+
     val imagePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.GetContent(),
     ) { uri: Uri? ->
         uri?.let {
-            val inputStream = context.contentResolver.openInputStream(it)
-            imageBitmap.value = BitmapFactory.decodeStream(inputStream)
+            context.contentResolver.openInputStream(it)?.use { inputStream ->
+                imageBitmap.value = BitmapFactory.decodeStream(inputStream)
+            }
         }
     }
 
-    // Auto-center the image initially
     LaunchedEffect(imageBitmap.value) {
         if (imageBitmap.value != null) {
-            delay(100) // Small delay to ensure the map is ready
+            delay(100)
             imagePosition.value = Offset.Zero
             imageRotation.value = 0f
             imageScale.value = 1f
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {}
-    ) {
-        // Google Map
+    Box(modifier = Modifier.fillMaxSize()) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
         ) {
-            // Image overlay (if loaded)
             imageBitmap.value?.let { bitmap ->
                 Box(
                     modifier = Modifier
@@ -98,11 +93,11 @@ fun GoogleMapsOverlayScreen() {
                                 imageScale.value = (imageScale.value * zoom).coerceIn(0.1f, 5f)
                                 imageRotation.value += rotation
                             }
-                        }
+                        },
                 ) {
                     Image(
                         bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Overlay Image",
+                        contentDescription = "Overlay image",
                         modifier = Modifier
                             .align(Alignment.Center)
                             .graphicsLayer {
@@ -115,8 +110,9 @@ fun GoogleMapsOverlayScreen() {
                             }
                             .size(256.dp)
                             .pointerInput(Unit) {
-                                detectDragGestures { change, _ ->
-                                    imagePosition.value += Offset(change.position.x, change.position.y)
+                                detectDragGestures { change, dragAmount ->
+                                    change.consume()
+                                    imagePosition.value += dragAmount
                                 }
                             },
                         contentScale = ContentScale.Fit,
@@ -125,47 +121,50 @@ fun GoogleMapsOverlayScreen() {
             }
         }
 
-        // Control panel for image manipulation
         if (imageBitmap.value != null) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(16.dp)
+                    .padding(16.dp),
             ) {
-                // Rotation controls
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { imageRotation.value -= 15f }) {
-                        Icon(Icons.Default.RotateLeft, contentDescription = "Rotate Left")
+                        Icon(Icons.Default.RotateLeft, contentDescription = "Rotate left")
                     }
                     Text("Rotation: ${imageRotation.value.toInt()}°")
                     IconButton(onClick = { imageRotation.value += 15f }) {
-                        Icon(Icons.Default.RotateRight, contentDescription = "Rotate Right")
+                        Icon(Icons.Default.RotateRight, contentDescription = "Rotate right")
                     }
                 }
-                
-                // Scale controls
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { imageScale.value = (imageScale.value * 0.9f).coerceIn(0.1f, 5f) }) {
-                        Icon(Icons.Default.Remove, contentDescription = "Zoom Out")
+                    IconButton(
+                        onClick = {
+                            imageScale.value = (imageScale.value * 0.9f).coerceIn(0.1f, 5f)
+                        },
+                    ) {
+                        Icon(Icons.Default.Remove, contentDescription = "Zoom out")
                     }
                     Text("Scale: ${"%.1f".format(imageScale.value)}x")
-                    IconButton(onClick = { imageScale.value = (imageScale.value * 1.1f).coerceIn(0.1f, 5f) }) {
-                        Icon(Icons.Default.Add, contentDescription = "Zoom In")
+                    IconButton(
+                        onClick = {
+                            imageScale.value = (imageScale.value * 1.1f).coerceIn(0.1f, 5f)
+                        },
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Zoom in")
                     }
                 }
-                
-                // Opacity controls
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Opacity: ${"%.1f".format(imageOpacity.value * 100)}%")
+                    Text("Opacity: ${"%.0f".format(imageOpacity.value * 100)}%")
                     Slider(
                         value = imageOpacity.value,
                         onValueChange = { imageOpacity.value = it },
                         valueRange = 0f..1f,
-                        modifier = Modifier.padding(horizontal = 8.dp)
+                        modifier = Modifier.padding(horizontal = 8.dp),
                     )
                 }
-                
-                // Reset button
+
                 Button(
                     onClick = {
                         imagePosition.value = Offset.Zero
@@ -173,21 +172,20 @@ fun GoogleMapsOverlayScreen() {
                         imageScale.value = 1f
                         imageOpacity.value = 0.7f
                     },
-                    modifier = Modifier.padding(top = 8.dp)
+                    modifier = Modifier.padding(top = 8.dp),
                 ) {
-                    Text("Reset Overlay")
+                    Text("Reset overlay")
                 }
             }
         }
 
-        // Button to import image
         Button(
             onClick = { imagePickerLauncher.launch("image/*") },
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(16.dp)
+                .padding(16.dp),
         ) {
-            Text("Import Image")
+            Text("Import image")
         }
     }
 }

@@ -27,6 +27,11 @@ class SettingsRepository(private val settingDao: SettingDao) {
         const val HEATMAP_ENABLED = "heatmap_enabled"
         const val BASEMAP_ENABLED = "basemap_enabled"
         const val BASEMAP_OPACITY = "basemap_opacity"
+        
+        // New keys for viewport persistence
+        const val VIEWPORT_ZOOM = "viewport_zoom"
+        const val VIEWPORT_PAN_X = "viewport_pan_x"
+        const val VIEWPORT_PAN_Y = "viewport_pan_y"
     }
 
     suspend fun saveString(key: String, value: String) {
