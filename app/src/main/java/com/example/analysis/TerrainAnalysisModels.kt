@@ -1,5 +1,7 @@
 package com.example.analysis
 
+import kotlin.math.sqrt
+
 /** Roadmap grouping used by the Analysis UI. Hydrology remains implemented but is intentionally last. */
 enum class TerrainAnalysisPhase {
     CORE,
@@ -148,9 +150,32 @@ data class TerrainAnalysisLayer(
     val summary: String,
 ) {
     init {
+        require(width > 0 && height > 0)
         require(values.size == width * height)
         require(validData.size == width * height)
+        require(cellSizeMeters > 0f && cellSizeMeters.isFinite())
     }
+
+    val validCellCount: Int
+        get() = validData.count { it }
+
+    val coveragePercent: Float
+        get() = if (validData.isEmpty()) 0f else validCellCount * 100f / validData.size
+
+    val standardDeviation: Float
+        get() {
+            var squaredDifferenceSum = 0.0
+            var count = 0
+            for (index in values.indices) {
+                if (!validData[index]) continue
+                val value = values[index]
+                if (!value.isFinite() || type == TerrainAnalysisType.ASPECT && value < 0f) continue
+                val difference = value - mean
+                squaredDifferenceSum += difference * difference
+                count++
+            }
+            return if (count == 0) 0f else sqrt(squaredDifferenceSum / count).toFloat()
+        }
 
     fun aiSummary(): String = buildString {
         append(type.title)
@@ -162,10 +187,14 @@ data class TerrainAnalysisLayer(
         append(height)
         append(", cell size ")
         append("%.2f".format(cellSizeMeters))
-        append(" m, min ")
+        append(" m, valid coverage ")
+        append("%.1f".format(coveragePercent))
+        append("%, min ")
         append("%.4f".format(minimum))
         append(", mean ")
         append("%.4f".format(mean))
+        append(", standard deviation ")
+        append("%.4f".format(standardDeviation))
         append(", p95 ")
         append("%.4f".format(percentile95))
         append(", max ")
