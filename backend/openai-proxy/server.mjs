@@ -113,6 +113,7 @@ const server = http.createServer(async (request, response) => {
       },
       body: JSON.stringify({
         model,
+        store: false,
         instructions: [
           "You are a LiDAR terrain interpretation assistant for responsible metal-detecting field research.",
           "Treat computed layers as screening evidence, never proof of archaeological origin.",
