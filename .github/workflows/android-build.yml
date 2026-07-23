@@ -1,7 +1,5 @@
 name: Find-it-appAPK
-      - mitral-V16
-      - mitral-v15
-      - Mistral-V17
+
 on:
   push:
     branches:
@@ -13,6 +11,7 @@ on:
       - mitral-V16
       - mitral-v15
       - Mistral-V17
+      - Mistral-V20
       - "feature/**"
       - "fix/**"
   pull_request:
