@@ -4,15 +4,15 @@ import java.io.File
 import java.util.LinkedHashMap
 
 /**
- * Small byte-bounded LRU cache for decoded LAZ/LAS rasters.
+ * Byte-bounded LRU cache for decoded LAZ/LAS rasters.
  *
  * Reopening a saved dataset with the same import options can reuse the already decoded DEM instead
  * of scanning the full point cloud again. The source file remains authoritative: size or timestamp
- * changes produce a different key. This is intentionally an in-memory Phase 2 foundation; disk
- * pyramid and spatial-index sidecars can build on the same key format later.
+ * changes produce a different key. The default limit scales from the actual large-heap ceiling
+ * granted by Android on the current device.
  */
 class LazTerrainMemoryCache(
-    private val maxBytes: Long = 64L * 1024L * 1024L,
+    private val maxBytes: Long = AppMemoryBudget.terrainMemoryCacheBytes(),
 ) {
     private data class CacheKey(
         val canonicalPath: String,
@@ -55,6 +55,11 @@ class LazTerrainMemoryCache(
         entries.clear()
         currentBytes = 0L
     }
+
+    @Synchronized
+    fun sizeBytes(): Long = currentBytes
+
+    fun limitBytes(): Long = maxBytes
 
     private fun trimToLimit() {
         val iterator = entries.entries.iterator()
