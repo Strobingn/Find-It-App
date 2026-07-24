@@ -16,9 +16,15 @@ enum class AnalysisPalette(val title: String) {
 data class TerrainRenderOptions(
     val palette: AnalysisPalette = AnalysisPalette.AUTO,
     val contrast: Float = 1f,
+    val brightness: Float = 1f,
+    val opacity: Float = 1f,
     val inverted: Boolean = false,
 ) {
-    fun sanitized(): TerrainRenderOptions = copy(contrast = contrast.coerceIn(0.5f, 3f))
+    fun sanitized(): TerrainRenderOptions = copy(
+        contrast = contrast.coerceIn(0.5f, 3f),
+        brightness = brightness.coerceIn(0.5f, 1.75f),
+        opacity = opacity.coerceIn(0.1f, 1f),
+    )
 }
 
 object TerrainAnalysisRenderer {
@@ -48,7 +54,7 @@ object TerrainAnalysisRenderer {
                 else -> ((value - robust.first) / range).coerceIn(0f, 1f)
             }.let { applyContrast(it, safe.contrast, safe.inverted) }
 
-            pixels[index] = when {
+            val baseColor = when {
                 layer.type == TerrainAnalysisType.ASPECT -> aspectColor(value, safe)
                 layer.type == TerrainAnalysisType.WATERSHED -> watershedColor(value.toInt())
                 safe.palette == AnalysisPalette.GRAYSCALE -> grayscale(normalized)
@@ -71,6 +77,7 @@ object TerrainAnalysisRenderer {
                     layer.type == TerrainAnalysisType.ANCIENT_STREAM_LIKELIHOOD -> hotspotColor(normalized)
                 else -> sequentialColor(normalized)
             }
+            pixels[index] = applyDisplayAdjustments(baseColor, safe.brightness, safe.opacity)
         }
         bitmap.setPixels(pixels, 0, layer.width, 0, 0, layer.width, layer.height)
         return bitmap
@@ -81,6 +88,17 @@ object TerrainAnalysisRenderer {
         val gamma = 1.0 / contrast.coerceIn(0.5f, 3f)
         val adjusted = clamped.toDouble().pow(gamma).toFloat().coerceIn(0f, 1f)
         return if (inverted) 1f - adjusted else adjusted
+    }
+
+    private fun applyDisplayAdjustments(color: Int, brightness: Float, opacity: Float): Int {
+        val scale = brightness.coerceIn(0.5f, 1.75f)
+        val alpha = (Color.alpha(color) * opacity.coerceIn(0.1f, 1f)).roundToInt().coerceIn(0, 255)
+        return Color.argb(
+            alpha,
+            (Color.red(color) * scale).roundToInt().coerceIn(0, 255),
+            (Color.green(color) * scale).roundToInt().coerceIn(0, 255),
+            (Color.blue(color) * scale).roundToInt().coerceIn(0, 255),
+        )
     }
 
     private fun Float.copySignMagnitude(magnitude: Float): Float = if (this < 0f) -magnitude else magnitude
