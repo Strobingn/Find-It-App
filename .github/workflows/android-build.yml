@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create local.properties before Gradle setup
         shell: bash
@@ -40,13 +40,13 @@ jobs:
           test -f "$GITHUB_WORKSPACE/local.properties"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "17"
           distribution: "temurin"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Require Gradle wrapper
         run: |
@@ -79,17 +79,17 @@ jobs:
 
       - name: Unit tests
         continue-on-error: true
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace --no-configuration-cache
 
       - name: Compute safe ref name for artifacts
         id: safe_ref
         run: echo "value=$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lidar-metal-detector-debug-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
@@ -98,11 +98,11 @@ jobs:
 
       - name: Build Release APK (unsigned OK)
         continue-on-error: true
-        run: ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleRelease --stacktrace --no-configuration-cache
 
       - name: Upload Release APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lidar-metal-detector-release-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
