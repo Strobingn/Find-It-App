@@ -82,7 +82,6 @@ jobs:
           fi
 
       - name: Unit tests
-        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -94,6 +93,12 @@ jobs:
           set -o pipefail
           ./gradlew assembleDebug --stacktrace --no-configuration-cache 2>&1 | tee build-debug.log
 
+      - name: Build Release APK
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --stacktrace --no-configuration-cache 2>&1 | tee build-release.log
+
       - name: Upload build diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
@@ -101,6 +106,7 @@ jobs:
           name: build-diagnostics-${{ github.run_number }}
           path: |
             build-debug.log
+            build-release.log
             unit-test.log
           if-no-files-found: warn
           retention-days: 14
@@ -117,15 +123,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Build Release APK (unsigned OK)
-        continue-on-error: true
-        run: ./gradlew assembleRelease --stacktrace --no-configuration-cache
-
       - name: Upload Release APK
-        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: lidar-metal-detector-release-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
