@@ -2,21 +2,21 @@ package com.example.ui
 
 import android.graphics.Bitmap
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap as composeAsImageBitmap
 
 /**
- * Safe Compose bridge for terrain previews while the asynchronous hillshade bitmap is still loading.
- * The transparent pixel is replaced automatically as soon as HillshadeViewModel publishes terrain.
+ * Allows the Analysis screen to render safely while the terrain hillshade is still loading.
+ * A transparent 1x1 bitmap is used only until HillshadeViewModel publishes the real bitmap.
  */
 private val transparentFallbackBitmap: Bitmap by lazy {
     Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
 }
 
-internal val Bitmap?.safeWidth: Int
+internal val Bitmap?.width: Int
     get() = this?.width?.coerceAtLeast(1) ?: 1
 
-internal val Bitmap?.safeHeight: Int
+internal val Bitmap?.height: Int
     get() = this?.height?.coerceAtLeast(1) ?: 1
 
-internal fun Bitmap?.safeAsImageBitmap(): ImageBitmap =
-    (this?.takeUnless(Bitmap::isRecycled) ?: transparentFallbackBitmap).asImageBitmap()
+internal fun Bitmap?.asImageBitmap(): ImageBitmap =
+    (this?.takeUnless(Bitmap::isRecycled) ?: transparentFallbackBitmap).composeAsImageBitmap()
