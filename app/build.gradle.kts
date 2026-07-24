@@ -51,8 +51,8 @@ val hasReleaseSigning =
 
 plugins {
   alias(libs.plugins.android.application)
+  alias(libs.plugins.legacy.kapt)
   alias(libs.plugins.kotlin.compose)
-  alias(libs.plugins.google.devtools.ksp)
 }
 
 android {
@@ -163,5 +163,5 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  "ksp"(libs.androidx.room.compiler)
+  add("kapt", libs.androidx.room.compiler)
 }
