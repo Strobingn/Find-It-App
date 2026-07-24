@@ -14,16 +14,25 @@ fun parseDotEnv(file: File): Map<String, String> {
 fun quotedBuildConfig(value: String): String =
   "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+fun usableSecret(value: String?): String {
+  val cleaned = value?.trim().orEmpty()
+  if (cleaned.isBlank()) return ""
+  val upper = cleaned.uppercase()
+  if (upper.startsWith("YOUR_") || upper.startsWith("MY_") || upper.contains("PLACEHOLDER")) return ""
+  return cleaned
+}
+
 val localProperties = Properties().apply {
   val file = rootProject.file("local.properties")
   if (file.isFile) file.inputStream().use(::load)
 }
 val dotEnv = parseDotEnv(rootProject.file(".env"))
 fun projectSecret(name: String): String =
-  System.getenv(name)?.takeIf(String::isNotBlank)
-    ?: localProperties.getProperty(name)?.takeIf(String::isNotBlank)
-    ?: dotEnv[name]?.takeIf(String::isNotBlank)
-    ?: ""
+  usableSecret(System.getenv(name)).ifBlank {
+    usableSecret(localProperties.getProperty(name)).ifBlank {
+      usableSecret(dotEnv[name])
+    }
+  }
 
 val geminiApiKey = projectSecret("GEMINI_API_KEY").ifBlank { projectSecret("GOOGLE_API_KEY") }
 val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-2.5-flash" }
