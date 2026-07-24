@@ -78,14 +78,14 @@ fun TerrainGoogleMapScreen(
     val context = LocalContext.current
     val mapView = rememberManagedMapView()
     var googleMap by remember { mutableStateOf<GoogleMap?>(null) }
-    var groundOverlay by remember { mutableStateOf<GroundOverlay?>(null) }
-    var mapCenter by remember { mutableStateOf(LatLng(39.5, -98.35)) }
+    var overlay by remember { mutableStateOf<GroundOverlay?>(null) }
+    var cameraCenter by remember { mutableStateOf(LatLng(39.5, -98.35)) }
     var manualBounds by remember(metadata.siteName) {
         mutableStateOf<GeoSpatialLibrary.GeographicBounds?>(null)
     }
-    var overlayOpacity by rememberSaveable { mutableFloatStateOf(0.72f) }
+    var opacity by rememberSaveable { mutableFloatStateOf(0.72f) }
     var mapType by rememberSaveable { mutableStateOf(GoogleMap.MAP_TYPE_HYBRID) }
-    var showBoundsDialog by rememberSaveable { mutableStateOf(false) }
+    var editBounds by rememberSaveable { mutableStateOf(false) }
     val activeBounds = manualBounds ?: metadata.bounds
 
     DisposableEffect(mapView) {
@@ -95,13 +95,12 @@ fun TerrainGoogleMapScreen(
             map.uiSettings.isCompassEnabled = true
             map.uiSettings.isMapToolbarEnabled = false
             map.uiSettings.isZoomControlsEnabled = false
-            map.uiSettings.isMyLocationButtonEnabled = false
-            map.setOnCameraIdleListener { mapCenter = map.cameraPosition.target }
-            val hasLocation = ContextCompat.checkSelfPermission(
+            map.setOnCameraIdleListener { cameraCenter = map.cameraPosition.target }
+            val hasLocationPermission = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.ACCESS_FINE_LOCATION,
             ) == PackageManager.PERMISSION_GRANTED
-            if (hasLocation) {
+            if (hasLocationPermission) {
                 runCatching {
                     map.isMyLocationEnabled = true
                     map.uiSettings.isMyLocationButtonEnabled = true
@@ -109,7 +108,7 @@ fun TerrainGoogleMapScreen(
             }
         }
         onDispose {
-            groundOverlay?.remove()
+            overlay?.remove()
             googleMap = null
         }
     }
@@ -118,163 +117,174 @@ fun TerrainGoogleMapScreen(
         googleMap?.mapType = mapType
     }
 
-    LaunchedEffect(googleMap, terrainBitmap, activeBounds, overlayOpacity) {
+    LaunchedEffect(googleMap, terrainBitmap, activeBounds, opacity) {
         val map = googleMap ?: return@LaunchedEffect
-        groundOverlay?.remove()
-        groundOverlay = null
+        overlay?.remove()
+        overlay = null
         val bitmap = terrainBitmap?.takeIf { !it.isRecycled } ?: return@LaunchedEffect
         val bounds = activeBounds ?: return@LaunchedEffect
-        val mapBounds = bounds.toLatLngBounds()
-        groundOverlay = map.addGroundOverlay(
+        val latLngBounds = bounds.toLatLngBounds()
+        overlay = map.addGroundOverlay(
             GroundOverlayOptions()
                 .image(BitmapDescriptorFactory.fromBitmap(bitmap))
-                .positionFromBounds(mapBounds)
-                .transparency(1f - overlayOpacity.coerceIn(0.05f, 1f))
-                .zIndex(4f)
-                .clickable(false),
+                .positionFromBounds(latLngBounds)
+                .transparency(1f - opacity.coerceIn(0.1f, 1f))
+                .zIndex(4f),
         )
         mapView.post {
-            runCatching { map.animateCamera(CameraUpdateFactory.newLatLngBounds(mapBounds, 72)) }
-                .onFailure { map.moveCamera(CameraUpdateFactory.newLatLngZoom(mapBounds.center, 16f)) }
+            runCatching { map.animateCamera(CameraUpdateFactory.newLatLngBounds(latLngBounds, 72)) }
+                .onFailure { map.moveCamera(CameraUpdateFactory.newLatLngZoom(latLngBounds.center, 16f)) }
         }
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { mapView },
-            modifier = Modifier.fillMaxSize(),
+    Box(modifier.fillMaxSize()) {
+        AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+
+        OverlayHeader(
+            mapType = mapType,
+            onMapTypeChanged = { mapType = it },
+            status = when {
+                BuildConfig.MAPS_API_KEY.isBlank() -> "MAPS_API_KEY is missing from .env/local.properties"
+                terrainBitmap == null -> "Render or import a terrain layer first"
+                activeBounds == null -> "Move the map, then place the LAZ image at the map center"
+                manualBounds != null -> "Manually aligned on Google Maps"
+                else -> "Using geographic bounds from the terrain file"
+            },
+            isError = BuildConfig.MAPS_API_KEY.isBlank(),
+            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(0.96f),
         )
 
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-            ),
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(0.96f),
-        ) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                    ) {
-                        Icon(
-                            Icons.Default.Layers,
-                            contentDescription = null,
-                            modifier = Modifier.padding(9.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("Rendered LiDAR overlay", fontWeight = FontWeight.Bold)
-                        Text(
-                            when {
-                                BuildConfig.MAPS_API_KEY.isBlank() -> "MAPS_API_KEY is missing from .env/local.properties"
-                                terrainBitmap == null -> "Render or import a terrain layer first"
-                                activeBounds == null -> "Position the LAZ image using map center or exact bounds"
-                                manualBounds != null -> "Manually aligned on Google Maps"
-                                else -> "Using geographic bounds from the terrain file"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (BuildConfig.MAPS_API_KEY.isBlank()) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    MapTypeChip("Map", GoogleMap.MAP_TYPE_NORMAL, mapType) { mapType = it }
-                    MapTypeChip("Satellite", GoogleMap.MAP_TYPE_SATELLITE, mapType) { mapType = it }
-                    MapTypeChip("Hybrid", GoogleMap.MAP_TYPE_HYBRID, mapType) { mapType = it }
-                    MapTypeChip("Terrain", GoogleMap.MAP_TYPE_TERRAIN, mapType) { mapType = it }
-                }
-            }
-        }
-
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-            ),
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
-        ) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Overlay opacity", style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.weight(1f))
-                    Text("${(overlayOpacity * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
-                }
-                Slider(
-                    value = overlayOpacity,
-                    onValueChange = { overlayOpacity = it },
-                    valueRange = 0.1f..1f,
+        OverlayControls(
+            opacity = opacity,
+            onOpacityChanged = { opacity = it },
+            canPlace = terrainBitmap != null,
+            canRestoreFileBounds = metadata.bounds != null && manualBounds != null,
+            onPlaceAtCenter = {
+                manualBounds = boundsCenteredAt(
+                    center = cameraCenter,
+                    widthMeters = (grid.width - 1).coerceAtLeast(1) * grid.cellSizeMeters,
+                    heightMeters = (grid.height - 1).coerceAtLeast(1) * grid.cellSizeMeters,
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(
-                        onClick = {
-                            manualBounds = boundsCenteredAt(
-                                center = mapCenter,
-                                widthMeters = (grid.width - 1).coerceAtLeast(1) * grid.cellSizeMeters,
-                                heightMeters = (grid.height - 1).coerceAtLeast(1) * grid.cellSizeMeters,
-                            )
-                        },
-                        enabled = terrainBitmap != null,
-                    ) {
-                        Icon(Icons.Default.CenterFocusStrong, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Place at map center")
-                    }
-                    OutlinedButton(onClick = { showBoundsDialog = true }) {
-                        Icon(Icons.Default.EditLocationAlt, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Exact bounds")
-                    }
-                    if (metadata.bounds != null && manualBounds != null) {
-                        OutlinedButton(onClick = { manualBounds = null }) {
-                            Icon(Icons.Default.MyLocation, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Use file bounds")
-                        }
-                    }
-                }
-            }
-        }
+            },
+            onEditBounds = { editBounds = true },
+            onRestoreFileBounds = { manualBounds = null },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
+        )
     }
 
-    if (showBoundsDialog) {
+    if (editBounds) {
         BoundsEditorDialog(
             initial = activeBounds,
-            onDismiss = { showBoundsDialog = false },
+            onDismiss = { editBounds = false },
             onApply = {
                 manualBounds = it
-                showBoundsDialog = false
+                editBounds = false
             },
         )
     }
 }
 
 @Composable
-private fun MapTypeChip(
-    label: String,
-    type: Int,
-    selectedType: Int,
-    onSelected: (Int) -> Unit,
+private fun OverlayHeader(
+    mapType: Int,
+    onMapTypeChanged: (Int) -> Unit,
+    status: String,
+    isError: Boolean,
+    modifier: Modifier = Modifier,
 ) {
-    FilterChip(
-        selected = type == selectedType,
-        onClick = { onSelected(type) },
-        label = { Text(label) },
-    )
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)),
+        shape = RoundedCornerShape(18.dp),
+        modifier = modifier,
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(
+                        Icons.Default.Layers,
+                        contentDescription = null,
+                        modifier = Modifier.padding(9.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Rendered LiDAR overlay", fontWeight = FontWeight.Bold)
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    "Map" to GoogleMap.MAP_TYPE_NORMAL,
+                    "Satellite" to GoogleMap.MAP_TYPE_SATELLITE,
+                    "Hybrid" to GoogleMap.MAP_TYPE_HYBRID,
+                    "Terrain" to GoogleMap.MAP_TYPE_TERRAIN,
+                ).forEach { (label, type) ->
+                    FilterChip(
+                        selected = mapType == type,
+                        onClick = { onMapTypeChanged(type) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OverlayControls(
+    opacity: Float,
+    onOpacityChanged: (Float) -> Unit,
+    canPlace: Boolean,
+    canRestoreFileBounds: Boolean,
+    onPlaceAtCenter: () -> Unit,
+    onEditBounds: () -> Unit,
+    onRestoreFileBounds: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)),
+        shape = RoundedCornerShape(18.dp),
+        modifier = modifier,
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Overlay opacity", style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.weight(1f))
+                Text("${(opacity * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+            }
+            Slider(value = opacity, onValueChange = onOpacityChanged, valueRange = 0.1f..1f)
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = onPlaceAtCenter, enabled = canPlace) {
+                    Icon(Icons.Default.CenterFocusStrong, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Place at map center")
+                }
+                OutlinedButton(onClick = onEditBounds) {
+                    Icon(Icons.Default.EditLocationAlt, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Exact bounds")
+                }
+                if (canRestoreFileBounds) {
+                    OutlinedButton(onClick = onRestoreFileBounds) {
+                        Icon(Icons.Default.MyLocation, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Use file bounds")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -287,7 +297,7 @@ private fun BoundsEditorDialog(
     var north by remember(initial) { mutableStateOf(initial?.maxLat?.toString().orEmpty()) }
     var west by remember(initial) { mutableStateOf(initial?.minLon?.toString().orEmpty()) }
     var east by remember(initial) { mutableStateOf(initial?.maxLon?.toString().orEmpty()) }
-    val parsed = remember(south, north, west, east) {
+    val bounds = remember(south, north, west, east) {
         val s = south.toDoubleOrNull()
         val n = north.toDoubleOrNull()
         val w = west.toDoubleOrNull()
@@ -295,11 +305,7 @@ private fun BoundsEditorDialog(
         if (s != null && n != null && w != null && e != null &&
             s in -90.0..90.0 && n in -90.0..90.0 &&
             w in -180.0..180.0 && e in -180.0..180.0 && n > s && e > w
-        ) {
-            GeoSpatialLibrary.GeographicBounds(s, n, w, e)
-        } else {
-            null
-        }
+        ) GeoSpatialLibrary.GeographicBounds(s, n, w, e) else null
     }
 
     AlertDialog(
@@ -308,7 +314,7 @@ private fun BoundsEditorDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Enter the WGS84 footprint. This is required when a LAZ file does not expose geographic bounds the app can recognize.",
+                    "Enter the WGS84 south, north, west, and east footprint for the LAZ image.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -322,9 +328,7 @@ private fun BoundsEditorDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { parsed?.let(onApply) }, enabled = parsed != null) {
-                Text("Apply")
-            }
+            TextButton(onClick = { bounds?.let(onApply) }, enabled = bounds != null) { Text("Apply") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -360,42 +364,36 @@ private fun rememberManagedMapView(): MapView {
                 Lifecycle.Event.ON_RESUME -> mapView.onResume()
                 Lifecycle.Event.ON_PAUSE -> mapView.onPause()
                 Lifecycle.Event.ON_STOP -> mapView.onStop()
-                Lifecycle.Event.ON_LOW_MEMORY -> mapView.onLowMemory()
+                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
                 else -> Unit
             }
         }
         lifecycle.addObserver(observer)
         onDispose {
             lifecycle.removeObserver(observer)
-            mapView.onPause()
-            mapView.onStop()
-            mapView.onDestroy()
+            runCatching { mapView.onPause() }
+            runCatching { mapView.onStop() }
+            runCatching { mapView.onDestroy() }
         }
     }
     return mapView
 }
 
 private fun GeoSpatialLibrary.GeographicBounds.toLatLngBounds(): LatLngBounds =
-    LatLngBounds(
-        LatLng(minLat, minLon),
-        LatLng(maxLat, maxLon),
-    )
+    LatLngBounds(LatLng(minLat, minLon), LatLng(maxLat, maxLon))
 
 private fun boundsCenteredAt(
     center: LatLng,
     widthMeters: Float,
     heightMeters: Float,
 ): GeoSpatialLibrary.GeographicBounds {
-    val safeWidth = widthMeters.coerceAtLeast(1f).toDouble()
-    val safeHeight = heightMeters.coerceAtLeast(1f).toDouble()
-    val halfLatDegrees = safeHeight / 111_320.0 / 2.0
-    val longitudeMetersPerDegree = (111_320.0 * cos(Math.toRadians(center.latitude)))
-        .coerceAtLeast(10_000.0)
-    val halfLonDegrees = safeWidth / longitudeMetersPerDegree / 2.0
+    val halfLat = heightMeters.coerceAtLeast(1f) / 111_320.0 / 2.0
+    val metersPerLongitudeDegree = (111_320.0 * cos(Math.toRadians(center.latitude))).coerceAtLeast(10_000.0)
+    val halfLon = widthMeters.coerceAtLeast(1f) / metersPerLongitudeDegree / 2.0
     return GeoSpatialLibrary.GeographicBounds(
-        minLat = (center.latitude - halfLatDegrees).coerceAtLeast(-90.0),
-        maxLat = (center.latitude + halfLatDegrees).coerceAtMost(90.0),
-        minLon = (center.longitude - halfLonDegrees).coerceAtLeast(-180.0),
-        maxLon = (center.longitude + halfLonDegrees).coerceAtMost(180.0),
+        minLat = (center.latitude - halfLat).coerceAtLeast(-90.0),
+        maxLat = (center.latitude + halfLat).coerceAtMost(90.0),
+        minLon = (center.longitude - halfLon).coerceAtLeast(-180.0),
+        maxLon = (center.longitude + halfLon).coerceAtMost(180.0),
     )
 }
