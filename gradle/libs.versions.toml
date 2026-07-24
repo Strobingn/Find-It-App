@@ -10,7 +10,6 @@ lifecycleRuntimeCompose = "2.8.7"
 activityCompose = "1.10.1"
 kotlin = "2.2.10"
 composeBom = "2024.09.00"
-googleDevtoolsKsp = "2.3.5"
 navigationCompose = "2.8.9"
 roomRuntime = "2.7.0"
 roomKtx = "2.7.0"
@@ -25,6 +24,7 @@ kotlinxCoroutinesAndroid = "1.10.2"
 kotlinxCoroutinesCore = "1.10.2"
 accompanistPermissions = "0.37.3"
 playServicesLocation = "21.3.0"
+playServicesMaps = "20.0.0"
 cameraCamera2 = "1.5.0"
 cameraLifecycle = "1.5.0"
 cameraView = "1.5.0"
@@ -79,6 +79,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanistPermissions" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
+play-services-maps = { group = "com.google.android.gms", name = "play-services-maps", version.ref = "playServicesMaps" }
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraCamera2" }
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraLifecycle" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraView" }
@@ -90,23 +91,15 @@ moshi-kotlin-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-code
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastorePreferences" }
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 roborazzi = { group = "io.github.takahirom.roborazzi", name = "roborazzi", version.ref = "roborazzi" }
-roborazzi-compose = { group = "io.github.takahirom.roborazzi", name = "roborazzi-compose", version.ref = "roborazzi" }
-roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
-firebase-ai = { group = "com.google.firebase", name = "firebase-ai" }
-firebase-appcheck-recaptcha = { group = "com.google.firebase", name = "firebase-appcheck-recaptcha" }
-firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore" }
-firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
+secrets-gradle-plugin = { group = "com.google.android.libraries.mapsplatform.secrets-gradle-plugin", name = "secrets-gradle-plugin", version.ref = "secretsGradlePlugin" }
+google-services = { group = "com.google.gms", name = "google-services", version.ref = "googleServices" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
-laszip4j = { group = "com.github.mreutegg", name = "laszip4j", version.ref = "laszip4j" }
-nga-tiff = { group = "mil.nga", name = "tiff", version.ref = "ngaTiff" }
-androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
+laszip4j = { module = "com.github.mreutegg:laszip4j", version.ref = "laszip4j" }
+nga-tiff = { module = "mil.nga:tiff", version.ref = "ngaTiff" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+legacy-kapt = { id = "com.android.legacy-kapt", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-google-devtools-ksp = { id = "com.google.devtools.ksp", version.ref = "googleDevtoolsKsp" }
-roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }
-secrets = { id = "com.google.android.libraries.mapsplatform.secrets-gradle-plugin", version.ref = "secretsGradlePlugin" }
-google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

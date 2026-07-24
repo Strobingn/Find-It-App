@@ -8,9 +8,12 @@ import java.nio.ByteOrder
 
 /** Pure-Java LAZ decoding backed by laszip4j; all rasterization remains memory bounded. */
 internal object LazTerrainReader {
+    private const val DECODE_BATCH_POINTS = 65_536
+
     fun read(
         inputStream: InputStream,
         options: LidarImportOptions,
+        shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
     ): DemGenerator.LasLoadResult? {
         return try {
             val buffered = if (inputStream is BufferedInputStream) {
@@ -28,6 +31,7 @@ internal object LazTerrainReader {
                 declaredPointCount = header.pointCount,
             )
 
+            var pointsInBatch = 0
             for (point in LASReader.getPoints(buffered)) {
                 val x = point.getX() * header.scaleX + header.offsetX
                 val y = point.getY() * header.scaleY + header.offsetY
@@ -41,6 +45,13 @@ internal object LazTerrainReader {
                     )
                 ) {
                     break
+                }
+
+                pointsInBatch++
+                if (pointsInBatch >= DECODE_BATCH_POINTS) {
+                    pointsInBatch = 0
+                    if (!shouldContinue()) return null
+                    Thread.yield()
                 }
             }
             rasterizer.finish(

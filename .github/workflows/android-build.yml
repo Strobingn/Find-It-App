@@ -26,27 +26,31 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create local.properties before Gradle setup
         shell: bash
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-2.5-flash}"
           } > "$GITHUB_WORKSPACE/local.properties"
           test -f "$GITHUB_WORKSPACE/local.properties"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: "17"
           distribution: "temurin"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Require Gradle wrapper
         run: |
@@ -78,33 +82,51 @@ jobs:
           fi
 
       - name: Unit tests
-        continue-on-error: true
-        run: ./gradlew testDebugUnitTest --stacktrace
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --stacktrace --no-configuration-cache 2>&1 | tee build-debug.log
+
+      - name: Build Release APK
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --stacktrace --no-configuration-cache 2>&1 | tee build-release.log
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-diagnostics-${{ github.run_number }}
+          path: |
+            build-debug.log
+            build-release.log
+            unit-test.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Compute safe ref name for artifacts
         id: safe_ref
         run: echo "value=$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lidar-metal-detector-debug-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Build Release APK (unsigned OK)
-        continue-on-error: true
-        run: ./gradlew assembleRelease --stacktrace
-
       - name: Upload Release APK
-        if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lidar-metal-detector-release-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
