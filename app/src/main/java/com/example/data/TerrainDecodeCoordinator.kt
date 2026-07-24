@@ -80,10 +80,11 @@ class TerrainDecodeCoordinator(
         displayName: String,
         options: LidarImportOptions,
     ): DemGenerator.TerrainLoadResult? = withContext(Dispatchers.IO) {
-        currentCoroutineContext().ensureActive()
+        val decodeContext = currentCoroutineContext()
+        decodeContext.ensureActive()
         FileInputStream(file).buffered(256 * 1024).use { input ->
             if (displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true)) {
-                val laz = LazTerrainReader.read(input, options) { currentCoroutineContext().isActive }
+                val laz = LazTerrainReader.read(input, options) { decodeContext.isActive }
                     ?: return@use null
                 DemGenerator.TerrainLoadResult(
                     grid = laz.grid,
