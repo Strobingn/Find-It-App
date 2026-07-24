@@ -35,6 +35,7 @@ fun GpuTerrainSurface(
 
 private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
     private val terrainRenderer = TerrainGlRenderer()
+    private var submittedScene: TerrainGpuScene? = null
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -77,6 +78,8 @@ private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
     }
 
     fun setScene(scene: TerrainGpuScene) {
+        if (submittedScene === scene) return
+        submittedScene = scene
         queueEvent { terrainRenderer.submit(scene) }
         requestRender()
     }
@@ -104,12 +107,18 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
     private var scene: TerrainGpuScene? = null
     private var viewportWidth = 1
     private var viewportHeight = 1
+    private val modelMatrix = FloatArray(16)
+    private val viewMatrix = FloatArray(16)
+    private val projectionMatrix = FloatArray(16)
+    private val viewModelMatrix = FloatArray(16)
+    private val mvpMatrix = FloatArray(16)
 
     @Volatile private var zoom = 1.4f
     @Volatile private var yawDegrees = -35f
     @Volatile private var pitchDegrees = 58f
 
     fun submit(newScene: TerrainGpuScene) {
+        if (scene === newScene) return
         scene = newScene
         uploadedReductionFactor = null
     }
@@ -155,8 +164,8 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         if (glBatches.isEmpty()) return
 
         GLES20.glUseProgram(program)
-        val mvp = buildMvpMatrix()
-        GLES20.glUniformMatrix4fv(mvpUniform, 1, false, mvp, 0)
+        buildMvpMatrix()
+        GLES20.glUniformMatrix4fv(mvpUniform, 1, false, mvpMatrix, 0)
 
         val strideBytes = TerrainGpuBatch.FLOATS_PER_VERTEX * Float.SIZE_BYTES
         for (batch in glBatches) {
@@ -240,20 +249,14 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         }
     }
 
-    private fun buildMvpMatrix(): FloatArray {
-        val model = FloatArray(16)
-        val view = FloatArray(16)
-        val projection = FloatArray(16)
-        val viewModel = FloatArray(16)
-        val mvp = FloatArray(16)
-
-        Matrix.setIdentityM(model, 0)
-        Matrix.rotateM(model, 0, pitchDegrees, 1f, 0f, 0f)
-        Matrix.rotateM(model, 0, yawDegrees, 0f, 0f, 1f)
+    private fun buildMvpMatrix() {
+        Matrix.setIdentityM(modelMatrix, 0)
+        Matrix.rotateM(modelMatrix, 0, pitchDegrees, 1f, 0f, 0f)
+        Matrix.rotateM(modelMatrix, 0, yawDegrees, 0f, 0f, 1f)
 
         val distance = 3.2f / zoom.coerceAtLeast(0.2f)
         Matrix.setLookAtM(
-            view,
+            viewMatrix,
             0,
             0f,
             -distance,
@@ -266,10 +269,9 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
             1f,
         )
         val aspect = viewportWidth.toFloat() / viewportHeight.toFloat()
-        Matrix.perspectiveM(projection, 0, 42f, aspect, 0.1f, 20f)
-        Matrix.multiplyMM(viewModel, 0, view, 0, model, 0)
-        Matrix.multiplyMM(mvp, 0, projection, 0, viewModel, 0)
-        return mvp
+        Matrix.perspectiveM(projectionMatrix, 0, 42f, aspect, 0.1f, 20f)
+        Matrix.multiplyMM(viewModelMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+        Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, viewModelMatrix, 0)
     }
 
     private fun createProgram(vertexSource: String, fragmentSource: String): Int {
