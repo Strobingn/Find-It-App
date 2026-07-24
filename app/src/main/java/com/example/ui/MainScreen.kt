@@ -5,32 +5,39 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.GpsNotFixed
-import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Landscape
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -41,7 +48,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,55 +73,84 @@ import com.example.ui.components.LidarCanvasMode
 import com.example.ui.components.LidarControlPanel
 import com.example.ui.components.LidarMapCanvas
 import com.example.ui.components.TargetLoggerPanel
-import kotlinx.coroutines.delay
+import com.example.ui.components.TerrainGoogleMapScreen
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
-private data class AppTab(val label: String, val icon: ImageVector)
+private data class AppTab(
+    val label: String,
+    val title: String,
+    val subtitle: String,
+    val icon: ImageVector,
+)
 
 private val tabs = listOf(
-    AppTab("Terrain", Icons.Default.Map),
-    AppTab("Finds", Icons.Default.Flag),
-    AppTab("Import", Icons.Default.UploadFile),
+    AppTab("Terrain", "Terrain workspace", "Render and analyze the active LiDAR layer", Icons.Default.Landscape),
+    AppTab("Map", "Google Maps overlay", "Align the rendered LAZ layer with real-world imagery", Icons.Default.Layers),
+    AppTab("Gemini", "Gemini field assistant", "Ask questions using the active terrain context", Icons.Default.AutoAwesome),
+    AppTab("Finds", "Field finds", "Log, review, and manage survey targets", Icons.Default.Flag),
+    AppTab("Import", "Terrain library", "Download NOAA LAZ or open local terrain files", Icons.Default.UploadFile),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     val selectedTab = rememberSaveable { mutableIntStateOf(0) }
-    val terrainFocusMode = rememberSaveable { mutableStateOf(true) }
+    val terrainFocusMode = rememberSaveable { mutableStateOf(false) }
+    val activeTab = tabs[selectedTab.intValue]
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
             if (!terrainFocusMode.value) {
-                TopAppBar(
+                CenterAlignedTopAppBar(
                     title = {
-                        Column {
-                            Text("Find It", fontWeight = FontWeight.Bold)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(activeTab.title, fontWeight = FontWeight.Bold)
                             Text(
-                                "LiDAR terrain and field survey",
-                                style = MaterialTheme.typography.labelMedium,
+                                activeTab.subtitle,
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     },
+                    actions = {
+                        if (selectedTab.intValue == 0) {
+                            IconButton(onClick = { terrainFocusMode.value = true }) {
+                                Icon(Icons.Default.Fullscreen, contentDescription = "Open terrain full screen")
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    ),
                 )
             }
         },
         bottomBar = {
             if (!terrainFocusMode.value) {
-                NavigationBar {
-                    tabs.forEachIndexed { index, tab ->
-                        NavigationBarItem(
-                            selected = selectedTab.intValue == index,
-                            onClick = {
-                                selectedTab.intValue = index
-                                terrainFocusMode.value = false
-                            },
-                            icon = { Icon(tab.icon, contentDescription = null) },
-                            label = { Text(tab.label) },
-                        )
+                Surface(
+                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                    shadowElevation = 14.dp,
+                    tonalElevation = 4.dp,
+                ) {
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        tonalElevation = 0.dp,
+                    ) {
+                        tabs.forEachIndexed { index, tab ->
+                            NavigationBarItem(
+                                selected = selectedTab.intValue == index,
+                                onClick = {
+                                    selectedTab.intValue = index
+                                    terrainFocusMode.value = false
+                                },
+                                icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                label = { Text(tab.label, maxLines = 1) },
+                                alwaysShowLabel = false,
+                            )
+                        }
                     }
                 }
             }
@@ -127,13 +163,15 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 focusMode = terrainFocusMode.value,
                 onFocusModeChanged = { terrainFocusMode.value = it },
             )
-            1 -> FindsTab(viewModel = viewModel, padding = padding)
+            1 -> GoogleMapTab(viewModel = viewModel, padding = padding)
+            2 -> GeminiTab(viewModel = viewModel, padding = padding)
+            3 -> FindsTab(viewModel = viewModel, padding = padding)
             else -> ImportTab(
                 viewModel = viewModel,
                 padding = padding,
                 onImported = {
                     selectedTab.intValue = 0
-                    terrainFocusMode.value = true
+                    terrainFocusMode.value = false
                 },
             )
         }
@@ -240,78 +278,72 @@ private fun TerrainTab(
         )
 
         Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            tonalElevation = 6.dp,
-            modifier = Modifier.align(Alignment.TopCenter).padding(14.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+            tonalElevation = 8.dp,
+            shadowElevation = 10.dp,
+            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(0.97f),
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier.padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
             ) {
-                IconButton(onClick = { viewModel.rotateSunAzimuth(-45f) }) {
-                    Icon(Icons.Default.RotateLeft, contentDescription = "Rotate light left")
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.WbSunny,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.rotate(azimuth),
+                    )
+                    Text(
+                        "${compassLabel(azimuth)} ${azimuth.roundToInt()}°",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
-                Icon(
-                    Icons.Default.WbSunny,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.rotate(azimuth),
-                )
-                Text(
-                    "${compassLabel(azimuth)} ${azimuth.roundToInt()}°",
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                )
-                IconButton(onClick = { viewModel.rotateSunAzimuth(45f) }) {
-                    Icon(Icons.Default.RotateRight, contentDescription = "Rotate light right")
-                }
-                IconButton(onClick = { localViewportResetKey.intValue++ }) {
-                    Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit terrain")
-                }
-                IconButton(onClick = { showControls.value = !showControls.value }) {
-                    Icon(Icons.Default.Tune, contentDescription = "Terrain controls")
-                }
-                IconButton(
-                    onClick = {
-                        val alreadyGranted = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (!alreadyGranted && !gpsEnabled) {
-                            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                        }
-                        viewModel.toggleGpsTracking(!gpsEnabled)
-                    },
+                TerrainQuickAction("Light -", Icons.Default.RotateLeft) { viewModel.rotateSunAzimuth(-45f) }
+                TerrainQuickAction("Light +", Icons.Default.RotateRight) { viewModel.rotateSunAzimuth(45f) }
+                TerrainQuickAction("Fit", Icons.Default.CenterFocusStrong) { localViewportResetKey.intValue++ }
+                TerrainQuickAction(
+                    label = if (showControls.value) "Close tools" else "Analyze",
+                    icon = Icons.Default.Tune,
+                    active = showControls.value,
+                ) { showControls.value = !showControls.value }
+                TerrainQuickAction(
+                    label = if (gpsEnabled) "GPS on" else "GPS",
+                    icon = if (gpsEnabled && hasLocationPermission) Icons.Default.GpsFixed else Icons.Default.GpsNotFixed,
+                    active = gpsEnabled && hasLocationPermission,
                 ) {
-                    Icon(
-                        if (gpsEnabled && hasLocationPermission) Icons.Default.GpsFixed else Icons.Default.GpsNotFixed,
-                        contentDescription = if (gpsEnabled) "Disable GPS" else "Enable GPS",
-                        tint = if (gpsEnabled && hasLocationPermission) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            LocalContentColor.current
-                        },
-                    )
+                    val alreadyGranted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.ACCESS_FINE_LOCATION,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!alreadyGranted && !gpsEnabled) {
+                        locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                    }
+                    viewModel.toggleGpsTracking(!gpsEnabled)
                 }
-                IconButton(onClick = { onFocusModeChanged(!focusMode) }) {
-                    Icon(
-                        if (focusMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                        contentDescription = if (focusMode) "Exit full screen" else "Open full screen",
-                    )
-                }
+                TerrainQuickAction(
+                    label = if (focusMode) "Exit full" else "Full screen",
+                    icon = if (focusMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                ) { onFocusModeChanged(!focusMode) }
             }
         }
 
         Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-            modifier = Modifier.align(Alignment.BottomStart).padding(14.dp),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+            tonalElevation = 4.dp,
+            modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
         ) {
             val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
             val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp)) {
                 Text(
                     String.format(
                         Locale.US,
@@ -324,9 +356,10 @@ private fun TerrainTab(
                     ),
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    if (showControls.value) "Controls open" else "Pinch to zoom · drag to pan · Tune for analysis",
+                    if (showControls.value) "Analysis controls open" else "Pinch to zoom · drag to pan",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -335,12 +368,12 @@ private fun TerrainTab(
 
         if (canRefine) {
             Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
                 tonalElevation = 4.dp,
-                modifier = Modifier.align(Alignment.CenterEnd).padding(14.dp),
+                modifier = Modifier.align(Alignment.CenterEnd).padding(12.dp),
             ) {
-                Column(modifier = Modifier.padding(10.dp)) {
+                Column(modifier = Modifier.padding(11.dp)) {
                     Text(if (isDetailed) "Detailed terrain" else "Detail available", fontWeight = FontWeight.Bold)
                     Text(detailMessage.orEmpty(), style = MaterialTheme.typography.bodySmall)
                     TextButton(
@@ -358,7 +391,7 @@ private fun TerrainTab(
 
         AnimatedVisibility(
             visible = showControls.value,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
         ) {
             LidarControlPanel(
                 selectedSiteIndex = site,
@@ -398,11 +431,61 @@ private fun TerrainTab(
                 basemapStatus = basemapStatus,
                 modifier = Modifier
                     .fillMaxWidth(0.92f)
-                    .heightIn(max = maxHeight * 0.88f)
+                    .heightIn(max = maxHeight * 0.82f)
                     .verticalScroll(rememberScrollState()),
             )
         }
     }
+}
+
+@Composable
+private fun TerrainQuickAction(
+    label: String,
+    icon: ImageVector,
+    active: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        FilledTonalIconButton(onClick = onClick) {
+            Icon(
+                icon,
+                contentDescription = label,
+                tint = if (active) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+            )
+        }
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun GoogleMapTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
+    val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    TerrainGoogleMapScreen(
+        terrainBitmap = bitmap,
+        grid = grid,
+        metadata = metadata,
+        modifier = Modifier.fillMaxSize().padding(padding),
+    )
+}
+
+@Composable
+private fun GeminiTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val summary by viewModel.activeTerrainSummary.collectAsStateWithLifecycle()
+    val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    GeminiAssistantScreen(
+        terrainSummary = summary,
+        grid = grid,
+        metadata = metadata,
+        modifier = Modifier.fillMaxSize().padding(padding),
+    )
 }
 
 @Composable
@@ -419,9 +502,7 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         onDeleteSignal = viewModel::deleteLoggedSignal,
         onUpdateSignal = viewModel::updateLoggedSignal,
         onClearAll = viewModel::clearLoggedSignals,
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(padding),
+        modifier = Modifier.fillMaxSize().padding(padding),
     )
 }
 
