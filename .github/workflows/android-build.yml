@@ -83,10 +83,27 @@ jobs:
 
       - name: Unit tests
         continue-on-error: true
-        run: ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-configuration-cache
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --stacktrace --no-configuration-cache 2>&1 | tee build-debug.log
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-diagnostics-${{ github.run_number }}
+          path: |
+            build-debug.log
+            unit-test.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Compute safe ref name for artifacts
         id: safe_ref
