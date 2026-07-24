@@ -67,7 +67,7 @@ class TerrainAnalysisEngineTest {
     }
 
     @Test
-    fun eastRisingPlaneHasExpectedSlopeAndWestFacingAspect() {
+    fun eastRisingPlaneHasExpectedSlopeAndEastwardGradientAspect() {
         val width = 21
         val height = 21
         val elevations = FloatArray(width * height) { index -> (index % width).toFloat() }
@@ -84,7 +84,7 @@ class TerrainAnalysisEngineTest {
         val center = (height / 2) * width + width / 2
 
         assertTrue(abs(slope.values[center] - 45f) < 0.25f)
-        assertTrue(abs(aspect.values[center] - 270f) < 0.25f)
+        assertTrue(abs(aspect.values[center] - 90f) < 0.25f)
     }
 
     @Test
