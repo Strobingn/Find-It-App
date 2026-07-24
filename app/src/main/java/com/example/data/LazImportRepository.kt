@@ -1,10 +1,12 @@
 package com.example.data
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 class LazImportRepository(
     private val downloader: LazDownloadManager,
@@ -15,10 +17,12 @@ class LazImportRepository(
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
     ): File = withContext(Dispatchers.IO) {
         require(isSupportedRemoteUrl(url)) { "Enter a direct HTTPS LAZ or LAS download URL" }
+        val downloadContext = currentCoroutineContext()
         downloader.download(
             sourceUrl = url,
             destinationDirectory = store.directory,
             progress = onProgress,
+            shouldContinue = { downloadContext.isActive },
         )
     }
 
