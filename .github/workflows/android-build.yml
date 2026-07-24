@@ -32,10 +32,14 @@ jobs:
         shell: bash
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-2.5-flash}"
           } > "$GITHUB_WORKSPACE/local.properties"
           test -f "$GITHUB_WORKSPACE/local.properties"
 
