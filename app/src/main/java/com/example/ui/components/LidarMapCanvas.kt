@@ -29,9 +29,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
@@ -46,7 +48,9 @@ import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.data.computeDigPriorityHeatmap
 import com.example.geospatial.GeoSpatialLibrary
-import androidx.compose.ui.graphics.lerp
+import kotlinx.coroutines.delay
+import kotlin.math.min
+
 
 enum class LidarCanvasMode { SURVEY, EXPLORE }
 
@@ -76,71 +80,76 @@ fun LidarMapCanvas(
     deviceGridPosition: Pair<Float, Float>? = null,
     modifier: Modifier = Modifier,
 ) {
-    // Cache ImageBitmap — recreating every drag frame can crash if Bitmap is mid-render
     val imageBitmap = remember(bitmap) {
-        try {
-            bitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
-        } catch (_: Exception) {
-            null
-        }
+        runCatching {
+            bitmap
+                ?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
+                ?.asImageBitmap()
+        }.getOrNull()
     }
     val basemapImageBitmap = remember(basemapBitmap) {
-        try {
-            basemapBitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
-        } catch (_: Exception) {
-            null
-        }
+        runCatching {
+            basemapBitmap
+                ?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
+                ?.asImageBitmap()
+        }.getOrNull()
     }
     val heatmapCells = remember(loggedSignals, showHeatmap) {
         if (showHeatmap) computeDigPriorityHeatmap(loggedSignals, HEATMAP_BINS) else null
     }
-    
-    // Initialize zoom and pan from the ViewModel or use defaults
+
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
-    
-    LaunchedEffect(viewportResetKey, mode) {
+
+    LaunchedEffect(viewportResetKey, mode, imageBitmap) {
         zoom = 1f
         pan = Offset.Zero
     }
-    
+
     LaunchedEffect(zoom, pan, viewportSize, imageBitmap) {
         val image = imageBitmap ?: return@LaunchedEffect
-        val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
-        val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
-        val fit = viewportWidth / image.width
+        if (viewportSize.width <= 0 || viewportSize.height <= 0) return@LaunchedEffect
+        delay(VIEWPORT_SETTLE_DELAY_MS)
+
+        val viewportWidth = viewportSize.width.toFloat()
+        val viewportHeight = viewportSize.height.toFloat()
+        val fit = containScale(viewportWidth, viewportHeight, image.width.toFloat(), image.height.toFloat())
         val displayWidth = image.width * fit * zoom
         val displayHeight = image.height * fit * zoom
         val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
         val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
-        val bounds = NormalizedRasterBounds(
-            left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
-            top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
-            right = ((viewportWidth - imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
-            bottom = ((viewportHeight - imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
-        ).sanitized()
-        onViewportChanged(bounds, zoom)
+
+        onViewportChanged(
+            NormalizedRasterBounds(
+                left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
+                top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
+                right = ((viewportWidth - imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
+                bottom = ((viewportHeight - imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
+            ).sanitized(),
+            zoom,
+        )
     }
-    
+
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
-        if (mode == LidarCanvasMode.EXPLORE) {
-            val nextZoom = (zoom * zoomChange).coerceIn(1f, 32f)
-            val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
-            val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
-            val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
-            val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
-            val fit = viewportWidth / sourceWidth
-            val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
-            val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
-            zoom = nextZoom
-            pan = Offset(
-                x = (pan.x + panChange.x).coerceIn(-maxPanX, maxPanX),
-                y = (pan.y + panChange.y).coerceIn(-maxPanY, maxPanY),
-            )
-        }
+        if (mode != LidarCanvasMode.EXPLORE) return@rememberTransformableState
+
+        val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
+        val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
+        val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
+        val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
+        val fit = containScale(viewportWidth, viewportHeight, sourceWidth, sourceHeight)
+        val nextZoom = (zoom * zoomChange).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
+        val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
+
+        zoom = nextZoom
+        pan = Offset(
+            x = (pan.x + panChange.x).coerceIn(-maxPanX, maxPanX),
+            y = (pan.y + panChange.y).coerceIn(-maxPanY, maxPanY),
+        )
     }
-    
+
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
@@ -152,21 +161,24 @@ fun LidarMapCanvas(
             val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
                 Modifier.transformable(transformState)
             } else {
-                Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap) {
+                Modifier.pointerInput(onSweepPositionChanged, onStopSweeping, bitmap, viewportResetKey) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val canvasWidth = size.width.toFloat().coerceAtLeast(1f)
                         val canvasHeight = size.height.toFloat().coerceAtLeast(1f)
-                        val fit = canvasWidth / bitmap.width
+                        val fit = containScale(canvasWidth, canvasHeight, bitmap.width.toFloat(), bitmap.height.toFloat())
                         val imageWidth = bitmap.width * fit
                         val imageHeight = bitmap.height * fit
                         val imageLeft = (canvasWidth - imageWidth) * 0.5f
                         val imageTop = (canvasHeight - imageHeight) * 0.5f
+
                         fun report(offset: Offset) {
-                            val xPct = ((offset.x - imageLeft) / imageWidth * 100f).coerceIn(0f, 100f)
-                            val yPct = ((offset.y - imageTop) / imageHeight * 100f).coerceIn(0f, 100f)
-                            onSweepPositionChanged(xPct, yPct)
+                            onSweepPositionChanged(
+                                ((offset.x - imageLeft) / imageWidth * 100f).coerceIn(0f, 100f),
+                                ((offset.y - imageTop) / imageHeight * 100f).coerceIn(0f, 100f),
+                            )
                         }
+
                         report(down.position)
                         try {
                             while (true) {
@@ -182,6 +194,7 @@ fun LidarMapCanvas(
                     }
                 }
             }
+
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
@@ -191,26 +204,24 @@ fun LidarMapCanvas(
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
-                val fit = canvasWidth / imageBitmap.width
-                val fittedWidth = imageBitmap.width * fit
-                val fittedHeight = imageBitmap.height * fit
-                val displayWidth = fittedWidth * zoom
-                val displayHeight = fittedHeight * zoom
+                val fit = containScale(canvasWidth, canvasHeight, imageBitmap.width.toFloat(), imageBitmap.height.toFloat())
+                val displayWidth = imageBitmap.width * fit * zoom
+                val displayHeight = imageBitmap.height * fit * zoom
                 val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
                 val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
-                drawImage(
-                    image = imageBitmap,
-                    dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
-                    dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
-                )
+                val destinationOffset = IntOffset(imageLeft.toInt(), imageTop.toInt())
+                val destinationSize = IntSize(displayWidth.toInt().coerceAtLeast(1), displayHeight.toInt().coerceAtLeast(1))
+
+                drawImage(imageBitmap, dstOffset = destinationOffset, dstSize = destinationSize)
                 if (showBasemap && basemapImageBitmap != null) {
                     drawImage(
                         image = basemapImageBitmap,
-                        dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
-                        dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
+                        dstOffset = destinationOffset,
+                        dstSize = destinationSize,
                         alpha = basemapOpacity.coerceIn(0f, 1f),
                     )
                 }
+
                 if (heatmapCells != null) {
                     val cellWidth = displayWidth / HEATMAP_BINS
                     val cellHeight = displayHeight / HEATMAP_BINS
@@ -221,99 +232,83 @@ fun LidarMapCanvas(
                             drawRect(
                                 color = heatmapColor(intensity),
                                 topLeft = Offset(imageLeft + col * cellWidth, imageTop + row * cellHeight),
-                                size = androidx.compose.ui.geometry.Size(cellWidth, cellHeight),
+                                size = Size(cellWidth, cellHeight),
                                 alpha = 0.18f + intensity * 0.5f,
                             )
                         }
                     }
                 }
-                // Search grid (avoid huge loops if spacing tiny)
+
                 if (gridSpacing >= 1f) {
                     val cols = (100f / gridSpacing).toInt().coerceIn(1, 50)
                     val rows = (100f / gridSpacing).toInt().coerceIn(1, 50)
+                    val gridColor = Color(0xFFFF1E1E)
+                    val gridStroke = 2.5f
+                    val gridAlpha = 0.92f
+
                     for (i in 1 until cols) {
                         val px = imageLeft + (i * gridSpacing / 100f) * displayWidth
                         drawLine(
-                            color = Color(0xFF29B6F6),
+                            color = gridColor,
                             start = Offset(px, imageTop),
                             end = Offset(px, imageTop + displayHeight),
-                            strokeWidth = 1f,
-                            alpha = 0.35f,
+                            strokeWidth = gridStroke,
+                            alpha = gridAlpha,
                         )
                     }
                     for (i in 1 until rows) {
                         val py = imageTop + (i * gridSpacing / 100f) * displayHeight
                         drawLine(
-                            color = Color(0xFF29B6F6),
+                            color = gridColor,
                             start = Offset(imageLeft, py),
                             end = Offset(imageLeft + displayWidth, py),
-                            strokeWidth = 1f,
-                            alpha = 0.35f,
+                            strokeWidth = gridStroke,
+                            alpha = gridAlpha,
                         )
                     }
-                }
-                for (sig in loggedSignals) {
-                    val px = imageLeft + (sig.gridX.coerceIn(0f, 100f) / 100f) * displayWidth
-                    val py = imageTop + (sig.gridY.coerceIn(0f, 100f) / 100f) * displayHeight
-                    val pinColor = try {
-                        Color(sig.metalType.colorHex)
-                    } catch (_: Exception) {
-                        Color(0xFFFFD700)
-                    }
-                    drawCircle(color = pinColor, radius = 12f, center = Offset(px, py), alpha = 0.5f)
-                    drawCircle(color = Color.White, radius = 4f, center = Offset(px, py))
-                    drawCircle(
-                        color = pinColor,
-                        radius = 18f,
-                        center = Offset(px, py),
-                        style = Stroke(width = 2f),
+                    drawRect(
+                        color = gridColor,
+                        topLeft = Offset(imageLeft, imageTop),
+                        size = Size(displayWidth, displayHeight),
+                        style = Stroke(width = 3f),
+                        alpha = 1f,
                     )
                 }
+
+                loggedSignals.forEach { signal ->
+                    val px = imageLeft + (signal.gridX.coerceIn(0f, 100f) / 100f) * displayWidth
+                    val py = imageTop + (signal.gridY.coerceIn(0f, 100f) / 100f) * displayHeight
+                    val pinColor = runCatching { Color(signal.metalType.colorHex) }.getOrDefault(Color(0xFFFFD700))
+                    val marker = Offset(px, py)
+                    drawCircle(color = pinColor, radius = 12f, center = marker, alpha = 0.5f)
+                    drawCircle(color = Color.White, radius = 4f, center = marker)
+                    drawCircle(color = pinColor, radius = 18f, center = marker, style = Stroke(width = 2f))
+                }
+
                 if (showSurveyCursor) {
                     val sx = imageLeft + (sweepX.coerceIn(0f, 100f) / 100f) * displayWidth
                     val sy = imageTop + (sweepY.coerceIn(0f, 100f) / 100f) * displayHeight
                     val coil = Offset(sx, sy)
-                    drawCircle(
-                        color = Color(0xFFFFD700),
-                        radius = 36f,
-                        center = coil,
-                        style = Stroke(width = 1.5f),
-                        alpha = 0.35f,
-                    )
-                    drawCircle(
-                        color = Color(0xFFFFD700),
-                        radius = 24f,
-                        center = coil,
-                        style = Stroke(width = 3.5f),
-                        alpha = 0.85f,
-                    )
-                    drawLine(
-                        color = Color(0xFFFFD700),
-                        start = Offset(sx - 10f, sy),
-                        end = Offset(sx + 10f, sy),
-                        strokeWidth = 2f,
-                        alpha = 0.8f,
-                    )
-                    drawLine(
-                        color = Color(0xFFFFD700),
-                        start = Offset(sx, sy - 10f),
-                        end = Offset(sx, sy + 10f),
-                        strokeWidth = 2f,
-                        alpha = 0.8f,
-                    )
-                    drawCircle(color = Color.White, radius = 3f, center = coil)
+                    drawCircle(Color(0xFFFFD700), 36f, coil, alpha = 0.35f, style = Stroke(1.5f))
+                    drawCircle(Color(0xFFFFD700), 24f, coil, alpha = 0.85f, style = Stroke(3.5f))
+                    drawLine(Color(0xFFFFD700), Offset(sx - 10f, sy), Offset(sx + 10f, sy), 2f, alpha = 0.8f)
+                    drawLine(Color(0xFFFFD700), Offset(sx, sy - 10f), Offset(sx, sy + 10f), 2f, alpha = 0.8f)
+                    drawCircle(Color.White, 3f, coil)
                 }
-                val devicePosition = deviceGridPosition
-                if (devicePosition != null && devicePosition.first in 0f..100f && devicePosition.second in 0f..100f) {
-                    val dx = imageLeft + (devicePosition.first / 100f) * displayWidth
-                    val dy = imageTop + (devicePosition.second / 100f) * displayHeight
-                    val here = Offset(dx, dy)
-                    drawCircle(color = Color(0xFF2196F3), radius = 26f, center = here, alpha = 0.25f)
-                    drawCircle(color = Color(0xFF2196F3), radius = 10f, center = here)
-                    drawCircle(color = Color.White, radius = 10f, center = here, style = Stroke(width = 2.5f))
+
+                deviceGridPosition?.let { devicePosition ->
+                    if (devicePosition.first in 0f..100f && devicePosition.second in 0f..100f) {
+                        val here = Offset(
+                            imageLeft + (devicePosition.first / 100f) * displayWidth,
+                            imageTop + (devicePosition.second / 100f) * displayHeight,
+                        )
+                        drawCircle(Color(0xFF2196F3), 26f, here, alpha = 0.25f)
+                        drawCircle(Color(0xFF2196F3), 10f, here)
+                        drawCircle(Color.White, 10f, here, style = Stroke(2.5f))
+                    }
                 }
             }
-            // --- GEOSPATIAL GIS HUD ---
+
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -338,6 +333,14 @@ fun LidarMapCanvas(
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
+                    if (mode == LidarCanvasMode.EXPLORE && zoom > 1.01f) {
+                        Text(
+                            text = "${"%.1f".format(zoom)}× zoom",
+                            color = Color(0xFF64B5F6),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                     if (showBasemap && basemapStatus != null) {
                         Text(
                             text = basemapStatus,
@@ -348,45 +351,47 @@ fun LidarMapCanvas(
                     }
                 }
             }
-            if (showCoordinateHud) Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
-                    .padding(10.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xE60D0E12))
-                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
-                    .padding(8.dp),
-            ) {
-                if (currentLat != null && currentLon != null) {
-                    val utm = runCatching {
-                        GeoSpatialLibrary.geographicToUtm(currentLat, currentLon)
-                    }.getOrNull()
-                    Text(
-                        text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    if (utm != null) {
+
+            if (showCoordinateHud) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xE60D0E12))
+                        .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
+                        .padding(8.dp),
+                ) {
+                    if (currentLat != null && currentLon != null) {
+                        val utm = runCatching { GeoSpatialLibrary.geographicToUtm(currentLat, currentLon) }.getOrNull()
                         Text(
-                            text = "UTM ${utm.zone}${utm.hemisphere}  E ${"%.1f".format(utm.easting)} m  N ${"%.1f".format(utm.northing)} m",
-                            color = Color(0xFF64B5F6),
-                            fontSize = 10.sp,
+                            text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
+                            color = Color.White,
+                            fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        if (utm != null) {
+                            Text(
+                                text = "UTM ${utm.zone}${utm.hemisphere}  E ${"%.1f".format(utm.easting)} m  N ${"%.1f".format(utm.northing)} m",
+                                color = Color(0xFF64B5F6),
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
                         )
                     }
-                } else {
-                    Text(
-                        text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                    )
                 }
             }
+
             if (showBasemap && basemapImageBitmap != null) {
                 Text(
                     text = "© OpenStreetMap contributors",
@@ -401,10 +406,7 @@ fun LidarMapCanvas(
                 )
             }
         } else {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     text = "No LiDAR data loaded.\nSelect a template below to render.",
                     color = Color.LightGray,
@@ -412,11 +414,10 @@ fun LidarMapCanvas(
                 )
             }
         }
+
         if (isRendering) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)),
                 contentAlignment = Alignment.Center,
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -425,6 +426,19 @@ fun LidarMapCanvas(
     }
 }
 
+private fun containScale(
+    viewportWidth: Float,
+    viewportHeight: Float,
+    sourceWidth: Float,
+    sourceHeight: Float,
+): Float = min(
+    viewportWidth / sourceWidth.coerceAtLeast(1f),
+    viewportHeight / sourceHeight.coerceAtLeast(1f),
+).coerceAtLeast(0.0001f)
+
+private const val MIN_ZOOM = 1f
+private const val MAX_ZOOM = 32f
+private const val VIEWPORT_SETTLE_DELAY_MS = 450L
 private const val HEATMAP_BINS = 24
 
 private fun heatmapColor(intensity: Float): Color = if (intensity < 0.5f) {

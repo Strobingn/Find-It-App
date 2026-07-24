@@ -12,15 +12,21 @@ on:
       - mitral-v15
       - Mistral-V17
       - Mistral-V20
+      - feature/lidar-analysis-suite
       - "feature/**"
       - "fix/**"
   pull_request:
     branches: [main, master]
   workflow_dispatch:
 
+concurrency:
+  group: android-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     permissions:
       contents: read
 
@@ -32,10 +38,14 @@ jobs:
         shell: bash
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          OPENAI_PROXY_URL: ${{ secrets.OPENAI_PROXY_URL }}
+          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
         run: |
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'OPENAI_PROXY_URL=%s\n' "$OPENAI_PROXY_URL"
+            printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
           } > "$GITHUB_WORKSPACE/local.properties"
           test -f "$GITHUB_WORKSPACE/local.properties"
 
@@ -60,6 +70,9 @@ jobs:
           fi
           touch .env
 
+      - name: Validate OpenAI proxy source
+        run: node --check backend/openai-proxy/server.mjs
+
       - name: Ensure Android debug keystore
         run: |
           mkdir -p "$HOME/.android"
@@ -78,7 +91,6 @@ jobs:
           fi
 
       - name: Unit tests
-        continue-on-error: true
         run: ./gradlew testDebugUnitTest --stacktrace
 
       - name: Build Debug APK
@@ -87,6 +99,15 @@ jobs:
       - name: Compute safe ref name for artifacts
         id: safe_ref
         run: echo "value=$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload unit-test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report-${{ github.run_number }}
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4

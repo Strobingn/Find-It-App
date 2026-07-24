@@ -16,21 +16,49 @@ internal object LazTerrainReader {
             val buffered = if (inputStream is BufferedInputStream) {
                 inputStream
             } else {
-                BufferedInputStream(inputStream, 256 * 1024)
+                BufferedInputStream(inputStream, 512 * 1024)
             }
             val header = readHeader(buffered) ?: return null
+            val safeOptions = options.sanitized()
             val rasterizer = LidarRasterizer(
                 minX = header.minX,
                 maxX = header.maxX,
                 minY = header.minY,
                 maxY = header.maxY,
-                options = options,
+                options = safeOptions,
                 declaredPointCount = header.pointCount,
             )
+
+            // LAZ is a sequential compressed stream, so every point still has to be decompressed.
+            // For a detailed zoomed viewport, however, most returns are outside the requested crop.
+            // Reject those returns after reading only X/Y and avoid the more expensive Z,
+            // classification and key-point extraction for the overwhelming majority of points.
+            val focus = safeOptions.focusBounds
+            val sourceRangeX = header.maxX - header.minX
+            val sourceRangeY = header.maxY - header.minY
+            val cropMinX = focus?.let { header.minX + it.left * sourceRangeX } ?: header.minX
+            val cropMaxX = focus?.let { header.minX + it.right * sourceRangeX } ?: header.maxX
+            val cropMinY = focus?.let { header.minY + (1.0 - it.bottom) * sourceRangeY } ?: header.minY
+            val cropMaxY = focus?.let { header.minY + (1.0 - it.top) * sourceRangeY } ?: header.maxY
+            val focusedRead = focus != null
 
             for (point in LASReader.getPoints(buffered)) {
                 val x = point.getX() * header.scaleX + header.offsetX
                 val y = point.getY() * header.scaleY + header.offsetY
+
+                if (focusedRead && (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY)) {
+                    // addPoint records the decoded return, then exits immediately on the crop test.
+                    // A finite placeholder Z avoids touching compressed attributes we do not need.
+                    rasterizer.addPoint(
+                        x = x,
+                        y = y,
+                        z = 0f,
+                        classification = 0,
+                        isKeyPoint = false,
+                    )
+                    continue
+                }
+
                 val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
                 if (!rasterizer.addPoint(
                         x = x,
