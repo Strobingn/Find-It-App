@@ -65,6 +65,7 @@ android {
     targetSdk = 36
     versionCode = 2
     versionName = "1.1"
+    multiDexEnabled = true
 
     buildConfigField("String", "GEMINI_API_KEY", quotedBuildConfig(geminiApiKey))
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
