@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Language
@@ -47,6 +45,7 @@ import com.example.data.LazDataset
 import com.example.data.LazDatasetStore
 import com.example.data.LazDownloadManager
 import com.example.data.LazImportRepository
+import com.example.data.LazTerrainMemoryCache
 import com.example.data.LidarImportOptions
 import com.example.data.NoaaLidarCatalog
 import com.example.data.TerrainImportSource
@@ -75,6 +74,7 @@ fun CustomFileLoader(
         LazDatasetStore(File(baseDirectory, "lidar"))
     }
     val importRepository = remember { LazImportRepository(LazDownloadManager()) }
+    val terrainCache = remember { LazTerrainMemoryCache() }
 
     var mode by remember { mutableStateOf(0) }
     var matrix by remember { mutableStateOf("") }
@@ -123,19 +123,30 @@ fun CustomFileLoader(
         message = "Reading ${dataset.displayName}…"
         isError = false
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
+            val cached = terrainCache.get(dataset.file, options)
+            val result = cached ?: withContext(Dispatchers.IO) {
                 runCatching {
                     FileInputStream(dataset.file).buffered().use { input ->
                         DemGenerator.parseFromStreamDetailed(dataset.displayName, input, options)
                     }
                 }.getOrNull()
-            }
+            }?.also { terrainCache.put(dataset.file, options, it) }
+
             val source = TerrainImportSource(
                 uri = Uri.fromFile(dataset.file).toString(),
                 displayName = dataset.displayName,
                 options = options,
             )
-            showResult(result, dataset.displayName, source)
+            showResult(
+                result = result,
+                name = dataset.displayName,
+                source = source,
+                successMessage = if (cached != null) {
+                    "Opened ${dataset.displayName} from the decoded terrain cache."
+                } else {
+                    null
+                },
+            )
         }
     }
 
@@ -169,9 +180,7 @@ fun CustomFileLoader(
     }
 
     Column(
-        modifier = modifier
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-            .verticalScroll(rememberScrollState()),
+        modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Import terrain", style = MaterialTheme.typography.headlineSmall)
@@ -359,6 +368,7 @@ fun CustomFileLoader(
                                             }
                                         }.getOrNull()
                                     }
+                                    if (result != null) terrainCache.put(file, options, result)
                                     val source = TerrainImportSource(
                                         uri = Uri.fromFile(file).toString(),
                                         displayName = file.name,
