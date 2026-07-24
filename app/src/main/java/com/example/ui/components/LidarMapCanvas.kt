@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.ai.TerrainVisionSession
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.data.TerrainPerformanceSession
@@ -80,7 +81,6 @@ fun LidarMapCanvas(
     deviceGridPosition: Pair<Float, Float>? = null,
     modifier: Modifier = Modifier,
 ) {
-    // Cache ImageBitmap — recreating every drag frame can crash if Bitmap is mid-render.
     val imageBitmap = remember(bitmap) {
         try {
             bitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
@@ -105,7 +105,6 @@ fun LidarMapCanvas(
         if (gpuScene == null) useGpuTerrain = false
     }
 
-    // Initialize zoom and pan from the ViewModel or use defaults.
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -115,8 +114,13 @@ fun LidarMapCanvas(
         pan = Offset.Zero
     }
 
-    LaunchedEffect(zoom, pan, viewportSize, imageBitmap) {
+    LaunchedEffect(bitmap) {
+        if (bitmap == null) TerrainVisionSession.clear()
+    }
+
+    LaunchedEffect(zoom, pan, viewportSize, imageBitmap, bitmap) {
         val image = imageBitmap ?: return@LaunchedEffect
+        val sourceBitmap = bitmap ?: return@LaunchedEffect
         val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
         val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
         val fit = viewportWidth / image.width
@@ -130,6 +134,7 @@ fun LidarMapCanvas(
             right = ((viewportWidth - imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
             bottom = ((viewportHeight - imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
         ).sanitized()
+        TerrainVisionSession.publish(sourceBitmap, bounds, zoom)
         onViewportChanged(bounds, zoom)
     }
 
@@ -162,9 +167,7 @@ fun LidarMapCanvas(
         if (useGpuTerrain && activeGpuScene != null) {
             GpuTerrainSurface(
                 scene = activeGpuScene,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("gpu_terrain_surface"),
+                modifier = Modifier.fillMaxSize().testTag("gpu_terrain_surface"),
             )
             Text(
                 text = "GPU 3D · drag to rotate · pinch for LOD · double-tap to reset",
@@ -257,7 +260,6 @@ fun LidarMapCanvas(
                         }
                     }
                 }
-                // Search grid (avoid huge loops if spacing tiny).
                 if (gridSpacing >= 1f) {
                     val cols = (100f / gridSpacing).toInt().coerceIn(1, 50)
                     val rows = (100f / gridSpacing).toInt().coerceIn(1, 50)
@@ -292,45 +294,16 @@ fun LidarMapCanvas(
                     }
                     drawCircle(color = pinColor, radius = 12f, center = Offset(px, py), alpha = 0.5f)
                     drawCircle(color = Color.White, radius = 4f, center = Offset(px, py))
-                    drawCircle(
-                        color = pinColor,
-                        radius = 18f,
-                        center = Offset(px, py),
-                        style = Stroke(width = 2f),
-                    )
+                    drawCircle(color = pinColor, radius = 18f, center = Offset(px, py), style = Stroke(width = 2f))
                 }
                 if (showSurveyCursor) {
                     val sx = imageLeft + (sweepX.coerceIn(0f, 100f) / 100f) * displayWidth
                     val sy = imageTop + (sweepY.coerceIn(0f, 100f) / 100f) * displayHeight
                     val coil = Offset(sx, sy)
-                    drawCircle(
-                        color = Color(0xFFFFD700),
-                        radius = 36f,
-                        center = coil,
-                        style = Stroke(width = 1.5f),
-                        alpha = 0.35f,
-                    )
-                    drawCircle(
-                        color = Color(0xFFFFD700),
-                        radius = 24f,
-                        center = coil,
-                        style = Stroke(width = 3.5f),
-                        alpha = 0.85f,
-                    )
-                    drawLine(
-                        color = Color(0xFFFFD700),
-                        start = Offset(sx - 10f, sy),
-                        end = Offset(sx + 10f, sy),
-                        strokeWidth = 2f,
-                        alpha = 0.8f,
-                    )
-                    drawLine(
-                        color = Color(0xFFFFD700),
-                        start = Offset(sx, sy - 10f),
-                        end = Offset(sx, sy + 10f),
-                        strokeWidth = 2f,
-                        alpha = 0.8f,
-                    )
+                    drawCircle(color = Color(0xFFFFD700), radius = 36f, center = coil, style = Stroke(width = 1.5f), alpha = 0.35f)
+                    drawCircle(color = Color(0xFFFFD700), radius = 24f, center = coil, style = Stroke(width = 3.5f), alpha = 0.85f)
+                    drawLine(color = Color(0xFFFFD700), start = Offset(sx - 10f, sy), end = Offset(sx + 10f, sy), strokeWidth = 2f, alpha = 0.8f)
+                    drawLine(color = Color(0xFFFFD700), start = Offset(sx, sy - 10f), end = Offset(sx, sy + 10f), strokeWidth = 2f, alpha = 0.8f)
                     drawCircle(color = Color.White, radius = 3f, center = coil)
                 }
                 val devicePosition = deviceGridPosition
@@ -343,7 +316,6 @@ fun LidarMapCanvas(
                     drawCircle(color = Color.White, radius = 10f, center = here, style = Stroke(width = 2.5f))
                 }
             }
-            // --- GEOSPATIAL GIS HUD ---
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -369,12 +341,7 @@ fun LidarMapCanvas(
                         fontFamily = FontFamily.Monospace,
                     )
                     if (showBasemap && basemapStatus != null) {
-                        Text(
-                            text = basemapStatus,
-                            color = Color(0xFF64B5F6),
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                        )
+                        Text(text = basemapStatus, color = Color(0xFF64B5F6), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -389,9 +356,7 @@ fun LidarMapCanvas(
                     .padding(8.dp),
             ) {
                 if (currentLat != null && currentLon != null) {
-                    val utm = runCatching {
-                        GeoSpatialLibrary.geographicToUtm(currentLat, currentLon)
-                    }.getOrNull()
+                    val utm = runCatching { GeoSpatialLibrary.geographicToUtm(currentLat, currentLon) }.getOrNull()
                     Text(
                         text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
                         color = Color.White,
@@ -431,10 +396,7 @@ fun LidarMapCanvas(
                 )
             }
         } else {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     text = "No LiDAR data loaded.\nSelect a template below to render.",
                     color = Color.LightGray,
@@ -446,10 +408,7 @@ fun LidarMapCanvas(
         if (activeGpuScene != null) {
             OutlinedButton(
                 onClick = { useGpuTerrain = !useGpuTerrain },
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(10.dp)
-                    .testTag("toggle_gpu_terrain_button"),
+                modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).testTag("toggle_gpu_terrain_button"),
             ) {
                 Text(if (useGpuTerrain) "2D analysis" else "GPU 3D")
             }
@@ -457,9 +416,7 @@ fun LidarMapCanvas(
 
         if (isRendering && !useGpuTerrain) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)),
                 contentAlignment = Alignment.Center,
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
