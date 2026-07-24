@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
@@ -29,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,17 +47,25 @@ import com.example.data.LazDataset
 import com.example.data.LazDatasetStore
 import com.example.data.LazDownloadManager
 import com.example.data.LazImportRepository
+import com.example.data.LazTerrainCache
+import com.example.data.LazTerrainDiskCache
 import com.example.data.LazTerrainMemoryCache
 import com.example.data.LidarImportOptions
 import com.example.data.NoaaLidarCatalog
+import com.example.data.TerrainDecodeCoordinator
 import com.example.data.TerrainImportSource
+import com.example.data.TerrainPerformanceSession
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Locale
 import java.util.zip.ZipInputStream
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -74,7 +84,9 @@ fun CustomFileLoader(
         LazDatasetStore(File(baseDirectory, "lidar"))
     }
     val importRepository = remember { LazImportRepository(LazDownloadManager()) }
-    val terrainCache = remember { LazTerrainMemoryCache() }
+    val diskCache = remember(context) { LazTerrainDiskCache(File(context.cacheDir, "decoded-terrain")) }
+    val terrainCache = remember(diskCache) { LazTerrainCache(LazTerrainMemoryCache(), diskCache) }
+    val decodeCoordinator = remember(terrainCache) { TerrainDecodeCoordinator(terrainCache) }
 
     var mode by remember { mutableStateOf(0) }
     var matrix by remember { mutableStateOf("") }
@@ -88,6 +100,12 @@ fun CustomFileLoader(
     var rasterResolution by remember { mutableStateOf(512) }
     var smoothingRadius by remember { mutableStateOf(0) }
     var savedDatasets by remember { mutableStateOf(datasetStore.list()) }
+    var cacheSizeBytes by remember { mutableStateOf(terrainCache.diskSizeBytes()) }
+    var workJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose { workJob?.cancel() }
+    }
 
     fun importOptions() = LidarImportOptions(
         groundMode = groundMode,
@@ -95,15 +113,20 @@ fun CustomFileLoader(
         smoothingRadius = smoothingRadius,
     )
 
+    fun resetWorkState() {
+        isWorking = false
+        progress = null
+        progressText = null
+        workJob = null
+    }
+
     fun showResult(
         result: DemGenerator.TerrainLoadResult?,
         name: String,
         source: TerrainImportSource? = null,
         successMessage: String? = null,
     ) {
-        isWorking = false
-        progress = null
-        progressText = null
+        resetWorkState()
         if (result == null) {
             isError = true
             message = "Could not parse $name. Supported: LAZ, LAS, GeoTIFF, ASC, XYZ, CSV/text matrices, or ZIP."
@@ -114,68 +137,112 @@ fun CustomFileLoader(
         }
     }
 
-    fun renderSavedDataset(dataset: LazDataset) {
-        if (isWorking) return
+    fun cancelWork() {
+        workJob?.cancel()
+        resetWorkState()
+        isError = false
+        message = "Import cancelled. Partial downloads were removed."
+    }
+
+    fun decodeStoredDataset(file: File, displayName: String, downloadedNow: Boolean = false) {
+        workJob?.cancel()
         val options = importOptions()
         isWorking = true
         progress = null
-        progressText = null
-        message = "Reading ${dataset.displayName}…"
+        progressText = "Preparing background decode…"
+        message = null
         isError = false
-        scope.launch {
-            val cached = terrainCache.get(dataset.file, options)
-            val result = cached ?: withContext(Dispatchers.IO) {
-                runCatching {
-                    FileInputStream(dataset.file).buffered().use { input ->
-                        DemGenerator.parseFromStreamDetailed(dataset.displayName, input, options)
-                    }
-                }.getOrNull()
-            }?.also { terrainCache.put(dataset.file, options, it) }
 
-            val source = TerrainImportSource(
-                uri = Uri.fromFile(dataset.file).toString(),
-                displayName = dataset.displayName,
-                options = options,
-            )
-            showResult(
-                result = result,
-                name = dataset.displayName,
-                source = source,
-                successMessage = if (cached != null) {
-                    "Opened ${dataset.displayName} from the decoded terrain cache."
-                } else {
-                    null
-                },
-            )
+        workJob = scope.launch {
+            try {
+                val outcome = decodeCoordinator.decode(
+                    file = file,
+                    displayName = displayName,
+                    options = options,
+                    onStage = { stage ->
+                        withContext(Dispatchers.Main.immediate) { progressText = stage }
+                    },
+                )
+                TerrainPerformanceSession.publish(outcome.gpuScene)
+                cacheSizeBytes = terrainCache.diskSizeBytes()
+                val source = TerrainImportSource(
+                    uri = Uri.fromFile(file).toString(),
+                    displayName = displayName,
+                    options = options,
+                )
+                val cacheLabel = when (outcome.cacheHit) {
+                    LazTerrainCache.Hit.MEMORY -> "memory cache"
+                    LazTerrainCache.Hit.DISK -> "disk cache"
+                    LazTerrainCache.Hit.MISS -> "streamed point-cloud decode"
+                }
+                showResult(
+                    result = outcome.terrain,
+                    name = displayName,
+                    source = source,
+                    successMessage = if (downloadedNow) {
+                        "Saved $displayName, built LOD/GPU batches, and opened it using $cacheLabel."
+                    } else {
+                        "Opened $displayName using $cacheLabel; GPU 3D and zoom LOD are ready."
+                    },
+                )
+            } catch (_: CancellationException) {
+                resetWorkState()
+                isError = false
+                message = "Import cancelled."
+            } catch (error: Throwable) {
+                resetWorkState()
+                isError = true
+                message = error.localizedMessage ?: "Terrain decode failed"
+            }
         }
     }
 
+    fun renderSavedDataset(dataset: LazDataset) {
+        if (isWorking) return
+        decodeStoredDataset(dataset.file, dataset.displayName)
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+        if (uri == null || isWorking) return@rememberLauncherForActivityResult
         val name = displayName(context, uri)
+        val extension = name.substringAfterLast('.', "").lowercase(Locale.US)
         val options = importOptions()
         runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
+            context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+
+        workJob?.cancel()
         isWorking = true
         progress = null
-        progressText = null
-        message = "Reading $name…"
+        progressText = "Reading $name…"
+        message = null
         isError = false
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching { parseContentUri(context, uri, name, options) }.getOrNull()
+        workJob = scope.launch {
+            try {
+                if (extension in setOf("las", "laz")) {
+                    progressText = "Copying point cloud into persistent app storage…"
+                    val stored = copyContentUriToStore(context, uri, name, datasetStore) { copied ->
+                        withContext(Dispatchers.Main.immediate) {
+                            progressText = "Copied ${formatBytes(copied)}"
+                        }
+                    }
+                    savedDatasets = datasetStore.list()
+                    decodeStoredDataset(stored, stored.name)
+                } else {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching { parseContentUri(context, uri, name, options) }.getOrNull()
+                    }
+                    showResult(result, name, null)
+                }
+            } catch (_: CancellationException) {
+                resetWorkState()
+                message = "Import cancelled."
+                isError = false
+            } catch (error: Throwable) {
+                resetWorkState()
+                isError = true
+                message = error.localizedMessage ?: "Local import failed"
             }
-            val extension = name.substringAfterLast('.', "").lowercase(Locale.US)
-            val source = if (result != null && extension in setOf("las", "laz")) {
-                TerrainImportSource(uri.toString(), name, options)
-            } else {
-                null
-            }
-            showResult(result, name, source)
         }
     }
 
@@ -185,7 +252,7 @@ fun CustomFileLoader(
     ) {
         Text("Import terrain", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Load a local terrain file or download a direct NOAA LAZ/LAS file. Remote point clouds are saved in app storage and remain available in the dataset library.",
+            "Large LAZ/LAS files stream to disk, decode in cancellable point batches, build spatial LOD levels, and prepare bounded OpenGL buffers in the background.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -197,7 +264,7 @@ fun CustomFileLoader(
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("LiDAR ground processing", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Choose how returns become a raster. The original LAZ/LAS file is never rewritten or reclassified.",
+                    "The source point cloud is never rewritten. These settings are included in the decoded cache key.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -287,8 +354,10 @@ fun CustomFileLoader(
                         ) { Text("Load sample") }
                         Button(
                             onClick = {
+                                workJob?.cancel()
                                 isWorking = true
-                                scope.launch {
+                                progressText = "Building matrix terrain…"
+                                workJob = scope.launch {
                                     val result = withContext(Dispatchers.Default) { DemGenerator.parseCustomGrid(matrix) }
                                     showResult(
                                         result?.let { DemGenerator.TerrainLoadResult(it, "Local elevation matrix", true) },
@@ -337,14 +406,15 @@ fun CustomFileLoader(
                                 return@Button
                             }
 
+                            workJob?.cancel()
                             isWorking = true
                             progress = null
                             progressText = "Connecting…"
                             message = null
                             isError = false
-                            scope.launch {
-                                runCatching {
-                                    importRepository.importFromUrl(
+                            workJob = scope.launch {
+                                try {
+                                    val file = importRepository.importFromUrl(
                                         url = url,
                                         store = datasetStore,
                                         onProgress = { downloaded, total ->
@@ -358,32 +428,14 @@ fun CustomFileLoader(
                                             }
                                         },
                                     )
-                                }.onSuccess { file ->
                                     savedDatasets = datasetStore.list()
-                                    val options = importOptions()
-                                    val result = withContext(Dispatchers.IO) {
-                                        runCatching {
-                                            FileInputStream(file).buffered().use { input ->
-                                                DemGenerator.parseFromStreamDetailed(file.name, input, options)
-                                            }
-                                        }.getOrNull()
-                                    }
-                                    if (result != null) terrainCache.put(file, options, result)
-                                    val source = TerrainImportSource(
-                                        uri = Uri.fromFile(file).toString(),
-                                        displayName = file.name,
-                                        options = options,
-                                    )
-                                    showResult(
-                                        result = result,
-                                        name = file.name,
-                                        source = source,
-                                        successMessage = "Saved ${file.name} and opened it in the terrain engine.",
-                                    )
-                                }.onFailure { error ->
-                                    isWorking = false
-                                    progress = null
-                                    progressText = null
+                                    decodeStoredDataset(file, file.name, downloadedNow = true)
+                                } catch (_: CancellationException) {
+                                    resetWorkState()
+                                    message = "Download cancelled. Partial file removed."
+                                    isError = false
+                                } catch (error: Throwable) {
+                                    resetWorkState()
                                     isError = true
                                     message = error.localizedMessage ?: "Download failed"
                                 }
@@ -409,8 +461,12 @@ fun CustomFileLoader(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            progressText?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall)
+            progressText?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            OutlinedButton(
+                onClick = ::cancelWork,
+                modifier = Modifier.fillMaxWidth().testTag("cancel_lidar_import_button"),
+            ) {
+                Text("Cancel")
             }
         }
 
@@ -422,10 +478,49 @@ fun CustomFileLoader(
             )
         }
 
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Decoded terrain cache", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "${formatBytes(cacheSizeBytes)} on disk · 64 MiB memory LRU",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                TextButton(
+                    onClick = {
+                        terrainCache.clear()
+                        TerrainPerformanceSession.clear()
+                        cacheSizeBytes = 0L
+                        message = "Decoded terrain cache cleared. Original LAZ/LAS files were kept."
+                        isError = false
+                    },
+                    enabled = !isWorking,
+                ) { Text("Clear cache") }
+            }
+        }
+
         SavedDatasetLibrary(
             datasets = savedDatasets,
             enabled = !isWorking,
             onOpen = ::renderSavedDataset,
+            onDelete = { dataset ->
+                terrainCache.remove(dataset.file)
+                if (datasetStore.delete(dataset)) {
+                    savedDatasets = datasetStore.list()
+                    TerrainPerformanceSession.clear()
+                    cacheSizeBytes = terrainCache.diskSizeBytes()
+                    message = "Deleted ${dataset.displayName}."
+                    isError = false
+                }
+            },
         )
     }
 }
@@ -435,6 +530,7 @@ private fun SavedDatasetLibrary(
     datasets: List<LazDataset>,
     enabled: Boolean,
     onOpen: (LazDataset) -> Unit,
+    onDelete: (LazDataset) -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -444,26 +540,38 @@ private fun SavedDatasetLibrary(
             Text("Saved LAZ datasets", style = MaterialTheme.typography.titleMedium)
             if (datasets.isEmpty()) {
                 Text(
-                    "Downloaded LAZ/LAS files will appear here.",
+                    "Downloaded or copied LAZ/LAS files will appear here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 datasets.forEach { dataset ->
-                    OutlinedButton(
-                        onClick = { onOpen(dataset) },
-                        enabled = enabled,
-                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.Start,
+                        OutlinedButton(
+                            onClick = { onOpen(dataset) },
+                            enabled = enabled,
+                            modifier = Modifier.weight(1f).height(60.dp),
                         ) {
-                            Text(dataset.displayName, maxLines = 1)
-                            Text(
-                                "${formatBytes(dataset.sizeBytes)} · Tap to render",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.Start,
+                            ) {
+                                Text(dataset.displayName, maxLines = 1)
+                                Text(
+                                    "${formatBytes(dataset.sizeBytes)} · Tap to decode/render",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                        TextButton(
+                            onClick = { onDelete(dataset) },
+                            enabled = enabled,
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete ${dataset.displayName}")
                         }
                     }
                 }
@@ -530,6 +638,46 @@ private fun displayName(context: Context, uri: Uri): String {
         }
     }
     return uri.lastPathSegment?.substringAfterLast('/') ?: "terrain-file"
+}
+
+private suspend fun copyContentUriToStore(
+    context: Context,
+    uri: Uri,
+    name: String,
+    store: LazDatasetStore,
+    onProgress: suspend (Long) -> Unit,
+): File = withContext(Dispatchers.IO) {
+    val destination = store.destinationFor(name)
+    val partial = File(store.directory, ".${destination.name}.part")
+    partial.delete()
+    try {
+        val coroutineContext = currentCoroutineContext()
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(partial).buffered(1024 * 1024).use { output ->
+                val buffer = ByteArray(1024 * 1024)
+                var copied = 0L
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count == 0) continue
+                    copied += count
+                    require(copied <= MAX_LOCAL_IMPORT_BYTES) { "File exceeds the 10 GB safety limit" }
+                    output.write(buffer, 0, count)
+                    onProgress(copied)
+                }
+                output.flush()
+            }
+        } ?: error("Could not open selected file")
+        if (!partial.renameTo(destination)) {
+            partial.copyTo(destination, overwrite = false)
+            partial.delete()
+        }
+        destination
+    } catch (error: Throwable) {
+        partial.delete()
+        throw error
+    }
 }
 
 private fun parseContentUri(
