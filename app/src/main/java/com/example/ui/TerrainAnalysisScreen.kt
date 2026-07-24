@@ -1,7 +1,9 @@
 package com.example.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,17 +35,22 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.analysis.AnalysisPalette
+import com.example.analysis.TerrainAnalysisLayer
 import com.example.analysis.TerrainAnalysisType
 import com.example.analysis.TerrainRenderOptions
+import com.example.data.ElevationGrid
 import kotlin.math.roundToInt
 
 enum class AnalysisDisplayMode(val title: String) {
@@ -51,6 +58,16 @@ enum class AnalysisDisplayMode(val title: String) {
     ANALYSIS("Analysis"),
     BLENDED("Blended"),
 }
+
+private data class InspectedCell(
+    val column: Int,
+    val row: Int,
+    val elevationMeters: Float,
+    val analysisValue: Float,
+    val valid: Boolean,
+    val localXMeters: Float,
+    val localYMeters: Float,
+)
 
 @Composable
 fun TerrainAnalysisScreen(
@@ -76,6 +93,7 @@ fun TerrainAnalysisScreen(
     val isAiRunning by analysisViewModel.isAiRunning.collectAsStateWithLifecycle()
     val menuExpanded = remember { mutableStateOf(false) }
     val displayMode = remember { mutableStateOf(AnalysisDisplayMode.BLENDED) }
+    val inspectedCell = remember(layer, grid) { mutableStateOf<InspectedCell?>(null) }
 
     Column(
         modifier = Modifier
@@ -91,9 +109,13 @@ fun TerrainAnalysisScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column {
-                Text("Phase 3 · Terrain Analysis", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text(
-                    "Validated calculations and professional rendering",
+                    "Phase 3 · Terrain Analysis",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "Validated calculations, professional rendering, overlays, and cell inspection",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -126,6 +148,7 @@ fun TerrainAnalysisScreen(
                         onClick = {
                             analysisViewModel.selectType(type)
                             analysisViewModel.runAnalysis(grid)
+                            inspectedCell.value = null
                             menuExpanded.value = false
                         },
                     )
@@ -162,7 +185,13 @@ fun TerrainAnalysisScreen(
                 Text("Cancel ${selectedType.title}")
             }
         } else {
-            Button(onClick = { analysisViewModel.runAnalysis(grid) }, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = {
+                    inspectedCell.value = null
+                    analysisViewModel.runAnalysis(grid)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text("Run ${selectedType.title}")
             }
         }
@@ -173,20 +202,52 @@ fun TerrainAnalysisScreen(
         }
 
         bitmap?.let { analysisBitmap ->
-            val previewBitmap = when (displayMode.value) {
-                AnalysisDisplayMode.TERRAIN -> terrainBitmap
-                else -> analysisBitmap
+            val activeLayer = layer
+            val previewWidth = when (displayMode.value) {
+                AnalysisDisplayMode.TERRAIN -> terrainBitmap.safeWidth
+                else -> analysisBitmap.width.coerceAtLeast(1)
             }
+            val previewHeight = when (displayMode.value) {
+                AnalysisDisplayMode.TERRAIN -> terrainBitmap.safeHeight
+                else -> analysisBitmap.height.coerceAtLeast(1)
+            }
+
             Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                 Column {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .aspectRatio(previewBitmap.width.toFloat() / previewBitmap.height.coerceAtLeast(1)),
+                            .aspectRatio(previewWidth.toFloat() / previewHeight)
+                            .pointerInput(activeLayer, grid) {
+                                detectTapGestures { tap ->
+                                    val result = activeLayer ?: return@detectTapGestures
+                                    val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                    val heightPx = size.height.toFloat().coerceAtLeast(1f)
+                                    val column = ((tap.x / widthPx) * result.width)
+                                        .toInt().coerceIn(0, result.width - 1)
+                                    val row = ((tap.y / heightPx) * result.height)
+                                        .toInt().coerceIn(0, result.height - 1)
+                                    val index = row * result.width + column
+                                    val gridColumn = ((column.toFloat() / result.width) * grid.width)
+                                        .toInt().coerceIn(0, grid.width - 1)
+                                    val gridRow = ((row.toFloat() / result.height) * grid.height)
+                                        .toInt().coerceIn(0, grid.height - 1)
+                                    val gridIndex = gridRow * grid.width + gridColumn
+                                    inspectedCell.value = InspectedCell(
+                                        column = column,
+                                        row = row,
+                                        elevationMeters = grid.bareEarth[gridIndex],
+                                        analysisValue = result.values[index],
+                                        valid = result.validData[index] && grid.validData[gridIndex],
+                                        localXMeters = (gridColumn + 0.5f) * grid.cellSizeMeters,
+                                        localYMeters = (gridRow + 0.5f) * grid.cellSizeMeters,
+                                    )
+                                }
+                            },
                     ) {
                         if (displayMode.value != AnalysisDisplayMode.ANALYSIS) {
                             Image(
-                                bitmap = terrainBitmap.asImageBitmap(),
+                                bitmap = terrainBitmap.safeAsImageBitmap(),
                                 contentDescription = "Terrain hillshade",
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Fit,
@@ -200,6 +261,40 @@ fun TerrainAnalysisScreen(
                                 contentScale = ContentScale.Fit,
                             )
                         }
+                        inspectedCell.value?.let { selected ->
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                val center = Offset(
+                                    x = ((selected.column + 0.5f) / previewWidth) * size.width,
+                                    y = ((selected.row + 0.5f) / previewHeight) * size.height,
+                                )
+                                drawCircle(Color.Black, radius = 15f, center = center, style = Stroke(6f))
+                                drawCircle(Color.White, radius = 15f, center = center, style = Stroke(3f))
+                                drawLine(
+                                    Color.Black,
+                                    Offset(center.x - 24f, center.y),
+                                    Offset(center.x + 24f, center.y),
+                                    strokeWidth = 6f,
+                                )
+                                drawLine(
+                                    Color.White,
+                                    Offset(center.x - 24f, center.y),
+                                    Offset(center.x + 24f, center.y),
+                                    strokeWidth = 2.5f,
+                                )
+                                drawLine(
+                                    Color.Black,
+                                    Offset(center.x, center.y - 24f),
+                                    Offset(center.x, center.y + 24f),
+                                    strokeWidth = 6f,
+                                )
+                                drawLine(
+                                    Color.White,
+                                    Offset(center.x, center.y - 24f),
+                                    Offset(center.x, center.y + 24f),
+                                    strokeWidth = 2.5f,
+                                )
+                            }
+                        }
                     }
                     if (displayMode.value != AnalysisDisplayMode.TERRAIN) {
                         AnalysisLegend(selectedType, renderOptions)
@@ -210,8 +305,18 @@ fun TerrainAnalysisScreen(
                             style = MaterialTheme.typography.labelMedium,
                         )
                     }
+                    Text(
+                        "Tap the preview to inspect elevation and analysis values.",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
+        }
+
+        inspectedCell.value?.let { inspected ->
+            InspectionCard(inspected, layer)
         }
 
         layer?.let { result ->
@@ -256,6 +361,36 @@ fun TerrainAnalysisScreen(
                     Text("ChatGPT interpretation", fontWeight = FontWeight.Bold)
                     Text(it)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InspectionCard(inspected: InspectedCell, layer: TerrainAnalysisLayer?) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text("Selected terrain cell", fontWeight = FontWeight.Bold)
+            Text(
+                "Column ${inspected.column} · row ${inspected.row}",
+                fontFamily = FontFamily.Monospace,
+            )
+            Text(
+                "Local X ${format(inspected.localXMeters)} m · Y ${format(inspected.localYMeters)} m",
+                fontFamily = FontFamily.Monospace,
+            )
+            if (inspected.valid) {
+                Text("Elevation: ${format(inspected.elevationMeters)} m")
+                Text("${layer?.type?.title ?: "Analysis"}: ${format(inspected.analysisValue)} ${layer?.type?.unit.orEmpty()}")
+                layer?.let { result ->
+                    val deviation = inspected.analysisValue - result.mean
+                    Text(
+                        "Difference from layer mean: ${if (deviation >= 0f) "+" else ""}${format(deviation)} ${result.type.unit}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Text("NoData cell · no valid terrain return", color = MaterialTheme.colorScheme.error)
             }
         }
     }
@@ -338,7 +473,10 @@ private fun AnalysisVisualizationControls(
                 }
                 Switch(checked = options.inverted, onCheckedChange = onInvertedChanged)
             }
-            Text("Blended mode places the analysis over the original hillshade. Rendering controls do not recalculate terrain.", style = MaterialTheme.typography.bodySmall)
+            Text(
+                "Blended mode places the analysis over the original hillshade. Rendering controls do not recalculate terrain.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -365,7 +503,10 @@ private fun AnalysisLegend(type: TerrainAnalysisType, options: TerrainRenderOpti
                 .background(Brush.horizontalGradient(if (options.inverted) colors.reversed() else colors), RoundedCornerShape(7.dp)),
         )
         Text(if (options.inverted) "$labels · inverted" else labels, fontFamily = FontFamily.Monospace)
-        Text("Brightness ${"%.2f".format(options.brightness)}× · opacity ${(options.opacity * 100f).roundToInt()}%", style = MaterialTheme.typography.bodySmall)
+        Text(
+            "Brightness ${"%.2f".format(options.brightness)}× · opacity ${(options.opacity * 100f).roundToInt()}%",
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
