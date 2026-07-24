@@ -73,11 +73,14 @@ object TerrainGpuSceneBuilder {
         )
         val levels = pyramid.levels.map { level ->
             val index = TerrainSpatialGridIndex.build(level.grid, tileSize)
+            val elevationBounds = elevationBounds(level.grid)
             TerrainGpuLevel(
                 reductionFactor = level.reductionFactor,
                 gridWidth = level.grid.width,
                 gridHeight = level.grid.height,
-                batches = index.nonEmptyTiles().mapNotNull { tile -> buildBatch(level.grid, tile) },
+                batches = index.nonEmptyTiles().mapNotNull { tile ->
+                    buildBatch(level.grid, tile, elevationBounds.first, elevationBounds.second)
+                },
             )
         }.filter { it.batches.isNotEmpty() }
 
@@ -86,22 +89,21 @@ object TerrainGpuSceneBuilder {
     }
 
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
+        val bounds = elevationBounds(grid)
+        return buildBatch(grid, tile, bounds.first, bounds.second)
+    }
+
+    private fun buildBatch(
+        grid: ElevationGrid,
+        tile: TerrainSpatialTile,
+        minElevation: Float,
+        maxElevation: Float,
+    ): TerrainGpuBatch? {
         if (tile.isEmpty) return null
         val localWidth = tile.endXInclusive - tile.startX + 1
         val localHeight = tile.endYInclusive - tile.startY + 1
         if (localWidth < 2 || localHeight < 2) return null
         require(localWidth.toLong() * localHeight <= 65_535L)
-
-        var minElevation = Float.MAX_VALUE
-        var maxElevation = -Float.MAX_VALUE
-        for (index in grid.bareEarth.indices) {
-            if (!grid.validData[index]) continue
-            val value = grid.bareEarth[index]
-            if (!value.isFinite()) continue
-            if (value < minElevation) minElevation = value
-            if (value > maxElevation) maxElevation = value
-        }
-        if (minElevation == Float.MAX_VALUE) return null
         val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
 
         val vertices = FloatArray(localWidth * localHeight * TerrainGpuBatch.FLOATS_PER_VERTEX)
@@ -113,21 +115,16 @@ object TerrainGpuSceneBuilder {
                 val vertexIndex = (localY * localWidth + localX) * TerrainGpuBatch.FLOATS_PER_VERTEX
                 val valid = grid.validData[sourceIndex] && grid.bareEarth[sourceIndex].isFinite()
                 val elevation = if (valid) grid.bareEarth[sourceIndex] else minElevation
-                val normalizedX = if (grid.width > 1) x.toFloat() / (grid.width - 1) * 2f - 1f else 0f
-                val normalizedY = if (grid.height > 1) 1f - y.toFloat() / (grid.height - 1) * 2f else 0f
-                val normalizedZ = ((elevation - minElevation) / elevationRange - 0.5f) * 0.75f
-                val normal = normalAt(grid, x, y)
 
-                vertices[vertexIndex] = normalizedX
-                vertices[vertexIndex + 1] = normalizedY
-                vertices[vertexIndex + 2] = normalizedZ
-                vertices[vertexIndex + 3] = normal[0]
-                vertices[vertexIndex + 4] = normal[1]
-                vertices[vertexIndex + 5] = if (valid) normal[2] else 0f
+                vertices[vertexIndex] = if (grid.width > 1) x.toFloat() / (grid.width - 1) * 2f - 1f else 0f
+                vertices[vertexIndex + 1] = if (grid.height > 1) 1f - y.toFloat() / (grid.height - 1) * 2f else 0f
+                vertices[vertexIndex + 2] = ((elevation - minElevation) / elevationRange - 0.5f) * 0.75f
+                writeNormal(grid, x, y, valid, vertices, vertexIndex + 3)
             }
         }
 
-        val indices = ArrayList<Short>((localWidth - 1) * (localHeight - 1) * 6)
+        val indices = ShortArray((localWidth - 1) * (localHeight - 1) * 6)
+        var indexCount = 0
         for (localY in 0 until localHeight - 1) {
             for (localX in 0 until localWidth - 1) {
                 val x = tile.startX + localX
@@ -143,19 +140,47 @@ object TerrainGpuSceneBuilder {
                 val v10 = v00 + 1
                 val v01 = v00 + localWidth
                 val v11 = v01 + 1
-                indices += v00.toShort()
-                indices += v01.toShort()
-                indices += v10.toShort()
-                indices += v10.toShort()
-                indices += v01.toShort()
-                indices += v11.toShort()
+                indices[indexCount++] = v00.toShort()
+                indices[indexCount++] = v01.toShort()
+                indices[indexCount++] = v10.toShort()
+                indices[indexCount++] = v10.toShort()
+                indices[indexCount++] = v01.toShort()
+                indices[indexCount++] = v11.toShort()
             }
         }
-        if (indices.isEmpty()) return null
-        return TerrainGpuBatch(tile, vertices, indices.toShortArray())
+        if (indexCount == 0) return null
+        return TerrainGpuBatch(tile, vertices, indices.copyOf(indexCount))
     }
 
-    private fun normalAt(grid: ElevationGrid, x: Int, y: Int): FloatArray {
+    private fun elevationBounds(grid: ElevationGrid): Pair<Float, Float> {
+        var minElevation = Float.MAX_VALUE
+        var maxElevation = -Float.MAX_VALUE
+        for (index in grid.bareEarth.indices) {
+            if (!grid.validData[index]) continue
+            val value = grid.bareEarth[index]
+            if (!value.isFinite()) continue
+            if (value < minElevation) minElevation = value
+            if (value > maxElevation) maxElevation = value
+        }
+        require(minElevation != Float.MAX_VALUE) { "Terrain contains no valid elevations" }
+        return minElevation to maxElevation
+    }
+
+    private fun writeNormal(
+        grid: ElevationGrid,
+        x: Int,
+        y: Int,
+        valid: Boolean,
+        target: FloatArray,
+        offset: Int,
+    ) {
+        if (!valid) {
+            target[offset] = 0f
+            target[offset + 1] = 0f
+            target[offset + 2] = 0f
+            return
+        }
+
         fun elevationAt(sampleX: Int, sampleY: Int): Float {
             val sx = sampleX.coerceIn(0, grid.width - 1)
             val sy = sampleY.coerceIn(0, grid.height - 1)
@@ -163,7 +188,7 @@ object TerrainGpuSceneBuilder {
             return if (grid.validData[index] && grid.bareEarth[index].isFinite()) {
                 grid.bareEarth[index]
             } else {
-                grid.bareEarth[y * grid.width + x].takeIf(Float::isFinite) ?: 0f
+                grid.bareEarth[y * grid.width + x].takeIf { it.isFinite() } ?: 0f
             }
         }
 
@@ -178,6 +203,8 @@ object TerrainGpuSceneBuilder {
         nx /= length
         ny /= length
         nz /= length
-        return floatArrayOf(nx, ny, nz)
+        target[offset] = nx
+        target[offset + 1] = ny
+        target[offset + 2] = nz
     }
 }
