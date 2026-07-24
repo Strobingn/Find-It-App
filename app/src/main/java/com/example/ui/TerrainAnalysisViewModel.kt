@@ -9,11 +9,13 @@ import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.analysis.AiTerrainInterpreter
+import com.example.analysis.AnalysisPalette
 import com.example.analysis.TerrainAnalysisEngine
 import com.example.analysis.TerrainAnalysisLayer
 import com.example.analysis.TerrainAnalysisOptions
 import com.example.analysis.TerrainAnalysisRenderer
 import com.example.analysis.TerrainAnalysisType
+import com.example.analysis.TerrainRenderOptions
 import com.example.data.ElevationGrid
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -33,6 +35,9 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
 
     private val _options = MutableStateFlow(TerrainAnalysisOptions())
     val options: StateFlow<TerrainAnalysisOptions> = _options.asStateFlow()
+
+    private val _renderOptions = MutableStateFlow(TerrainRenderOptions())
+    val renderOptions: StateFlow<TerrainRenderOptions> = _renderOptions.asStateFlow()
 
     private val _layer = MutableStateFlow<TerrainAnalysisLayer?>(null)
     val layer: StateFlow<TerrainAnalysisLayer?> = _layer.asStateFlow()
@@ -65,6 +70,7 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
     val isAiRunning: StateFlow<Boolean> = _isAiRunning.asStateFlow()
 
     private var analysisJob: Job? = null
+    private var renderJob: Job? = null
     private var aiJob: Job? = null
     private var exportJob: Job? = null
     private var requestGeneration = 0L
@@ -76,6 +82,7 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
         val cellSizeBits: Int,
         val type: TerrainAnalysisType,
         val options: TerrainAnalysisOptions,
+        val renderOptions: TerrainRenderOptions,
     )
 
     private data class CachedResult(
@@ -124,14 +131,52 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
         _options.value = _options.value.copy(rainfallFactor = value.coerceIn(0.1f, 5f))
     }
 
+    fun updateAnalysisPalette(palette: AnalysisPalette) {
+        if (_renderOptions.value.palette == palette) return
+        _renderOptions.value = _renderOptions.value.copy(palette = palette)
+        rerenderCurrentLayer()
+    }
+
+    fun updateAnalysisContrast(value: Float) {
+        val contrast = value.coerceIn(0.5f, 3f)
+        if (_renderOptions.value.contrast == contrast) return
+        _renderOptions.value = _renderOptions.value.copy(contrast = contrast)
+        rerenderCurrentLayer()
+    }
+
+    fun setAnalysisPaletteInverted(inverted: Boolean) {
+        if (_renderOptions.value.inverted == inverted) return
+        _renderOptions.value = _renderOptions.value.copy(inverted = inverted)
+        rerenderCurrentLayer()
+    }
+
+    private fun rerenderCurrentLayer() {
+        val currentLayer = _layer.value ?: return
+        val settings = _renderOptions.value
+        renderJob?.cancel()
+        renderJob = viewModelScope.launch {
+            _status.value = "Updating ${currentLayer.type.title} visualization…"
+            val rendered = withContext(Dispatchers.Default) {
+                TerrainAnalysisRenderer.render(currentLayer, settings)
+            }
+            if (_layer.value === currentLayer && _renderOptions.value == settings) {
+                _bitmap.value = rendered
+                _lastResultWasCached.value = false
+                _status.value = "${currentLayer.summary} Visualization updated without recalculating terrain."
+            }
+        }
+    }
+
     fun runAnalysis(grid: ElevationGrid) {
         analysisJob?.cancel()
+        renderJob?.cancel()
         aiJob?.cancel()
         _aiInterpretation.value = null
         _exportStatus.value = null
 
         val type = _selectedType.value
         val normalizedOptions = _options.value.normalized(grid.cellSizeMeters)
+        val currentRenderOptions = _renderOptions.value.sanitized()
         val cacheKey = CacheKey(
             gridIdentity = System.identityHashCode(grid),
             width = grid.width,
@@ -139,12 +184,11 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
             cellSizeBits = grid.cellSizeMeters.toBits(),
             type = type,
             options = normalizedOptions,
+            renderOptions = currentRenderOptions,
         )
         val generation = ++requestGeneration
 
-        synchronized(resultCache) {
-            resultCache[cacheKey]
-        }?.let { cached ->
+        synchronized(resultCache) { resultCache[cacheKey] }?.let { cached ->
             _layer.value = cached.layer
             _bitmap.value = cached.bitmap
             _lastResultWasCached.value = true
@@ -161,7 +205,7 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
                     TerrainAnalysisEngine.analyze(grid, type, normalizedOptions)
                 }
                 val rendered = withContext(Dispatchers.Default) {
-                    TerrainAnalysisRenderer.render(result)
+                    TerrainAnalysisRenderer.render(result, currentRenderOptions)
                 }
                 if (generation != requestGeneration || _selectedType.value != type) return@launch
 
@@ -173,18 +217,14 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
                 _bitmap.value = rendered
                 _status.value = result.summary
             } catch (cancelled: CancellationException) {
-                if (generation == requestGeneration) {
-                    _status.value = "${type.title} calculation cancelled."
-                }
+                if (generation == requestGeneration) _status.value = "${type.title} calculation cancelled."
                 throw cancelled
             } catch (error: Exception) {
                 if (generation == requestGeneration) {
                     _status.value = error.message ?: "Terrain analysis failed."
                 }
             } finally {
-                if (generation == requestGeneration) {
-                    _isRunning.value = false
-                }
+                if (generation == requestGeneration) _isRunning.value = false
             }
         }
     }
@@ -225,9 +265,7 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
                     append(System.currentTimeMillis())
                     append(".png")
                 }
-                withContext(Dispatchers.IO) {
-                    saveBitmapToPictures(currentBitmap, fileName)
-                }
+                withContext(Dispatchers.IO) { saveBitmapToPictures(currentBitmap, fileName) }
                 _exportStatus.value = "Saved $fileName to Pictures/Find It."
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -300,11 +338,10 @@ class TerrainAnalysisViewModel(application: Application) : AndroidViewModel(appl
 
     override fun onCleared() {
         analysisJob?.cancel()
+        renderJob?.cancel()
         aiJob?.cancel()
         exportJob?.cancel()
-        synchronized(resultCache) {
-            resultCache.clear()
-        }
+        synchronized(resultCache) { resultCache.clear() }
         super.onCleared()
     }
 
