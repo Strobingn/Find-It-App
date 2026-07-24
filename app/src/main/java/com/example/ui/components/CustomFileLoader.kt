@@ -14,7 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.ui.Alignment
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Language
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -34,28 +36,31 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
+import com.example.data.LazDataset
+import com.example.data.LazDatasetStore
+import com.example.data.LazDownloadManager
+import com.example.data.LazImportRepository
 import com.example.data.LidarImportOptions
+import com.example.data.NoaaLidarCatalog
 import com.example.data.TerrainImportSource
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.InetAddress
-import java.net.URL
 import java.util.Locale
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val MAX_DOWNLOAD_BYTES = 250L * 1024L * 1024L
+private const val MAX_LOCAL_IMPORT_BYTES = LazDownloadManager.MAX_IMPORT_BYTES
 private val supportedExtensions = setOf("las", "laz", "tif", "tiff", "asc", "xyz", "csv", "txt", "dem")
 
 @Composable
@@ -65,16 +70,24 @@ fun CustomFileLoader(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val datasetStore = remember(context) {
+        val baseDirectory = context.getExternalFilesDir(null) ?: context.filesDir
+        LazDatasetStore(File(baseDirectory, "lidar"))
+    }
+    val importRepository = remember { LazImportRepository(LazDownloadManager()) }
+
     var mode by remember { mutableStateOf(0) }
     var matrix by remember { mutableStateOf("") }
     var remoteUrl by remember { mutableStateOf("") }
     var isWorking by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<Float?>(null) }
+    var progressText by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var isError by remember { mutableStateOf(false) }
     var groundMode by remember { mutableStateOf(GroundSurfaceMode.SOURCE_CLASSIFIED) }
     var rasterResolution by remember { mutableStateOf(512) }
     var smoothingRadius by remember { mutableStateOf(0) }
+    var savedDatasets by remember { mutableStateOf(datasetStore.list()) }
 
     fun importOptions() = LidarImportOptions(
         groundMode = groundMode,
@@ -86,16 +99,43 @@ fun CustomFileLoader(
         result: DemGenerator.TerrainLoadResult?,
         name: String,
         source: TerrainImportSource? = null,
+        successMessage: String? = null,
     ) {
         isWorking = false
         progress = null
+        progressText = null
         if (result == null) {
             isError = true
             message = "Could not parse $name. Supported: LAZ, LAS, GeoTIFF, ASC, XYZ, CSV/text matrices, or ZIP."
         } else {
             onCustomTerrainLoaded(result, source)
             isError = false
-            message = "$name loaded as ${result.grid.width} × ${result.grid.height}. ${result.summary}"
+            message = successMessage ?: "$name loaded as ${result.grid.width} × ${result.grid.height}. ${result.summary}"
+        }
+    }
+
+    fun renderSavedDataset(dataset: LazDataset) {
+        if (isWorking) return
+        val options = importOptions()
+        isWorking = true
+        progress = null
+        progressText = null
+        message = "Reading ${dataset.displayName}…"
+        isError = false
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    FileInputStream(dataset.file).buffered().use { input ->
+                        DemGenerator.parseFromStreamDetailed(dataset.displayName, input, options)
+                    }
+                }.getOrNull()
+            }
+            val source = TerrainImportSource(
+                uri = Uri.fromFile(dataset.file).toString(),
+                displayName = dataset.displayName,
+                options = options,
+            )
+            showResult(result, dataset.displayName, source)
         }
     }
 
@@ -110,7 +150,10 @@ fun CustomFileLoader(
             )
         }
         isWorking = true
+        progress = null
+        progressText = null
         message = "Reading $name…"
+        isError = false
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching { parseContentUri(context, uri, name, options) }.getOrNull()
@@ -125,10 +168,15 @@ fun CustomFileLoader(
         }
     }
 
-    Column(modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        modifier = modifier
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Text("Import terrain", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Load LAZ/LAS or georeferenced GeoTIFF directly on-device, use another terrain grid, or download a direct HTTPS file. Grids without CRS metadata remain local-only.",
+            "Load a local terrain file or download a direct NOAA LAZ/LAS file. Remote point clouds are saved in app storage and remain available in the dataset library.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -140,7 +188,7 @@ fun CustomFileLoader(
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("LiDAR ground processing", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Choose how returns become a raster. This is non-destructive: the source LAZ/LAS classifications are never overwritten.",
+                    "Choose how returns become a raster. The original LAZ/LAS file is never rewritten or reclassified.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -169,11 +217,6 @@ fun CustomFileLoader(
                     selected = rasterResolution,
                     onSelected = { rasterResolution = it },
                 )
-                Text(
-                    "Fine detail preserves smaller banks and foundation edges but renders more slowly.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
 
                 Text("Ground smoothing", style = MaterialTheme.typography.labelLarge)
                 ChoiceRow(
@@ -183,12 +226,19 @@ fun CustomFileLoader(
                 )
             }
         }
+
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("Local / matrix", "Remote HTTPS").forEachIndexed { index, label ->
+            listOf("Local / matrix", "LAZ URL").forEachIndexed { index, label ->
                 if (mode == index) {
-                    Button(onClick = { mode = index }, modifier = Modifier.weight(1f).height(48.dp)) { Text(label) }
+                    Button(
+                        onClick = { mode = index },
+                        modifier = Modifier.weight(1f).height(48.dp),
+                    ) { Text(label) }
                 } else {
-                    OutlinedButton(onClick = { mode = index }, modifier = Modifier.weight(1f).height(48.dp)) { Text(label) }
+                    OutlinedButton(
+                        onClick = { mode = index },
+                        modifier = Modifier.weight(1f).height(48.dp),
+                    ) { Text(label) }
                 }
             }
         }
@@ -200,11 +250,13 @@ fun CustomFileLoader(
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (mode == 0) {
                     Button(
-                        onClick = { picker.launch(arrayOf("application/octet-stream", "image/tiff", "text/*", "application/zip")) },
+                        onClick = {
+                            picker.launch(arrayOf("application/octet-stream", "image/tiff", "text/*", "application/zip"))
+                        },
                         enabled = !isWorking,
                         modifier = Modifier.fillMaxWidth().height(52.dp).testTag("choose_lidar_file_button"),
                     ) {
-                        androidx.compose.material3.Icon(Icons.Default.UploadFile, contentDescription = null)
+                        Icon(Icons.Default.UploadFile, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("Choose terrain file")
                     }
@@ -241,57 +293,98 @@ fun CustomFileLoader(
                     }
                 } else {
                     Text(
-                        "Use the NOAA Data Access Viewer (or another trusted provider), then paste a direct HTTPS link to a LAZ, LAS, GeoTIFF, ASC, XYZ, CSV, or ZIP download.",
+                        "Find a dataset in NOAA's LiDAR viewer, copy the direct HTTPS .laz or .las download URL, then paste it below.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     OutlinedButton(
                         onClick = {
                             runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://coast.noaa.gov/dataviewer/")))
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(NoaaLidarCatalog.DATA_VIEWER_URL)))
                             }.onFailure {
                                 isError = true
-                                message = "No browser is available to open the NOAA portal."
+                                message = "No browser is available to open the NOAA LiDAR viewer."
                             }
                         },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        modifier = Modifier.fillMaxWidth().height(48.dp).testTag("open_noaa_lidar_button"),
                     ) {
-                        androidx.compose.material3.Icon(Icons.Default.Language, contentDescription = null)
+                        Icon(Icons.Default.Language, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Open NOAA Data Access Viewer")
+                        Text("Open NOAA LiDAR search")
                     }
                     OutlinedTextField(
                         value = remoteUrl,
                         onValueChange = { remoteUrl = it.trim(); message = null },
-                        label = { Text("Direct HTTPS download URL") },
+                        label = { Text("Direct LAZ/LAS HTTPS URL") },
+                        placeholder = { Text("https://…/tile.laz") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("remote_url_input"),
                     )
                     Button(
                         onClick = {
+                            val url = remoteUrl.trim()
+                            if (!importRepository.isSupportedRemoteUrl(url)) {
+                                isError = true
+                                message = "Enter a valid direct HTTPS LAZ or LAS URL."
+                                return@Button
+                            }
+
                             isWorking = true
                             progress = null
-                            message = "Connecting…"
+                            progressText = "Connecting…"
+                            message = null
+                            isError = false
                             scope.launch {
-                                downloadTerrain(
-                                    context = context,
-                                    urlText = remoteUrl,
-                                    options = importOptions(),
-                                    onProgress = { progress = it },
-                                ).onSuccess { (result, name) -> showResult(result, name) }
-                                    .onFailure {
-                                        isWorking = false
-                                        progress = null
-                                        isError = true
-                                        message = it.localizedMessage ?: "Download failed"
+                                runCatching {
+                                    importRepository.importFromUrl(
+                                        url = url,
+                                        store = datasetStore,
+                                        onProgress = { downloaded, total ->
+                                            scope.launch {
+                                                progress = if (total > 0L) downloaded.toFloat() / total.toFloat() else null
+                                                progressText = if (total > 0L) {
+                                                    "${formatBytes(downloaded)} of ${formatBytes(total)}"
+                                                } else {
+                                                    "${formatBytes(downloaded)} downloaded"
+                                                }
+                                            }
+                                        },
+                                    )
+                                }.onSuccess { file ->
+                                    savedDatasets = datasetStore.list()
+                                    val options = importOptions()
+                                    val result = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            FileInputStream(file).buffered().use { input ->
+                                                DemGenerator.parseFromStreamDetailed(file.name, input, options)
+                                            }
+                                        }.getOrNull()
                                     }
+                                    val source = TerrainImportSource(
+                                        uri = Uri.fromFile(file).toString(),
+                                        displayName = file.name,
+                                        options = options,
+                                    )
+                                    showResult(
+                                        result = result,
+                                        name = file.name,
+                                        source = source,
+                                        successMessage = "Saved ${file.name} and opened it in the terrain engine.",
+                                    )
+                                }.onFailure { error ->
+                                    isWorking = false
+                                    progress = null
+                                    progressText = null
+                                    isError = true
+                                    message = error.localizedMessage ?: "Download failed"
+                                }
                             }
                         },
                         enabled = remoteUrl.isNotBlank() && !isWorking,
                         modifier = Modifier.fillMaxWidth().height(52.dp).testTag("download_lidar_url_button"),
                     ) {
-                        androidx.compose.material3.Icon(Icons.Default.CloudDownload, contentDescription = null)
+                        Icon(Icons.Default.CloudDownload, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Download and render")
+                        Text("Download, save, and render")
                     }
                 }
             }
@@ -301,15 +394,70 @@ fun CustomFileLoader(
             if (progress == null) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             } else {
-                LinearProgressIndicator(progress = { progress!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                LinearProgressIndicator(
+                    progress = { progress!!.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            progressText?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
             }
         }
+
         message?.let {
             Text(
                 it,
                 color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
             )
+        }
+
+        SavedDatasetLibrary(
+            datasets = savedDatasets,
+            enabled = !isWorking,
+            onOpen = ::renderSavedDataset,
+        )
+    }
+}
+
+@Composable
+private fun SavedDatasetLibrary(
+    datasets: List<LazDataset>,
+    enabled: Boolean,
+    onOpen: (LazDataset) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth().testTag("saved_laz_dataset_list"),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Saved LAZ datasets", style = MaterialTheme.typography.titleMedium)
+            if (datasets.isEmpty()) {
+                Text(
+                    "Downloaded LAZ/LAS files will appear here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                datasets.forEach { dataset ->
+                    OutlinedButton(
+                        onClick = { onOpen(dataset) },
+                        enabled = enabled,
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.Start,
+                        ) {
+                            Text(dataset.displayName, maxLines = 1)
+                            Text(
+                                "${formatBytes(dataset.sizeBytes)} · Tap to render",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -380,11 +528,11 @@ private fun parseContentUri(
     name: String,
     options: LidarImportOptions,
 ): DemGenerator.TerrainLoadResult? {
-    if (name.lowercase().endsWith(".zip")) {
+    if (name.lowercase(Locale.US).endsWith(".zip")) {
         val temp = File.createTempFile("find-it-import-", ".zip", context.cacheDir)
         return try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(temp).use { output -> copyLimited(input, output, MAX_DOWNLOAD_BYTES) }
+                FileOutputStream(temp).use { output -> copyLimited(input, output, MAX_LOCAL_IMPORT_BYTES) }
             } ?: return null
             parseTerrainFile(context, temp, name, options).first
         } finally {
@@ -396,74 +544,13 @@ private fun parseContentUri(
     }
 }
 
-private suspend fun downloadTerrain(
-    context: Context,
-    urlText: String,
-    options: LidarImportOptions,
-    onProgress: (Float?) -> Unit,
-): Result<Pair<DemGenerator.TerrainLoadResult?, String>> = withContext(Dispatchers.IO) {
-    runCatching {
-        var currentUrl = validateRemoteUrl(URL(urlText))
-        var connection: HttpURLConnection? = null
-        var redirectCount = 0
-        while (true) {
-            connection?.disconnect()
-            connection = (currentUrl.openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = 20_000
-                readTimeout = 30_000
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", "Find-It-Android/1.0")
-            }
-            val status = connection!!.responseCode
-            if (status in 300..399) {
-                check(redirectCount++ < 5) { "Too many redirects" }
-                val location = connection!!.getHeaderField("Location") ?: error("Redirect had no destination")
-                currentUrl = validateRemoteUrl(URL(currentUrl, location))
-            } else {
-                check(status == HttpURLConnection.HTTP_OK) { "Server returned HTTP $status" }
-                break
-            }
-        }
-        val active = requireNotNull(connection)
-        check(active.responseCode == HttpURLConnection.HTTP_OK) { "Download did not reach a file" }
-        val declaredSize = active.contentLengthLong
-        check(declaredSize <= 0 || declaredSize <= MAX_DOWNLOAD_BYTES) { "Download exceeds the 250 MiB safety limit" }
-
-        val dispositionName = active.getHeaderField("Content-Disposition")
-            ?.substringAfter("filename=", "")
-            ?.trim(' ', '"', '\'')
-            ?.takeIf { it.isNotBlank() }
-        val urlName = currentUrl.path.substringAfterLast('/').ifBlank { "terrain-download" }
-        val name = dispositionName ?: urlName
-        val temp = File.createTempFile("find-it-download-", ".bin", context.cacheDir)
-        try {
-            active.inputStream.use { input ->
-                FileOutputStream(temp).use { output ->
-                    copyLimitedWithProgress(input, output, MAX_DOWNLOAD_BYTES) { copied ->
-                        val value = if (declaredSize > 0) copied.toFloat() / declaredSize else null
-                        withContext(Dispatchers.Main.immediate) { onProgress(value) }
-                    }
-                }
-            }
-            active.disconnect()
-            val (result, parsedName) = parseTerrainFile(context, temp, name, options)
-            withContext(Dispatchers.Main.immediate) { onProgress(1f) }
-            result to parsedName
-        } finally {
-            active.disconnect()
-            temp.delete()
-        }
-    }
-}
-
 private fun parseTerrainFile(
     context: Context,
     file: File,
     suggestedName: String,
     options: LidarImportOptions,
 ): Pair<DemGenerator.TerrainLoadResult?, String> {
-    val isZip = suggestedName.lowercase().endsWith(".zip") || FileInputStream(file).use { input ->
+    val isZip = suggestedName.lowercase(Locale.US).endsWith(".zip") || FileInputStream(file).use { input ->
         val signature = ByteArray(4)
         input.read(signature) == 4 && signature[0] == 'P'.code.toByte() && signature[1] == 'K'.code.toByte()
     }
@@ -482,7 +569,7 @@ private fun parseTerrainFile(
                 val extension = entry.name.substringAfterLast('.', "").lowercase(Locale.US)
                 if (!entry.isDirectory && extension in supportedExtensions) {
                     entryName = entry.name.substringAfterLast('/')
-                    FileOutputStream(extracted).use { output -> copyLimited(zip, output, MAX_DOWNLOAD_BYTES) }
+                    FileOutputStream(extracted).use { output -> copyLimited(zip, output, MAX_LOCAL_IMPORT_BYTES) }
                     break
                 }
                 zip.closeEntry()
@@ -497,61 +584,31 @@ private fun parseTerrainFile(
     }
 }
 
-private fun validateRemoteUrl(url: URL): URL {
-    require(url.protocol.equals("https", ignoreCase = true)) { "Only HTTPS downloads are allowed" }
-    require(url.userInfo == null) { "URLs containing credentials are not allowed" }
-    val host = url.host.lowercase(Locale.US)
-    require(host.isNotBlank() && host != "localhost" && !host.endsWith(".localhost")) { "Invalid download host" }
-    InetAddress.getAllByName(host).forEach { address ->
-        val bytes = address.address
-        val uniqueLocalV6 = bytes.size == 16 && (bytes[0].toInt() and 0xFE) == 0xFC
-        require(
-            !address.isAnyLocalAddress && !address.isLoopbackAddress && !address.isLinkLocalAddress &&
-                !address.isSiteLocalAddress && !address.isMulticastAddress && !uniqueLocalV6,
-        ) { "Private and local network downloads are blocked" }
-    }
-    return url
-}
-
 private inline fun copyLimited(
     input: java.io.InputStream,
     output: java.io.OutputStream,
     maxBytes: Long,
     onProgress: (Long) -> Unit = {},
 ) {
-    val buffer = ByteArray(64 * 1024)
+    val buffer = ByteArray(1024 * 1024)
     var copied = 0L
     while (true) {
         val count = input.read(buffer)
         if (count < 0) break
         if (count == 0) continue
         copied += count
-        require(copied <= maxBytes) { "File exceeds the 250 MiB safety limit" }
+        require(copied <= maxBytes) { "File exceeds the 10 GB safety limit" }
         output.write(buffer, 0, count)
         onProgress(copied)
     }
 }
 
-private suspend fun copyLimitedWithProgress(
-    input: java.io.InputStream,
-    output: java.io.OutputStream,
-    maxBytes: Long,
-    onProgress: suspend (Long) -> Unit,
-) {
-    val buffer = ByteArray(64 * 1024)
-    var copied = 0L
-    var lastReported = 0L
-    while (true) {
-        val count = input.read(buffer)
-        if (count < 0) break
-        if (count == 0) continue
-        copied += count
-        require(copied <= maxBytes) { "File exceeds the 250 MiB safety limit" }
-        output.write(buffer, 0, count)
-        if (copied - lastReported >= 512 * 1024 || lastReported == 0L) {
-            lastReported = copied
-            onProgress(copied)
-        }
-    }
-    onProgress(copied)
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024L) return "$bytes B"
+    val kib = bytes / 1024.0
+    if (kib < 1024.0) return String.format(Locale.US, "%.1f KiB", kib)
+    val mib = kib / 1024.0
+    if (mib < 1024.0) return String.format(Locale.US, "%.1f MiB", mib)
+    val gib = mib / 1024.0
+    return String.format(Locale.US, "%.2f GiB", gib)
 }
