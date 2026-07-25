@@ -29,8 +29,14 @@ internal class OpenAiApiClient(
         val apiKey = configuredApiKey(appContext)
         val proxyToken = configuredProxyToken()
         val endpoint = configuredEndpoint()
-        require(apiKey.isNotBlank() || proxyToken.isNotBlank()) {
-            "OpenAI is not configured. Add an OpenAI API key in the app or configure the OpenAI proxy."
+        val directOpenAi = isDirectOpenAiEndpoint(endpoint)
+        val authToken = if (directOpenAi) apiKey else proxyToken.ifBlank { apiKey }
+        require(authToken.isNotBlank()) {
+            if (directOpenAi) {
+                "OpenAI is not configured. Add an OpenAI API key in the app or configure OPENAI_API_KEY for the build."
+            } else {
+                "OpenAI proxy is not configured. Add OPENAI_PROXY_TOKEN or OPENAI_API_KEY."
+            }
         }
 
         val recentTurns = conversation.takeLast(MAX_HISTORY_TURNS)
@@ -80,7 +86,6 @@ internal class OpenAiApiClient(
             .put("reasoning", JSONObject().put("effort", "high"))
             .put("max_output_tokens", 4_096)
 
-        val authToken = proxyToken.ifBlank { apiKey }
         val request = Request.Builder()
             .url(endpoint)
             .header("Authorization", "Bearer $authToken")
@@ -101,15 +106,21 @@ internal class OpenAiApiClient(
     }
 
     companion object {
-        private const val DEFAULT_MODEL = "gpt-5.2"
+        private const val DEFAULT_MODEL = "gpt-5.1"
         private const val DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
         private const val MAX_HISTORY_TURNS = 16
         private const val PREFS_NAME = "openai_credentials"
         private const val PREF_API_KEY = "api_key"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-        fun isConfigured(context: Context): Boolean =
-            configuredApiKey(context).isNotBlank() || configuredProxyToken().isNotBlank()
+        fun isConfigured(context: Context): Boolean {
+            val endpoint = configuredEndpoint()
+            return if (isDirectOpenAiEndpoint(endpoint)) {
+                configuredApiKey(context).isNotBlank()
+            } else {
+                configuredProxyToken().isNotBlank() || configuredApiKey(context).isNotBlank()
+            }
+        }
 
         fun hasDeviceApiKey(context: Context): Boolean =
             sanitizeSecret(
@@ -149,6 +160,9 @@ internal class OpenAiApiClient(
         }
 
         private fun configuredProxyToken(): String = sanitizeSecret(BuildConfig.OPENAI_PROXY_TOKEN)
+
+        private fun isDirectOpenAiEndpoint(endpoint: String): Boolean =
+            endpoint.startsWith("https://api.openai.com/", ignoreCase = true)
 
         private fun sanitizeSecret(value: String?): String {
             val cleaned = value?.trim().orEmpty()
