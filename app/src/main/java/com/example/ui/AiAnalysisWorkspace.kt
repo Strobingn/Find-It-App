@@ -1,5 +1,6 @@
 package com.example.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,9 +10,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -30,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.analysis.TerrainDerivedLayer
 import com.example.data.DetectionSource
 import com.example.data.MetalType
 import com.example.data.NormalizedRasterBounds
@@ -44,7 +47,8 @@ private const val AI_REFINE_SETTLE_MS = 650L
 private const val MAX_AI_MARKERS = 8
 
 /**
- * AI analysis page with an interactive LAZ viewport, manual markers, and AI-suggested dig targets.
+ * One-map AI workspace. The selected source/derived layer is the only rendered map.
+ * Pinch, zoom, manual markers, AI markers, refinement, and cloud analysis all share it.
  */
 @Composable
 fun AiAnalysisWorkspace(
@@ -55,7 +59,7 @@ fun AiAnalysisWorkspace(
     val summary by viewModel.activeTerrainSummary.collectAsStateWithLifecycle()
     val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
     val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
-    val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
+    val sourceBitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
     val isRendering by viewModel.isRendering.collectAsStateWithLifecycle()
     val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
@@ -70,11 +74,10 @@ fun AiAnalysisWorkspace(
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val lastRefinedBounds = remember { mutableStateOf<NormalizedRasterBounds?>(null) }
     val markingMode = rememberSaveable { mutableStateOf(false) }
+    val analysisBitmap = aiState.localLayerBitmap ?: sourceBitmap
 
     LaunchedEffect(visibleBounds.value, zoomLevel.value, canRefine, markingMode.value) {
-        if (markingMode.value || !canRefine || zoomLevel.value < AI_REFINE_ZOOM_THRESHOLD) {
-            return@LaunchedEffect
-        }
+        if (markingMode.value || !canRefine || zoomLevel.value < AI_REFINE_ZOOM_THRESHOLD) return@LaunchedEffect
         delay(AI_REFINE_SETTLE_MS)
         val requested = visibleBounds.value.sanitized()
         if (!isRefining && requested != lastRefinedBounds.value) {
@@ -109,30 +112,30 @@ fun AiAnalysisWorkspace(
 
     Column(
         modifier = Modifier.fillMaxSize().padding(padding),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Surface(
-            tonalElevation = 3.dp,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
+        Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("AI terrain viewport", fontWeight = FontWeight.Bold)
+                        Text(
+                            aiState.localResult?.let { aiState.selectedLayer.label } ?: "Terrain source",
+                            fontWeight = FontWeight.Bold,
+                        )
                         Text(
                             when {
-                                markingMode.value -> "Tap or drag the crosshair, then save the marker"
-                                isRefining -> "Reloading original LAZ detail for the visible area…"
-                                canRefine && zoomLevel.value >= AI_REFINE_ZOOM_THRESHOLD -> "${"%.1f".format(zoomLevel.value)}× · auto-refines after pinch settles"
-                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · tap Refine now at any zoom"
-                                else -> "Import a LAZ/LAS file to enable viewport rerendering"
+                                markingMode.value -> "Move the crosshair and save a target"
+                                isRefining -> "Reloading original LAZ detail…"
+                                canRefine && zoomLevel.value >= AI_REFINE_ZOOM_THRESHOLD -> "${"%.1f".format(zoomLevel.value)}× · auto-refine enabled"
+                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · Refine now works at any zoom"
+                                else -> "Pinch and drag this analysis render"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -146,38 +149,58 @@ fun AiAnalysisWorkspace(
                         },
                         enabled = canRefine && !isRefining && !markingMode.value,
                         modifier = Modifier.testTag("ai_refine_now_button"),
+                    ) { Text(if (isRefining) "Refining…" else "Refine") }
+                    Button(
+                        onClick = { assistantViewModel.runLocalAnalysis(grid, summary) },
+                        enabled = !aiState.isLocalAnalyzing,
+                        modifier = Modifier.testTag("ai_run_local_analysis_button"),
                     ) {
-                        Text(if (isRefining) "Refining…" else "Refine now")
+                        if (aiState.isLocalAnalyzing) {
+                            CircularProgressIndicator(modifier = Modifier.height(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text(if (aiState.localResult == null) "Analyze" else "Re-run")
+                        }
+                    }
+                }
+
+                if (aiState.localResult != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        TerrainDerivedLayer.entries.forEach { layer ->
+                            FilterChip(
+                                selected = aiState.selectedLayer == layer,
+                                onClick = { assistantViewModel.selectLocalLayer(layer) },
+                                label = { Text(layer.label) },
+                            )
+                        }
                     }
                 }
 
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     OutlinedButton(
                         onClick = { markingMode.value = !markingMode.value },
                         modifier = Modifier.testTag("ai_marker_mode_button"),
-                    ) {
-                        Text(if (markingMode.value) "Exit marking" else "Place marker")
-                    }
+                    ) { Text(if (markingMode.value) "Pan/zoom" else "Place marker") }
                     Button(
                         onClick = {
                             saveMarker(
-                                x = sweepX,
-                                y = sweepY,
-                                metalType = MetalType.MANUAL_MARKER,
-                                source = DetectionSource.MANUAL,
-                                strength = 0f,
-                                notes = "Manual marker placed from the AI terrain preview.",
+                                sweepX,
+                                sweepY,
+                                MetalType.MANUAL_MARKER,
+                                DetectionSource.MANUAL,
+                                0f,
+                                "Manual marker placed on the AI analysis render.",
                             )
                         },
                         enabled = markingMode.value,
                         modifier = Modifier.testTag("ai_save_manual_marker_button"),
-                    ) {
-                        Text("Save marker")
-                    }
+                    ) { Text("Save marker") }
                     Button(
                         onClick = {
                             aiState.localResult?.candidates
@@ -185,38 +208,30 @@ fun AiAnalysisWorkspace(
                                 ?.take(MAX_AI_MARKERS)
                                 ?.forEachIndexed { index, candidate ->
                                     saveMarker(
-                                        x = candidate.xPercent,
-                                        y = candidate.yPercent,
-                                        metalType = MetalType.MAGNETIC_ANOMALY,
-                                        source = DetectionSource.AI_ANALYSIS,
-                                        strength = candidate.score * 100f,
-                                        notes = buildString {
+                                        candidate.xPercent,
+                                        candidate.yPercent,
+                                        MetalType.MAGNETIC_ANOMALY,
+                                        DetectionSource.AI_ANALYSIS,
+                                        candidate.score * 100f,
+                                        buildString {
                                             append("AI target ${index + 1}: ${candidate.type.label}")
-                                            append(" · score ${"%.0f".format(candidate.score * 100f)}%")
-                                            if (candidate.evidence.isNotEmpty()) {
-                                                append(" · ${candidate.evidence.take(3).joinToString("; ")}")
-                                            }
+                                            append(" · confidence ${"%.0f".format(candidate.score * 100f)}%")
+                                            if (candidate.evidence.isNotEmpty()) append(" · ${candidate.evidence.take(3).joinToString("; ")}")
                                         },
                                     )
                                 }
                         },
                         enabled = aiState.localResult?.candidates?.isNotEmpty() == true,
                         modifier = Modifier.testTag("ai_add_target_markers_button"),
-                    ) {
-                        Text("Mark AI targets")
-                    }
-                    Text(
-                        "${signals.size} saved",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    ) { Text("Mark AI targets") }
+                    Text("${signals.size} saved", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
 
         LidarMapCanvas(
-            bitmap = bitmap,
-            isRendering = isRendering,
+            bitmap = analysisBitmap,
+            isRendering = isRendering || aiState.isLocalAnalyzing,
             sweepX = sweepX,
             sweepY = sweepY,
             loggedSignals = signals,
@@ -236,20 +251,18 @@ fun AiAnalysisWorkspace(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(330.dp)
-                .testTag("ai_analysis_laz_viewport"),
+                .height(390.dp)
+                .testTag("ai_single_analysis_map"),
         )
 
-        if (isRefining) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
+        if (isRefining || aiState.isLocalAnalyzing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        GeminiAssistantScreen(
+        AiCloudPanel(
             terrainSummary = summary,
             grid = grid,
             metadata = metadata,
-            modifier = Modifier.fillMaxSize(),
             assistantViewModel = assistantViewModel,
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }
