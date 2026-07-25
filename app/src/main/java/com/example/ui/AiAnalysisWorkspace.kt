@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.analysis.MetalDetectingTargetRefiner
 import com.example.analysis.TerrainDerivedLayer
 import com.example.data.DetectionSource
 import com.example.data.MetalType
@@ -47,8 +48,8 @@ private const val AI_REFINE_SETTLE_MS = 650L
 private const val MAX_AI_MARKERS = 8
 
 /**
- * One-map AI workspace. The selected source/derived layer is the only rendered map.
- * Pinch, zoom, manual markers, AI markers, refinement, and cloud analysis all share it.
+ * One-map AI workspace tailored to historic-site reconnaissance for metal detecting.
+ * LiDAR ranks occupation and travel features; it cannot directly identify a silver coin.
  */
 @Composable
 fun AiAnalysisWorkspace(
@@ -64,20 +65,20 @@ fun AiAnalysisWorkspace(
     val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
-    val sweepX by viewModel.sweepX.collectAsStateWithLifecycle()
-    val sweepY by viewModel.sweepY.collectAsStateWithLifecycle()
     val gridSpacing by viewModel.gridSpacing.collectAsStateWithLifecycle()
-    val viewportResetKey by viewModel.viewportResetKey.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
 
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val lastRefinedBounds = remember { mutableStateOf<NormalizedRasterBounds?>(null) }
-    val markingMode = rememberSaveable { mutableStateOf(false) }
+    val centerMarkerMode = rememberSaveable { mutableStateOf(false) }
     val analysisBitmap = aiState.localLayerBitmap ?: sourceBitmap
+    val historicTargets = remember(aiState.localResult) {
+        aiState.localResult?.let(MetalDetectingTargetRefiner::refine).orEmpty()
+    }
 
-    LaunchedEffect(visibleBounds.value, zoomLevel.value, canRefine, markingMode.value) {
-        if (markingMode.value || !canRefine || zoomLevel.value < AI_REFINE_ZOOM_THRESHOLD) return@LaunchedEffect
+    LaunchedEffect(visibleBounds.value, zoomLevel.value, canRefine, centerMarkerMode.value) {
+        if (centerMarkerMode.value || !canRefine || zoomLevel.value < AI_REFINE_ZOOM_THRESHOLD) return@LaunchedEffect
         delay(AI_REFINE_SETTLE_MS)
         val requested = visibleBounds.value.sanitized()
         if (!isRefining && requested != lastRefinedBounds.value) {
@@ -126,16 +127,16 @@ fun AiAnalysisWorkspace(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            aiState.localResult?.let { aiState.selectedLayer.label } ?: "Terrain source",
+                            aiState.localResult?.let { aiState.selectedLayer.label } ?: "Historic terrain source",
                             fontWeight = FontWeight.Bold,
                         )
                         Text(
                             when {
-                                markingMode.value -> "Move the crosshair and save a target"
-                                isRefining -> "Reloading original LAZ detail…"
+                                centerMarkerMode.value -> "Pan/zoom until the target is centered, then save it"
+                                isRefining -> "Reloading original LAZ detail without changing your zoom…"
                                 canRefine && zoomLevel.value >= AI_REFINE_ZOOM_THRESHOLD -> "${"%.1f".format(zoomLevel.value)}× · auto-refine enabled"
-                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · Refine now works at any zoom"
-                                else -> "Pinch and drag this analysis render"
+                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · Refine works at any zoom"
+                                else -> "Pre-1900 silver-site profile · pinch and drag"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -147,7 +148,7 @@ fun AiAnalysisWorkspace(
                             lastRefinedBounds.value = requested
                             viewModel.refineTerrain(requested)
                         },
-                        enabled = canRefine && !isRefining && !markingMode.value,
+                        enabled = canRefine && !isRefining && !centerMarkerMode.value,
                         modifier = Modifier.testTag("ai_refine_now_button"),
                     ) { Text(if (isRefining) "Refining…" else "Refine") }
                     Button(
@@ -164,6 +165,11 @@ fun AiAnalysisWorkspace(
                 }
 
                 if (aiState.localResult != null) {
+                    Text(
+                        "Historic silver profile: homesites, cellar holes, refuse/privy pits, wagon roads, camps and stone walls",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -184,46 +190,51 @@ fun AiAnalysisWorkspace(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     OutlinedButton(
-                        onClick = { markingMode.value = !markingMode.value },
+                        onClick = { centerMarkerMode.value = !centerMarkerMode.value },
                         modifier = Modifier.testTag("ai_marker_mode_button"),
-                    ) { Text(if (markingMode.value) "Pan/zoom" else "Place marker") }
+                    ) { Text(if (centerMarkerMode.value) "Cancel marker" else "Mark map center") }
                     Button(
                         onClick = {
+                            val bounds = visibleBounds.value.sanitized()
+                            val centerX = ((bounds.left + bounds.right) * 50.0).toFloat()
+                            val centerY = ((bounds.top + bounds.bottom) * 50.0).toFloat()
                             saveMarker(
-                                sweepX,
-                                sweepY,
+                                centerX,
+                                centerY,
                                 MetalType.MANUAL_MARKER,
                                 DetectionSource.MANUAL,
                                 0f,
-                                "Manual marker placed on the AI analysis render.",
+                                "Manual historic-site marker placed at the center of the zoomed AI viewport.",
                             )
+                            centerMarkerMode.value = false
                         },
-                        enabled = markingMode.value,
+                        enabled = centerMarkerMode.value,
                         modifier = Modifier.testTag("ai_save_manual_marker_button"),
-                    ) { Text("Save marker") }
+                    ) { Text("Save center") }
                     Button(
                         onClick = {
-                            aiState.localResult?.candidates
-                                ?.sortedByDescending { it.score }
-                                ?.take(MAX_AI_MARKERS)
-                                ?.forEachIndexed { index, candidate ->
+                            historicTargets
+                                .sortedByDescending { it.score }
+                                .take(MAX_AI_MARKERS)
+                                .forEachIndexed { index, target ->
                                     saveMarker(
-                                        candidate.xPercent,
-                                        candidate.yPercent,
+                                        target.xPercent,
+                                        target.yPercent,
                                         MetalType.MAGNETIC_ANOMALY,
                                         DetectionSource.AI_ANALYSIS,
-                                        candidate.score * 100f,
+                                        target.score * 100f,
                                         buildString {
-                                            append("AI target ${index + 1}: ${candidate.type.label}")
-                                            append(" · confidence ${"%.0f".format(candidate.score * 100f)}%")
-                                            if (candidate.evidence.isNotEmpty()) append(" · ${candidate.evidence.take(3).joinToString("; ")}")
+                                            append("Historic target ${index + 1}: ${target.type.label}")
+                                            append(" · screening score ${"%.0f".format(target.score * 100f)}%")
+                                            append(" · ${target.evidence.joinToString("; ")}")
+                                            append(" · Intended for pre-1900 occupation/travel-site field verification; not proof of metal.")
                                         },
                                     )
                                 }
                         },
-                        enabled = aiState.localResult?.candidates?.isNotEmpty() == true,
+                        enabled = historicTargets.isNotEmpty(),
                         modifier = Modifier.testTag("ai_add_target_markers_button"),
-                    ) { Text("Mark AI targets") }
+                    ) { Text("Mark historic targets") }
                     Text("${signals.size} saved", style = MaterialTheme.typography.labelMedium)
                 }
             }
@@ -232,18 +243,18 @@ fun AiAnalysisWorkspace(
         LidarMapCanvas(
             bitmap = analysisBitmap,
             isRendering = isRendering || aiState.isLocalAnalyzing,
-            sweepX = sweepX,
-            sweepY = sweepY,
+            sweepX = 50f,
+            sweepY = 50f,
             loggedSignals = signals,
-            onSweepPositionChanged = viewModel::setSweepPosition,
+            onSweepPositionChanged = { _, _ -> },
             onStopSweeping = {},
             gridSpacing = gridSpacing,
             geoMetadata = metadata,
             currentLat = null,
             currentLon = null,
-            mode = if (markingMode.value) LidarCanvasMode.SURVEY else LidarCanvasMode.EXPLORE,
-            viewportResetKey = viewportResetKey,
-            showSurveyCursor = markingMode.value,
+            mode = LidarCanvasMode.EXPLORE,
+            viewportResetKey = 0,
+            showSurveyCursor = false,
             showCoordinateHud = false,
             onViewportChanged = { bounds, zoom ->
                 visibleBounds.value = bounds
