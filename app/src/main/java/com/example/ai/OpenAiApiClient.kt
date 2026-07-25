@@ -107,6 +107,7 @@ internal class OpenAiApiClient(
 
     companion object {
         private const val DEFAULT_MODEL = "gpt-5.1"
+        private const val STALE_MODEL = "gpt-5.2"
         private const val DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
         private const val MAX_HISTORY_TURNS = 16
         private const val PREFS_NAME = "openai_credentials"
@@ -148,7 +149,12 @@ internal class OpenAiApiClient(
                 .apply()
         }
 
-        fun configuredModel(): String = BuildConfig.OPENAI_MODEL.trim().ifBlank { DEFAULT_MODEL }
+        fun configuredModel(): String {
+            val configured = BuildConfig.OPENAI_MODEL.trim()
+            return configured
+                .takeIf { it.isNotBlank() && !it.equals(STALE_MODEL, ignoreCase = true) }
+                ?: DEFAULT_MODEL
+        }
 
         fun configuredEndpoint(): String = BuildConfig.OPENAI_BASE_URL.trim().ifBlank { DEFAULT_ENDPOINT }
 
