@@ -43,7 +43,6 @@ import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -122,9 +121,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
             }
         },
         bottomBar = {
-            // Terrain is a full-screen working surface. Keeping the app navigation here
-            // covered the lower-left raster information and reduced the usable map area.
-            if (!terrainSelected && !terrainFocusMode.value) {
+            if (!terrainFocusMode.value) {
                 Surface(
                     shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
                     shadowElevation = 10.dp,
@@ -157,10 +154,6 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 viewModel = viewModel,
                 focusMode = terrainFocusMode.value,
                 onFocusModeChanged = { terrainFocusMode.value = it },
-                onOpenTab = {
-                    selectedTab.intValue = it
-                    terrainFocusMode.value = false
-                },
             )
             1 -> GoogleMapTab(viewModel, padding)
             2 -> GeminiTab(viewModel, padding)
@@ -178,7 +171,6 @@ private fun TerrainTab(
     viewModel: HillshadeViewModel,
     focusMode: Boolean,
     onFocusModeChanged: (Boolean) -> Unit,
-    onOpenTab: (Int) -> Unit,
 ) {
     val site by viewModel.currentSiteIndex.collectAsStateWithLifecycle()
     val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
@@ -354,7 +346,7 @@ private fun TerrainTab(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .navigationBarsPadding()
-                .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
+                .padding(start = 10.dp, end = 10.dp, bottom = 76.dp),
         ) {
             val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
             val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
@@ -426,24 +418,6 @@ private fun TerrainTab(
             )
         }
 
-        // Compact escape/navigation row. It replaces the large bottom NavigationBar that
-        // previously covered the lower-left terrain readout.
-        if (!focusMode && !showControls.value) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(end = 8.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                IconButton(onClick = { onOpenTab(1) }) {
-                    Icon(Icons.Default.Layers, contentDescription = "Open map")
-                }
-                IconButton(onClick = { onOpenTab(4) }) {
-                    Icon(Icons.Default.UploadFile, contentDescription = "Import terrain")
-                }
-            }
-        }
     }
 }
 

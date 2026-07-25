@@ -24,6 +24,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,10 +53,14 @@ import com.example.data.TerrainPerformanceSession
 import com.example.data.computeDigPriorityHeatmap
 import com.example.geospatial.GeoSpatialLibrary
 import kotlin.math.max
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 
 enum class LidarCanvasMode { SURVEY, EXPLORE }
 
+@OptIn(FlowPreview::class)
 @Composable
 fun LidarMapCanvas(
     bitmap: Bitmap?,
@@ -111,24 +116,29 @@ fun LidarMapCanvas(
     LaunchedEffect(bitmap) {
         if (bitmap == null) TerrainVisionSession.clear()
     }
-    LaunchedEffect(zoom, pan, viewportSize, imageBitmap, bitmap) {
+    LaunchedEffect(imageBitmap, bitmap) {
         val image = imageBitmap ?: return@LaunchedEffect
         val sourceBitmap = bitmap ?: return@LaunchedEffect
-        val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
-        val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
-        val fit = coverScale(viewportWidth, viewportHeight, image.width.toFloat(), image.height.toFloat())
-        val displayWidth = image.width * fit * zoom
-        val displayHeight = image.height * fit * zoom
-        val imageLeft = (viewportWidth - displayWidth) * 0.5f + pan.x
-        val imageTop = (viewportHeight - displayHeight) * 0.5f + pan.y
-        val bounds = NormalizedRasterBounds(
-            left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
-            top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
-            right = ((viewportWidth - imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
-            bottom = ((viewportHeight - imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
-        ).sanitized()
-        TerrainVisionSession.publish(sourceBitmap, bounds, zoom)
-        onViewportChanged(bounds, zoom)
+        snapshotFlow { Triple(zoom, pan, viewportSize) }
+            .distinctUntilChanged()
+            .debounce(VIEWPORT_PUBLISH_DEBOUNCE_MS)
+            .collect { (currentZoom, currentPan, currentSize) ->
+                val viewportWidth = currentSize.width.toFloat().coerceAtLeast(1f)
+                val viewportHeight = currentSize.height.toFloat().coerceAtLeast(1f)
+                val fit = coverScale(viewportWidth, viewportHeight, image.width.toFloat(), image.height.toFloat())
+                val displayWidth = image.width * fit * currentZoom
+                val displayHeight = image.height * fit * currentZoom
+                val imageLeft = (viewportWidth - displayWidth) * 0.5f + currentPan.x
+                val imageTop = (viewportHeight - displayHeight) * 0.5f + currentPan.y
+                val bounds = NormalizedRasterBounds(
+                    left = ((-imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
+                    top = ((-imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
+                    right = ((viewportWidth - imageLeft) / displayWidth).toDouble().coerceIn(0.0, 1.0),
+                    bottom = ((viewportHeight - imageTop) / displayHeight).toDouble().coerceIn(0.0, 1.0),
+                ).sanitized()
+                TerrainVisionSession.publish(sourceBitmap, bounds, currentZoom)
+                onViewportChanged(bounds, currentZoom)
+            }
     }
 
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
@@ -431,6 +441,7 @@ private fun coverScale(
 )
 
 private const val HEATMAP_BINS = 24
+private const val VIEWPORT_PUBLISH_DEBOUNCE_MS = 120L
 
 private fun heatmapColor(intensity: Float): Color = if (intensity < 0.5f) {
     lerp(Color(0xFF1565C0), Color(0xFFFFC107), intensity / 0.5f)
