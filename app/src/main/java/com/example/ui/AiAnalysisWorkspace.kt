@@ -3,10 +3,12 @@ package com.example.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -17,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -32,7 +35,8 @@ private const val AI_REFINE_SETTLE_MS = 650L
 
 /**
  * AI analysis page with its own interactive LAZ viewport.
- * Pinch/drag remains smooth; the original LAZ is re-rasterized only after the gesture settles.
+ * Pinch/drag remains smooth; automatic refinement waits for the gesture to settle.
+ * The user can also force a source-detail rerender at any zoom level.
  */
 @Composable
 fun AiAnalysisWorkspace(
@@ -74,18 +78,35 @@ fun AiAnalysisWorkspace(
             tonalElevation = 3.dp,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Text("AI terrain viewport", fontWeight = FontWeight.Bold)
-                Text(
-                    when {
-                        isRefining -> "Reloading original LAZ detail for the visible area…"
-                        canRefine && zoomLevel.value >= AI_REFINE_ZOOM_THRESHOLD -> "${"%.1f".format(zoomLevel.value)}× · LAZ detail refreshed after pinch settles"
-                        canRefine -> "Pinch to ${AI_REFINE_ZOOM_THRESHOLD}× or farther to rerender the visible LAZ area"
-                        else -> "Import a LAZ/LAS file to enable viewport rerendering"
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("AI terrain viewport", fontWeight = FontWeight.Bold)
+                    Text(
+                        when {
+                            isRefining -> "Reloading original LAZ detail for the visible area…"
+                            canRefine && zoomLevel.value >= AI_REFINE_ZOOM_THRESHOLD -> "${"%.1f".format(zoomLevel.value)}× · auto-refines after pinch settles"
+                            canRefine -> "${"%.1f".format(zoomLevel.value)}× · tap Refine now at any zoom"
+                            else -> "Import a LAZ/LAS file to enable viewport rerendering"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                FilledTonalButton(
+                    onClick = {
+                        val requested = visibleBounds.value.sanitized()
+                        lastRefinedBounds.value = requested
+                        viewModel.refineTerrain(requested)
                     },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                    enabled = canRefine && !isRefining,
+                    modifier = Modifier.testTag("ai_refine_now_button"),
+                ) {
+                    Text(if (isRefining) "Refining…" else "Refine now")
+                }
             }
         }
 
