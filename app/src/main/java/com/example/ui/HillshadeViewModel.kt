@@ -448,7 +448,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _viewportZoom.value = zoom
         _viewportPanX.value = panX
         _viewportPanY.value = panY
-        scheduleRender(currentZoom = zoom)
     }
 
     private fun updateCoordinates() {
