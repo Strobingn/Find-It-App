@@ -89,11 +89,7 @@ internal class GeminiApiClient(
                 JSONObject()
                     .put("temperature", 1.0)
                     .put("topP", 0.95)
-                    .put("maxOutputTokens", 8_192)
-                    .put(
-                        "thinkingConfig",
-                        JSONObject().put("thinkingLevel", "high"),
-                    ),
+                    .put("maxOutputTokens", 8_192),
             )
 
         val request = Request.Builder()
