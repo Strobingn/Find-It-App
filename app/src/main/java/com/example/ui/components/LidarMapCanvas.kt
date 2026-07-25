@@ -8,15 +8,17 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -51,6 +52,7 @@ import com.example.data.TargetSignal
 import com.example.data.TerrainPerformanceSession
 import com.example.data.computeDigPriorityHeatmap
 import com.example.geospatial.GeoSpatialLibrary
+import kotlinx.coroutines.delay
 import kotlin.math.max
 
 
@@ -111,9 +113,17 @@ fun LidarMapCanvas(
     LaunchedEffect(bitmap) {
         if (bitmap == null) TerrainVisionSession.clear()
     }
+
+    // Pinch and pan can produce dozens of updates per second. Wait until the gesture
+    // settles before asking the ViewModel to persist/rerender the visible viewport.
+    // LaunchedEffect automatically cancels the previous pending callback, preventing
+    // render-job churn and the flashing caused by rapidly replaced bitmaps.
     LaunchedEffect(zoom, pan, viewportSize, imageBitmap, bitmap) {
         val image = imageBitmap ?: return@LaunchedEffect
         val sourceBitmap = bitmap ?: return@LaunchedEffect
+        if (viewportSize == IntSize.Zero) return@LaunchedEffect
+        delay(VIEWPORT_IDLE_DELAY_MS)
+
         val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
         val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
         val fit = coverScale(viewportWidth, viewportHeight, image.width.toFloat(), image.height.toFloat())
@@ -133,7 +143,7 @@ fun LidarMapCanvas(
 
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         if (mode == LidarCanvasMode.EXPLORE) {
-            val nextZoom = (zoom * zoomChange).coerceIn(1f, 32f)
+            val nextZoom = (zoom * zoomChange).coerceIn(1f, MAX_ZOOM)
             val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
             val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
             val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
@@ -152,6 +162,7 @@ fun LidarMapCanvas(
     Box(
         modifier = modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface)
             .testTag("lidar_map_canvas_container"),
     ) {
         val activeGpuScene = gpuScene
@@ -160,17 +171,10 @@ fun LidarMapCanvas(
                 scene = activeGpuScene,
                 modifier = Modifier.fillMaxSize().testTag("gpu_terrain_surface"),
             )
-            Text(
-                text = "GPU 3D · drag to rotate · pinch for LOD · double-tap to reset",
-                color = Color.White,
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(10.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xC0000000))
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            TerrainBadge(
+                title = "GPU 3D",
+                subtitle = "Drag to rotate · pinch for LOD · double-tap to reset",
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
             )
         } else if (imageBitmap != null && bitmap != null) {
             val interactionModifier = if (mode == LidarCanvasMode.EXPLORE) {
@@ -187,9 +191,10 @@ fun LidarMapCanvas(
                         val imageLeft = (canvasWidth - imageWidth) * 0.5f
                         val imageTop = (canvasHeight - imageHeight) * 0.5f
                         fun report(offset: Offset) {
-                            val xPct = ((offset.x - imageLeft) / imageWidth * 100f).coerceIn(0f, 100f)
-                            val yPct = ((offset.y - imageTop) / imageHeight * 100f).coerceIn(0f, 100f)
-                            onSweepPositionChanged(xPct, yPct)
+                            onSweepPositionChanged(
+                                ((offset.x - imageLeft) / imageWidth * 100f).coerceIn(0f, 100f),
+                                ((offset.y - imageTop) / imageHeight * 100f).coerceIn(0f, 100f),
+                            )
                         }
                         report(down.position)
                         try {
@@ -221,17 +226,15 @@ fun LidarMapCanvas(
                 val displayHeight = imageBitmap.height * fit * zoom
                 val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
                 val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
+                val imageOffset = IntOffset(imageLeft.toInt(), imageTop.toInt())
+                val imageSize = IntSize(displayWidth.toInt().coerceAtLeast(1), displayHeight.toInt().coerceAtLeast(1))
 
-                drawImage(
-                    image = imageBitmap,
-                    dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
-                    dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
-                )
+                drawImage(image = imageBitmap, dstOffset = imageOffset, dstSize = imageSize)
                 if (showBasemap && basemapImageBitmap != null) {
                     drawImage(
                         image = basemapImageBitmap,
-                        dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
-                        dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
+                        dstOffset = imageOffset,
+                        dstSize = imageSize,
                         alpha = basemapOpacity.coerceIn(0f, 1f),
                     )
                 }
@@ -252,170 +255,138 @@ fun LidarMapCanvas(
                     }
                 }
                 if (gridSpacing >= 1f) {
-                    val cols = (100f / gridSpacing).toInt().coerceIn(1, 50)
-                    val rows = (100f / gridSpacing).toInt().coerceIn(1, 50)
-                    for (i in 1 until cols) {
-                        val px = imageLeft + (i * gridSpacing / 100f) * displayWidth
-                        drawLine(
-                            color = Color(0xFF29B6F6),
-                            start = Offset(px, imageTop),
-                            end = Offset(px, imageTop + displayHeight),
-                            strokeWidth = 1f,
-                            alpha = 0.35f,
-                        )
-                    }
-                    for (i in 1 until rows) {
-                        val py = imageTop + (i * gridSpacing / 100f) * displayHeight
-                        drawLine(
-                            color = Color(0xFF29B6F6),
-                            start = Offset(imageLeft, py),
-                            end = Offset(imageLeft + displayWidth, py),
-                            strokeWidth = 1f,
-                            alpha = 0.35f,
-                        )
+                    val divisions = (100f / gridSpacing).toInt().coerceIn(1, 50)
+                    for (i in 1 until divisions) {
+                        val fraction = i.toFloat() / divisions
+                        val px = imageLeft + fraction * displayWidth
+                        val py = imageTop + fraction * displayHeight
+                        drawLine(Color.White, Offset(px, imageTop), Offset(px, imageTop + displayHeight), 1f, alpha = 0.18f)
+                        drawLine(Color.White, Offset(imageLeft, py), Offset(imageLeft + displayWidth, py), 1f, alpha = 0.18f)
                     }
                 }
-                for (signal in loggedSignals) {
+                loggedSignals.forEach { signal ->
                     val px = imageLeft + (signal.gridX.coerceIn(0f, 100f) / 100f) * displayWidth
                     val py = imageTop + (signal.gridY.coerceIn(0f, 100f) / 100f) * displayHeight
-                    val pinColor = runCatching { Color(signal.metalType.colorHex) }.getOrDefault(Color(0xFFFFD700))
-                    drawCircle(color = pinColor, radius = 12f, center = Offset(px, py), alpha = 0.5f)
-                    drawCircle(color = Color.White, radius = 4f, center = Offset(px, py))
-                    drawCircle(color = pinColor, radius = 18f, center = Offset(px, py), style = Stroke(width = 2f))
+                    val pinColor = runCatching { Color(signal.metalType.colorHex) }.getOrDefault(Color(0xFFFFC107))
+                    drawCircle(pinColor, 15f, Offset(px, py), alpha = 0.42f)
+                    drawCircle(Color.White, 4f, Offset(px, py))
+                    drawCircle(pinColor, 20f, Offset(px, py), style = Stroke(2f))
                 }
                 if (showSurveyCursor) {
                     val sx = imageLeft + (sweepX.coerceIn(0f, 100f) / 100f) * displayWidth
                     val sy = imageTop + (sweepY.coerceIn(0f, 100f) / 100f) * displayHeight
-                    val coil = Offset(sx, sy)
-                    drawCircle(color = Color(0xFFFFD700), radius = 36f, center = coil, style = Stroke(width = 1.5f), alpha = 0.35f)
-                    drawCircle(color = Color(0xFFFFD700), radius = 24f, center = coil, style = Stroke(width = 3.5f), alpha = 0.85f)
-                    drawLine(color = Color(0xFFFFD700), start = Offset(sx - 10f, sy), end = Offset(sx + 10f, sy), strokeWidth = 2f, alpha = 0.8f)
-                    drawLine(color = Color(0xFFFFD700), start = Offset(sx, sy - 10f), end = Offset(sx, sy + 10f), strokeWidth = 2f, alpha = 0.8f)
-                    drawCircle(color = Color.White, radius = 3f, center = coil)
+                    drawCircle(Color(0xFFFFC107), 18f, Offset(sx, sy), style = Stroke(2f))
+                    drawLine(Color(0xFFFFC107), Offset(sx - 10f, sy), Offset(sx + 10f, sy), 2f)
+                    drawLine(Color(0xFFFFC107), Offset(sx, sy - 10f), Offset(sx, sy + 10f), 2f)
+                    drawCircle(Color.White, 3f, Offset(sx, sy))
                 }
-                val devicePosition = deviceGridPosition
-                if (devicePosition != null && devicePosition.first in 0f..100f && devicePosition.second in 0f..100f) {
-                    val dx = imageLeft + (devicePosition.first / 100f) * displayWidth
-                    val dy = imageTop + (devicePosition.second / 100f) * displayHeight
-                    val here = Offset(dx, dy)
-                    drawCircle(color = Color(0xFF2196F3), radius = 26f, center = here, alpha = 0.25f)
-                    drawCircle(color = Color(0xFF2196F3), radius = 10f, center = here)
-                    drawCircle(color = Color.White, radius = 10f, center = here, style = Stroke(width = 2.5f))
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(10.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xE60D0E12))
-                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Column {
-                    Text(
-                        text = geoMetadata.siteName.uppercase(),
-                        color = Color(0xFFFFD700),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 0.5.sp,
-                    )
-                    Text(
-                        text = "${geoMetadata.crs} • ${geoMetadata.datum}",
-                        color = Color.LightGray,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                    if (showBasemap && basemapStatus != null) {
-                        Text(
-                            text = basemapStatus,
-                            color = Color(0xFF64B5F6),
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
+                deviceGridPosition?.let { position ->
+                    if (position.first in 0f..100f && position.second in 0f..100f) {
+                        val here = Offset(
+                            imageLeft + position.first / 100f * displayWidth,
+                            imageTop + position.second / 100f * displayHeight,
                         )
+                        drawCircle(Color(0xFF42A5F5), 25f, here, alpha = 0.24f)
+                        drawCircle(Color(0xFF42A5F5), 9f, here)
+                        drawCircle(Color.White, 10f, here, style = Stroke(2.5f))
                     }
                 }
             }
 
+            TerrainBadge(
+                title = geoMetadata.siteName,
+                subtitle = "${geoMetadata.crs} · ${geoMetadata.datum} · ${"%.1f".format(zoom)}×",
+                modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+            )
             if (showCoordinateHud) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.BottomCenter)
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xE60D0E12))
-                        .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
-                        .padding(8.dp),
-                ) {
-                    if (currentLat != null && currentLon != null) {
-                        val utm = runCatching { GeoSpatialLibrary.geographicToUtm(currentLat, currentLon) }.getOrNull()
-                        Text(
-                            text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        if (utm != null) {
-                            Text(
-                                text = "UTM ${utm.zone}${utm.hemisphere}  E ${"%.1f".format(utm.easting)} m  N ${"%.1f".format(utm.northing)} m",
-                                color = Color(0xFF64B5F6),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
+                val coordinateText = if (currentLat != null && currentLon != null) {
+                    "${GeoSpatialLibrary.formatDms(currentLat, true)} · ${GeoSpatialLibrary.formatDms(currentLon, false)}"
+                } else {
+                    "Local grid ${sweepX.toInt()}, ${sweepY.toInt()}"
                 }
-            }
-            if (showBasemap && basemapImageBitmap != null) {
-                Text(
-                    text = "© OpenStreetMap contributors",
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xB0000000))
-                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                TerrainBadge(
+                    title = coordinateText,
+                    subtitle = basemapStatus ?: "Pinch to zoom · drag to move",
+                    modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
                 )
             }
         } else {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.align(Alignment.Center).padding(24.dp),
+            ) {
+                Text("No terrain loaded", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Import a LAZ, LAS, TIFF, or GeoTIFF file to begin.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+        ) {
+            if (isRendering && !useGpuTerrain) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+                    tonalElevation = 3.dp,
+                    shadowElevation = 4.dp,
+                    modifier = Modifier.testTag("terrain_rendering_indicator"),
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.padding(1.dp))
+                        Text("Refreshing detail", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+            if (activeGpuScene != null) {
+                OutlinedButton(
+                    onClick = { useGpuTerrain = !useGpuTerrain },
+                    modifier = Modifier.testTag("toggle_gpu_terrain_button"),
+                ) {
+                    Text(if (useGpuTerrain) "2D" else "3D")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerrainBadge(
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
+        tonalElevation = 3.dp,
+        shadowElevation = 4.dp,
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
             Text(
-                text = "Import a LAZ/LAS dataset to begin",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
-                modifier = Modifier.align(Alignment.Center),
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
             )
-        }
-
-        if (activeGpuScene != null) {
-            OutlinedButton(
-                onClick = { useGpuTerrain = !useGpuTerrain },
-                modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).testTag("toggle_gpu_terrain_button"),
-            ) {
-                Text(if (useGpuTerrain) "2D analysis" else "GPU 3D")
-            }
-        }
-
-        if (isRendering && !useGpuTerrain) {
-            Box(
-                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.28f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
+            Text(
+                text = subtitle,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+            )
         }
     }
 }
@@ -431,6 +402,8 @@ private fun coverScale(
 )
 
 private const val HEATMAP_BINS = 24
+private const val VIEWPORT_IDLE_DELAY_MS = 300L
+private const val MAX_ZOOM = 32f
 
 private fun heatmapColor(intensity: Float): Color = if (intensity < 0.5f) {
     lerp(Color(0xFF1565C0), Color(0xFFFFC107), intensity / 0.5f)
