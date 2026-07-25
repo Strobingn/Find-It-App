@@ -41,4 +41,8 @@ class LazImportRepository(
 
 object NoaaLidarCatalog {
     const val DATA_VIEWER_URL = "https://coast.noaa.gov/dataviewer/#/lidar/search"
+    const val NYS_LAS_TILE_INDEX_URL = "https://orthos.its.ny.gov/arcgis/rest/services/vector/las_indexes/MapServer"
+    const val NYS_SOUTHEAST_4_COUNTY_LAYER_URL = "$NYS_LAS_TILE_INDEX_URL/4"
+    const val NYS_SOUTHEAST_4_COUNTY_USGS_LAZ_DIRECTORY =
+        "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/NY_SouthEast4County_A22/NY_SE4County_1_A22/LAZ/"
 }
