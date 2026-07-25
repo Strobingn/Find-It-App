@@ -22,11 +22,11 @@ data class TargetSignal(
 ) : Serializable
 
 enum class MetalType(val label: String, val colorHex: Long) {
-    GOLD("Gold Coin/Ring", 0xFFFFD700),      // Glowing gold
-    SILVER("Silver Relic", 0xFFC0C0C0),     // Silver / grey
-    BRONZE("Bronze artifact", 0xFFCD7F32),  // Bronze / copper brown
-    IRON("Iron Nail/Spike", 0xFF8B0000),     // Crimson / dark red (simulated target)
-    MAGNETIC_ANOMALY("Magnetic anomaly", 0xFF29B6F6),
+    GOLD("Gold Coin/Ring", 0xFFFFD700),
+    SILVER("Silver Relic", 0xFFC0C0C0),
+    BRONZE("Bronze artifact", 0xFFCD7F32),
+    IRON("Iron Nail/Spike", 0xFF8B0000),
+    MAGNETIC_ANOMALY("AI target", 0xFF29B6F6),
     MANUAL_MARKER("Manual marker", 0xFFFFB300),
 }
 
@@ -34,4 +34,5 @@ enum class DetectionSource {
     SIMULATED,
     MAGNETOMETER,
     MANUAL,
+    AI_ANALYSIS,
 }
