@@ -226,8 +226,6 @@ private fun TerrainTab(
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        // Reserve a narrow, explicit lane for the top controls and lower status card.
-        // This prevents the canvas-owned metadata from rendering underneath either one.
         LidarMapCanvas(
             bitmap = bitmap,
             isRendering = isRendering,
@@ -417,7 +415,6 @@ private fun TerrainTab(
                     .verticalScroll(rememberScrollState()),
             )
         }
-
     }
 }
 
@@ -463,15 +460,7 @@ private fun GoogleMapTab(viewModel: HillshadeViewModel, padding: PaddingValues) 
 
 @Composable
 private fun GeminiTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
-    val summary by viewModel.activeTerrainSummary.collectAsStateWithLifecycle()
-    val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
-    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
-    GeminiAssistantScreen(
-        terrainSummary = summary,
-        grid = grid,
-        metadata = metadata,
-        modifier = Modifier.fillMaxSize().padding(padding),
-    )
+    AiAnalysisWorkspace(viewModel = viewModel, padding = padding)
 }
 
 @Composable
