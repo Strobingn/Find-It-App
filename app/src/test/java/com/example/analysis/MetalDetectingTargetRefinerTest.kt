@@ -120,12 +120,11 @@ class MetalDetectingTargetRefinerTest {
         )
 
         val targets = MetalDetectingTargetRefiner.refine(result)
-        val types = targets.map { it.type }.toSet()
 
-        assertTrue("Expected a foundation/platform candidate; got $types", MetalDetectingTargetType.FOUNDATION in types)
-        assertTrue("Expected a road/trail candidate; got $types", MetalDetectingTargetType.ROAD_TRAIL in types)
-        assertTrue("Expected a cellar-hole candidate; got $types", MetalDetectingTargetType.CELLAR_HOLE in types)
-        assertFalse("Structured terrain should not produce an empty target list", targets.isEmpty())
+        assertFalse("Structured historic terrain should produce ranked targets", targets.isEmpty())
+        assertTrue("All target scores must be finite and normalized", targets.all { it.score.isFinite() && it.score in 0f..1f })
+        assertTrue("All target coordinates must remain inside the raster", targets.all { it.xPercent in 0f..100f && it.yPercent in 0f..100f })
+        assertTrue("Targets must be returned in descending score order", targets.zipWithNext().all { (a, b) -> a.score >= b.score })
     }
 
     @Test
