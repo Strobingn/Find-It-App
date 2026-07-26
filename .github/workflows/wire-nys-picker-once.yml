@@ -1,0 +1,68 @@
+name: Wire NYS picker once
+
+on:
+  push:
+    branches:
+      - fix/ai-zoom-and-metal-target-math
+    paths:
+      - .github/workflows/wire-nys-picker-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/ai-zoom-and-metal-target-math
+          fetch-depth: 0
+      - name: Insert visible NYS picker
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/src/main/java/com/example/ui/MainScreen.kt')
+          text = path.read_text()
+          import_anchor = 'import com.example.ui.components.CustomFileLoader\n'
+          import_line = 'import com.example.ui.components.NysLazTilePicker\n'
+          if import_line not in text:
+              if import_anchor not in text:
+                  raise SystemExit('CustomFileLoader import anchor not found')
+              text = text.replace(import_anchor, import_anchor + import_line, 1)
+
+          call_anchor = '''        CustomFileLoader(
+              onCustomTerrainLoaded = { result, source ->
+                  viewModel.setCustomTerrain(result, source)
+                  onImported()
+              },
+          )'''
+          replacement = '''        NysLazTilePicker(
+              onCustomTerrainLoaded = { result, source ->
+                  viewModel.setCustomTerrain(result, source)
+                  onImported()
+              },
+          )
+          CustomFileLoader(
+              onCustomTerrainLoaded = { result, source ->
+                  viewModel.setCustomTerrain(result, source)
+                  onImported()
+              },
+          )'''
+          if 'NysLazTilePicker(' not in text:
+              if call_anchor not in text:
+                  raise SystemExit('Import screen call anchor not found')
+              text = text.replace(call_anchor, replacement, 1)
+          path.write_text(text)
+          PY
+          rm .github/workflows/wire-nys-picker-once.yml
+      - name: Commit wiring
+        shell: bash
+        run: |
+          git config user.name "Find It build bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/src/main/java/com/example/ui/MainScreen.kt .github/workflows/wire-nys-picker-once.yml
+          git commit -m "Show NYS LAZ tile picker on Import page"
+          git push origin HEAD:fix/ai-zoom-and-metal-target-math
