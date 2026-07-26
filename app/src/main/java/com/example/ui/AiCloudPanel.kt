@@ -1,5 +1,6 @@
 package com.example.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -7,10 +8,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -49,7 +52,7 @@ import com.example.ai.TerrainVisionSession
 import com.example.data.ElevationGrid
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
 
-/** Cloud controls and conversation only. The interactive analysis map lives above this panel. */
+/** Cloud controls and conversation only. The interactive analysis map lives beside or above this panel. */
 @Composable
 fun AiCloudPanel(
     terrainSummary: String,
@@ -90,139 +93,169 @@ fun AiCloudPanel(
         }
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("AI analysis", fontWeight = FontWeight.Bold)
+                                Text(
+                                    when (state.activeProvider) {
+                                        TerrainAiProvider.OPENAI -> "OpenAI ${OpenAiApiClient.configuredModel()} primary · Gemini fallback ready"
+                                        TerrainAiProvider.GEMINI -> "Gemini ${GeminiApiClient.configuredModel()} active"
+                                        null -> "Add an OpenAI or Gemini key"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            IconButton(onClick = assistantViewModel::clearConversation) {
+                                Icon(Icons.Default.DeleteSweep, contentDescription = "Clear conversation")
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilterChip(
+                                selected = attachImage && imageReady,
+                                onClick = { attachImage = !attachImage },
+                                enabled = imageReady && !state.isSending,
+                                label = { Text(if (attachImage && imageReady) "Map attached" else "Attach map") },
+                                leadingIcon = { Icon(Icons.Default.ImageSearch, contentDescription = null) },
+                            )
+                            TextButton(onClick = { showKeys = !showKeys }) { Text("Keys") }
+                        }
+                    }
+                }
+            }
+
+            if (showKeys) {
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = openAiKey,
+                                onValueChange = { openAiKey = it.trim().take(256) },
+                                label = { Text("OpenAI API key") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Button(
+                                    onClick = {
+                                        assistantViewModel.saveOpenAiKey(openAiKey)
+                                        openAiKey = ""
+                                    },
+                                    enabled = openAiKey.length >= 20,
+                                ) { Text("Save OpenAI") }
+                                if (state.hasDeviceOpenAiKey) {
+                                    OutlinedButton(onClick = assistantViewModel::clearOpenAiKey) { Text("Remove") }
+                                }
+                            }
+                            OutlinedTextField(
+                                value = geminiKey,
+                                onValueChange = { geminiKey = it.trim().take(256) },
+                                label = { Text("Gemini API key") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Button(
+                                    onClick = {
+                                        assistantViewModel.saveGeminiKey(geminiKey)
+                                        geminiKey = ""
+                                    },
+                                    enabled = geminiKey.length >= 20,
+                                ) { Text("Save Gemini") }
+                                if (state.hasDeviceGeminiKey) {
+                                    OutlinedButton(onClick = assistantViewModel::clearGeminiKey) { Text("Remove") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            items(state.messages, key = AiMessage::id) { message ->
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = if (message.role == AiMessageRole.USER) Arrangement.End else Arrangement.Start,
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("AI analysis", fontWeight = FontWeight.Bold)
-                        Text(
-                            when (state.activeProvider) {
-                                TerrainAiProvider.OPENAI -> "OpenAI ${OpenAiApiClient.configuredModel()} primary · Gemini fallback ready"
-                                TerrainAiProvider.GEMINI -> "Gemini ${GeminiApiClient.configuredModel()} active"
-                                null -> "Add an OpenAI or Gemini key"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    FilterChip(
-                        selected = attachImage && imageReady,
-                        onClick = { attachImage = !attachImage },
-                        enabled = imageReady && !state.isSending,
-                        label = { Text(if (attachImage && imageReady) "Map attached" else "Attach map") },
-                        leadingIcon = { Icon(Icons.Default.ImageSearch, contentDescription = null) },
-                    )
-                    TextButton(onClick = { showKeys = !showKeys }) { Text("Keys") }
-                    IconButton(onClick = assistantViewModel::clearConversation) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear conversation")
-                    }
-                }
-            }
-        }
-
-        if (showKeys) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = openAiKey,
-                            onValueChange = { openAiKey = it.trim().take(256) },
-                            label = { Text("OpenAI API key") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    assistantViewModel.saveOpenAiKey(openAiKey)
-                                    openAiKey = ""
-                                },
-                                enabled = openAiKey.length >= 20,
-                            ) { Text("Save OpenAI") }
-                            if (state.hasDeviceOpenAiKey) {
-                                OutlinedButton(onClick = assistantViewModel::clearOpenAiKey) { Text("Remove") }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = geminiKey,
-                            onValueChange = { geminiKey = it.trim().take(256) },
-                            label = { Text("Gemini API key") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    assistantViewModel.saveGeminiKey(geminiKey)
-                                    geminiKey = ""
-                                },
-                                enabled = geminiKey.length >= 20,
-                            ) { Text("Save Gemini") }
-                            if (state.hasDeviceGeminiKey) {
-                                OutlinedButton(onClick = assistantViewModel::clearGeminiKey) { Text("Remove") }
-                            }
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (message.role == AiMessageRole.USER) {
+                            MaterialTheme.colorScheme.surfaceContainerHighest
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainer
+                        },
+                        modifier = Modifier.fillMaxWidth(0.94f),
+                    ) {
+                        Column(Modifier.padding(11.dp)) {
+                            Text(
+                                if (message.role == AiMessageRole.USER) "You" else message.provider?.label ?: "Terrain intelligence",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            Text(message.text)
                         }
                     }
                 }
             }
-        }
 
-        items(state.messages, key = AiMessage::id) { message ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = if (message.role == AiMessageRole.USER) Arrangement.End else Arrangement.Start,
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (message.role == AiMessageRole.USER) {
-                        MaterialTheme.colorScheme.surfaceContainerHighest
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainer
-                    },
-                    modifier = Modifier.fillMaxWidth(0.94f),
-                ) {
-                    Column(Modifier.padding(11.dp)) {
-                        Text(
-                            if (message.role == AiMessageRole.USER) "You" else message.provider?.label ?: "Terrain intelligence",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Spacer(Modifier.height(3.dp))
-                        Text(message.text)
+            if (state.isSending) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp), strokeWidth = 2.dp)
+                        Text("Analyzing the visible map…")
                     }
                 }
             }
-        }
 
-        if (state.isSending) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp), strokeWidth = 2.dp)
-                    Text("Analyzing the visible map…")
-                }
+            state.cloudError?.let { error ->
+                item { Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         }
 
-        state.cloudError?.let { error ->
-            item { Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        }
-
-        item {
+        Surface(
+            tonalElevation = 4.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding(),
+        ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
