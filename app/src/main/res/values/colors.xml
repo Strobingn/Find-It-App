@@ -3,21 +3,21 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <!-- Human-friendly grey theme -->
-    <color name="splash_background">#FF121212</color>
-    <color name="ic_launcher_background">#FF121212</color>
-    <color name="brand_gold">#FFFFD700</color>
-    <color name="brand_green">#FF4CAF50</color>
-    <color name="brand_surface">#FF1E1E1E</color>
-    
-    <!-- Grey palette -->
-    <color name="grey_900">#FF212121</color>
-    <color name="grey_800">#FF424242</color>
-    <color name="grey_700">#FF616161</color>
-    <color name="grey_600">#FF757575</color>
-    <color name="grey_500">#FF9E9E9E</color>
-    <color name="grey_400">#FFBDBDBD</color>
-    <color name="grey_300">#FFE0E0E0</color>
-    <color name="grey_200">#FFEEEEEE</color>
-    <color name="grey_100">#FFF5F5F5</color>
+    <!-- Find It monochrome palette: no green, cyan, light blue, gold, bronze, or copper. -->
+    <color name="splash_background">#FF111214</color>
+    <color name="ic_launcher_background">#FF17191C</color>
+    <color name="brand_gold">#FFE6E8EA</color>
+    <color name="brand_green">#FF9EA3A8</color>
+    <color name="brand_surface">#FF24272B</color>
+
+    <color name="grey_950">#FF111214</color>
+    <color name="grey_900">#FF1A1C1F</color>
+    <color name="grey_800">#FF2B2E32</color>
+    <color name="grey_700">#FF45494E</color>
+    <color name="grey_600">#FF686D73</color>
+    <color name="grey_500">#FF8E949A</color>
+    <color name="grey_400">#FFB3B8BD</color>
+    <color name="grey_300">#FFD2D6DA</color>
+    <color name="grey_200">#FFE7E9EB</color>
+    <color name="grey_100">#FFF5F6F7</color>
 </resources>
