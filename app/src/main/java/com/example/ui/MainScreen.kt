@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -63,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -103,11 +105,12 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     val terrainFocusMode = rememberSaveable { mutableStateOf(false) }
     val terrainSelected = selectedTab.intValue == 0
     val activeTab = tabs[selectedTab.intValue]
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            if (!terrainSelected && !terrainFocusMode.value) {
+            if (!terrainSelected && !terrainFocusMode.value && !isLandscape) {
                 CenterAlignedTopAppBar(
                     title = {
                         Text(
@@ -125,12 +128,15 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
         bottomBar = {
             if (!terrainFocusMode.value) {
                 Surface(
-                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                    shadowElevation = 14.dp,
-                    tonalElevation = 5.dp,
+                    shape = RoundedCornerShape(
+                        topStart = if (isLandscape) 14.dp else 24.dp,
+                        topEnd = if (isLandscape) 14.dp else 24.dp,
+                    ),
+                    shadowElevation = if (isLandscape) 5.dp else 10.dp,
+                    tonalElevation = 3.dp,
                 ) {
                     NavigationBar(
-                        modifier = Modifier.height(200.dp),
+                        modifier = Modifier.height(if (isLandscape) 64.dp else 80.dp),
                         containerColor = MaterialTheme.colorScheme.surfaceContainer,
                         tonalElevation = 0.dp,
                     ) {
@@ -145,14 +151,16 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                                     Icon(
                                         tab.icon,
                                         contentDescription = tab.label,
-                                        modifier = Modifier.width(38.dp).height(38.dp),
+                                        modifier = Modifier
+                                            .width(if (isLandscape) 22.dp else 26.dp)
+                                            .height(if (isLandscape) 22.dp else 26.dp),
                                     )
                                 },
                                 label = {
                                     Text(
                                         tab.label,
                                         maxLines = 1,
-                                        style = MaterialTheme.typography.bodyMedium,
+                                        style = MaterialTheme.typography.labelSmall,
                                         fontWeight = if (selectedTab.intValue == index) FontWeight.Bold else FontWeight.Medium,
                                     )
                                 },
