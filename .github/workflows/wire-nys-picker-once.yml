@@ -4,14 +4,13 @@ on:
   push:
     branches:
       - fix/ai-zoom-and-metal-target-math
-    paths:
-      - .github/workflows/wire-nys-picker-once.yml
 
 permissions:
   contents: write
 
 jobs:
   wire:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
