@@ -1,10 +1,12 @@
 package com.example.ui
 
+import android.content.res.Configuration
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -74,6 +77,7 @@ fun AiAnalysisWorkspace(
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
     val gridSpacing by viewModel.gridSpacing.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
@@ -83,19 +87,12 @@ fun AiAnalysisWorkspace(
     val showDatasetComparison = rememberSaveable { mutableStateOf(false) }
     val analyzedDatasets by viewModel.analyzedDatasets.collectAsStateWithLifecycle()
     val analysisBitmap = aiState.localLayerBitmap ?: sourceBitmap
-    // Re-derives live from the current logged finds (not just at "Analyze" time) so marking a
-    // find CONFIRMED/REJECTED in the Finds tab immediately re-scores historic targets here too,
-    // without needing to re-run the full (much more expensive) derived-layer analysis.
     val historicTargets = remember(aiState.localResult, signals) {
         val result = aiState.localResult ?: return@remember emptyList()
         val feedbackPoints = VerifiedFeedback.derive(signals, result.datasetKey)
         MetalDetectingTargetRefiner.refine(result, feedbackPoints)
     }
 
-    // Persists a stable (feedback-free) snapshot of this dataset's targets whenever a fresh
-    // analysis result arrives, so it can later be cross-compared against a different dataset -
-    // without this, there is nothing for multi-dataset comparison to compare against once the
-    // app moves on to a different import.
     LaunchedEffect(aiState.localResult) {
         val result = aiState.localResult ?: return@LaunchedEffect
         val rawTargets = MetalDetectingTargetRefiner.refine(result)
@@ -139,18 +136,12 @@ fun AiAnalysisWorkspace(
                 source = source,
                 notes = notes,
                 status = if (source == DetectionSource.AI_ANALYSIS) "AI suggested" else "Logged",
-                // Ties this find back to the exact analyzed dataset, so a later verified outcome
-                // (confirmed/rejected in the Finds tab) feeds back into re-scoring this dataset's
-                // candidates instead of being unattributable.
                 datasetKey = aiState.localResult?.datasetKey,
             ),
         )
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(padding),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
+    val workspaceControls: @Composable () -> Unit = {
         Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
@@ -293,7 +284,7 @@ fun AiAnalysisWorkspace(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 220.dp)
+                            .heightIn(max = if (isLandscape) 110.dp else 220.dp)
                             .testTag("ai_target_details_list"),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
@@ -304,7 +295,9 @@ fun AiAnalysisWorkspace(
                 }
             }
         }
+    }
 
+    val analysisMap: @Composable (Modifier) -> Unit = { mapModifier ->
         LidarMapCanvas(
             bitmap = analysisBitmap,
             isRendering = isRendering || aiState.isLocalAnalyzing,
@@ -325,26 +318,51 @@ fun AiAnalysisWorkspace(
                 visibleBounds.value = bounds
                 zoomLevel.value = zoom
             },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(390.dp)
-                .testTag("ai_single_analysis_map"),
+            modifier = mapModifier.testTag("ai_single_analysis_map"),
         )
+    }
 
-        if (isRefining || aiState.isLocalAnalyzing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-
-        AiCloudPanel(
-            terrainSummary = summary,
-            grid = grid,
-            metadata = metadata,
-            assistantViewModel = assistantViewModel,
-            // weight(1f), not fillMaxSize(): this Column isn't scrollable, and the header +
-            // map above already claim their own height, so a fillMaxSize() panel here asked
-            // for the full column height on top of that and pushed its own internal chat
-            // list - including the text input at the bottom of it - past the visible screen
-            // with no way to scroll to it. weight(1f) bounds it to the actual remaining space.
-            modifier = Modifier.weight(1f),
-        )
+    if (isLandscape) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Column(
+                modifier = Modifier.weight(1.15f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                workspaceControls()
+                analysisMap(Modifier.fillMaxWidth().weight(1f))
+                if (isRefining || aiState.isLocalAnalyzing) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+            AiCloudPanel(
+                terrainSummary = summary,
+                grid = grid,
+                metadata = metadata,
+                assistantViewModel = assistantViewModel,
+                modifier = Modifier.weight(0.85f).fillMaxHeight(),
+            )
+        }
+    } else {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            workspaceControls()
+            analysisMap(Modifier.fillMaxWidth().weight(1f))
+            if (isRefining || aiState.isLocalAnalyzing) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            AiCloudPanel(
+                terrainSummary = summary,
+                grid = grid,
+                metadata = metadata,
+                assistantViewModel = assistantViewModel,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        }
     }
 
     if (showDatasetComparison.value) {
