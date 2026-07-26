@@ -48,9 +48,7 @@ import com.example.data.TerrainPerformanceSession
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** Visible NYS Southeast 4 County tile resolver and downloader for historic-site work. */
 @Composable
@@ -117,7 +115,7 @@ fun NysLazTilePicker(
                     url = tile.downloadUrl,
                     store = store,
                     onProgress = { downloaded, total ->
-                        withContext(Dispatchers.Main.immediate) {
+                        scope.launch {
                             status = if (total > 0L) {
                                 "Downloading ${tile.name}: ${percent(downloaded, total)}%"
                             } else {
@@ -137,7 +135,7 @@ fun NysLazTilePicker(
                     displayName = tile.name,
                     options = options,
                     onStage = { stage ->
-                        withContext(Dispatchers.Main.immediate) { status = stage }
+                        scope.launch { status = stage }
                     },
                 )
                 TerrainPerformanceSession.publish(outcome.gpuScene)
