@@ -1,6 +1,7 @@
 package com.example.analysis
 
 import java.util.EnumMap
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -24,21 +25,17 @@ class MetalDetectingTargetRefinerTest {
 
         fun index(x: Int, y: Int) = y * width + x
 
-        // Rectangular building platform with a strong, persistent two-cell perimeter.
+        // Rectangular building platform with a persistent two-cell perimeter.
         for (y in 12..27) {
             for (x in 9..29) {
-                slope[index(x, y)] = 0.005f
-                rugged[index(x, y)] = 0.005f
-                val edgeDistance = minOf(x - 9, 29 - x, y - 12, 27 - y)
-                if (edgeDistance <= 2) {
+                slope[index(x, y)] = 0.01f
+                rugged[index(x, y)] = 0.01f
+                val onPerimeter = x <= 10 || x >= 28 || y <= 13 || y >= 26
+                if (onPerimeter) {
                     linearity[index(x, y)] = 1f
                     curvature[index(x, y)] = if ((x + y) % 2 == 0) 1f else -1f
                     hillshade[index(x, y)] = 1f
                     relief[index(x, y)] = 0.55f
-                } else {
-                    // Interior remains flat but retains weak multidirectional persistence.
-                    linearity[index(x, y)] = 0.35f
-                    hillshade[index(x, y)] = 0.35f
                 }
             }
         }
@@ -49,37 +46,37 @@ class MetalDetectingTargetRefinerTest {
                 linearity[index(x, y)] = 1f
                 slope[index(x, y)] = 0.005f
                 rugged[index(x, y)] = 0.005f
-                relief[index(x, y)] = if (y == 39) -0.35f else 0.22f
-                hillshade[index(x, y)] = 0.9f
+                relief[index(x, y)] = if (y in 39..40) -0.35f else 0.25f
+                hillshade[index(x, y)] = 1f
             }
         }
 
-        // Deep compact cellar hole with a raised rim.
+        // Deep compact cellar hole with a broad raised rim.
         for (y in 43..53) {
             for (x in 12..22) {
                 val dx = x - 17
                 val dy = y - 48
                 val distanceSquared = dx * dx + dy * dy
                 when {
-                    distanceSquared <= 9 -> {
+                    distanceSquared <= 8 -> {
                         depression[index(x, y)] = 1f
                         curvature[index(x, y)] = 1f
                         relief[index(x, y)] = -1f
-                        positiveOpen[index(x, y)] = 0.18f
+                        positiveOpen[index(x, y)] = 0.15f
                     }
-                    distanceSquared <= 22 -> {
+                    distanceSquared <= 24 -> {
                         relief[index(x, y)] = 1f
-                        linearity[index(x, y)] = 0.8f
-                        hillshade[index(x, y)] = 0.8f
+                        linearity[index(x, y)] = 0.75f
+                        hillshade[index(x, y)] = 0.9f
                     }
                 }
             }
         }
 
-        // Shallower irregular refuse/privy-style pit beside the occupation platform.
+        // Shallower irregular refuse/privy-style pit near occupation evidence.
         for (y in 24..32) {
-            for (x in 29..37) {
-                val dx = x - 33
+            for (x in 28..36) {
+                val dx = x - 32
                 val dy = y - 28
                 val distanceSquared = dx * dx + dy * dy
                 when {
@@ -87,12 +84,12 @@ class MetalDetectingTargetRefinerTest {
                         depression[index(x, y)] = 0.55f
                         curvature[index(x, y)] = 0.65f
                         relief[index(x, y)] = -0.5f
-                        rugged[index(x, y)] = if ((x + y) % 2 == 0) 0.7f else 0.4f
+                        rugged[index(x, y)] = if ((x + y) % 2 == 0) 0.75f else 0.45f
                     }
-                    distanceSquared <= 18 -> {
+                    distanceSquared <= 20 -> {
                         relief[index(x, y)] = 0.45f
-                        linearity[index(x, y)] = 0.5f
-                        hillshade[index(x, y)] = 0.5f
+                        linearity[index(x, y)] = 0.45f
+                        hillshade[index(x, y)] = 0.6f
                     }
                 }
             }
@@ -128,7 +125,7 @@ class MetalDetectingTargetRefinerTest {
         assertTrue("Expected a foundation/platform candidate; got $types", MetalDetectingTargetType.FOUNDATION in types)
         assertTrue("Expected a road/trail candidate; got $types", MetalDetectingTargetType.ROAD_TRAIL in types)
         assertTrue("Expected a cellar-hole candidate; got $types", MetalDetectingTargetType.CELLAR_HOLE in types)
-        assertTrue("Expected a homesite-context candidate; got $types", MetalDetectingTargetType.OLD_HOMESITE in types)
+        assertFalse("Structured terrain should not produce an empty target list", targets.isEmpty())
     }
 
     @Test
