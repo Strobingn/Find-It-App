@@ -117,9 +117,6 @@ fun LidarMapCanvas(
         zoom = 1f
         pan = Offset.Zero
     }
-    // Restores a persisted viewport exactly once, when the caller signals settings finished
-    // loading (token goes from 0 to a positive value). Not keyed to every zoom/pan change, so it
-    // doesn't fight with live user interaction or with the reset-on-tab-switch behavior above.
     LaunchedEffect(viewportRestoreToken) {
         if (viewportRestoreToken > 0) {
             zoom = initialZoom.coerceIn(1f, 32f)
@@ -327,42 +324,42 @@ fun LidarMapCanvas(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(10.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xE60D0E12))
-                    .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Column {
-                    Text(
-                        text = geoMetadata.siteName.uppercase(),
-                        color = Color(0xFFFFD700),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 0.5.sp,
-                    )
-                    Text(
-                        text = "${geoMetadata.crs} • ${geoMetadata.datum}",
-                        color = Color.LightGray,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                    if (showBasemap && basemapStatus != null) {
+            if (showCoordinateHud) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xE60D0E12))
+                        .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Column {
                         Text(
-                            text = basemapStatus,
-                            color = Color(0xFF64B5F6),
+                            text = geoMetadata.siteName.uppercase(),
+                            color = Color(0xFFFFD700),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            letterSpacing = 0.5.sp,
+                        )
+                        Text(
+                            text = "${geoMetadata.crs} • ${geoMetadata.datum}",
+                            color = Color.LightGray,
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
                         )
+                        if (showBasemap && basemapStatus != null) {
+                            Text(
+                                text = basemapStatus,
+                                color = Color(0xFF64B5F6),
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
                     }
                 }
-            }
 
-            if (showCoordinateHud) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -433,12 +430,10 @@ fun LidarMapCanvas(
         }
 
         if (isRendering && !useGpuTerrain) {
-            Box(
-                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.28f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
+            CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.align(Alignment.Center),
+            )
         }
     }
 }
