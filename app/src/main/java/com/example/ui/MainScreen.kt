@@ -123,12 +123,12 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
         bottomBar = {
             if (!terrainFocusMode.value) {
                 Surface(
-                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                    shadowElevation = 10.dp,
-                    tonalElevation = 3.dp,
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                    shadowElevation = 14.dp,
+                    tonalElevation = 5.dp,
                 ) {
                     NavigationBar(
-                        modifier = Modifier.height(68.dp),
+                        modifier = Modifier.height(200.dp),
                         containerColor = MaterialTheme.colorScheme.surfaceContainer,
                         tonalElevation = 0.dp,
                     ) {
@@ -139,9 +139,22 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                                     selectedTab.intValue = index
                                     terrainFocusMode.value = false
                                 },
-                                icon = { Icon(tab.icon, contentDescription = tab.label) },
-                                label = { Text(tab.label, maxLines = 1) },
-                                alwaysShowLabel = false,
+                                icon = {
+                                    Icon(
+                                        tab.icon,
+                                        contentDescription = tab.label,
+                                        modifier = Modifier.width(38.dp).height(38.dp),
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        tab.label,
+                                        maxLines = 1,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (selectedTab.intValue == index) FontWeight.Bold else FontWeight.Medium,
+                                    )
+                                },
+                                alwaysShowLabel = true,
                             )
                         }
                     }
