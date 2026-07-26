@@ -24,63 +24,76 @@ class MetalDetectingTargetRefinerTest {
 
         fun index(x: Int, y: Int) = y * width + x
 
-        // Rectangular building platform with a persistent perimeter.
-        for (y in 13..25) {
-            for (x in 10..27) {
-                slope[index(x, y)] = 0.01f
-                rugged[index(x, y)] = 0.01f
-                if (x == 10 || x == 27 || y == 13 || y == 25) {
+        // Rectangular building platform with a strong, persistent two-cell perimeter.
+        for (y in 12..27) {
+            for (x in 9..29) {
+                slope[index(x, y)] = 0.005f
+                rugged[index(x, y)] = 0.005f
+                val edgeDistance = minOf(x - 9, 29 - x, y - 12, 27 - y)
+                if (edgeDistance <= 2) {
                     linearity[index(x, y)] = 1f
-                    curvature[index(x, y)] = if ((x + y) % 2 == 0) 0.9f else -0.9f
+                    curvature[index(x, y)] = if ((x + y) % 2 == 0) 1f else -1f
                     hillshade[index(x, y)] = 1f
-                    relief[index(x, y)] = 0.35f
+                    relief[index(x, y)] = 0.55f
+                } else {
+                    // Interior remains flat but retains weak multidirectional persistence.
+                    linearity[index(x, y)] = 0.35f
+                    hillshade[index(x, y)] = 0.35f
                 }
             }
         }
 
         // Continuous low-gradient wagon-road corridor.
-        for (x in 5..58) {
-            for (y in 38..40) {
+        for (x in 4..59) {
+            for (y in 37..41) {
                 linearity[index(x, y)] = 1f
-                slope[index(x, y)] = 0.01f
-                rugged[index(x, y)] = 0.01f
-                relief[index(x, y)] = if (y == 39) -0.25f else 0.12f
-                hillshade[index(x, y)] = 0.75f
+                slope[index(x, y)] = 0.005f
+                rugged[index(x, y)] = 0.005f
+                relief[index(x, y)] = if (y == 39) -0.35f else 0.22f
+                hillshade[index(x, y)] = 0.9f
             }
         }
 
         // Deep compact cellar hole with a raised rim.
-        for (y in 45..51) {
-            for (x in 14..20) {
+        for (y in 43..53) {
+            for (x in 12..22) {
                 val dx = x - 17
                 val dy = y - 48
                 val distanceSquared = dx * dx + dy * dy
-                if (distanceSquared <= 5) {
-                    depression[index(x, y)] = 1f
-                    curvature[index(x, y)] = 1f
-                    relief[index(x, y)] = -1f
-                    positiveOpen[index(x, y)] = 0.25f
-                } else if (distanceSquared <= 10) {
-                    relief[index(x, y)] = 0.8f
-                    linearity[index(x, y)] = 0.55f
+                when {
+                    distanceSquared <= 9 -> {
+                        depression[index(x, y)] = 1f
+                        curvature[index(x, y)] = 1f
+                        relief[index(x, y)] = -1f
+                        positiveOpen[index(x, y)] = 0.18f
+                    }
+                    distanceSquared <= 22 -> {
+                        relief[index(x, y)] = 1f
+                        linearity[index(x, y)] = 0.8f
+                        hillshade[index(x, y)] = 0.8f
+                    }
                 }
             }
         }
 
-        // Shallower irregular refuse/privy-style pit near the foundation.
-        for (y in 25..30) {
-            for (x in 29..34) {
-                val dx = x - 31
-                val dy = y - 27
+        // Shallower irregular refuse/privy-style pit beside the occupation platform.
+        for (y in 24..32) {
+            for (x in 29..37) {
+                val dx = x - 33
+                val dy = y - 28
                 val distanceSquared = dx * dx + dy * dy
-                if (distanceSquared <= 5) {
-                    depression[index(x, y)] = 0.45f
-                    curvature[index(x, y)] = 0.55f
-                    relief[index(x, y)] = -0.42f
-                    rugged[index(x, y)] = if ((x + y) % 2 == 0) 0.6f else 0.35f
-                } else if (distanceSquared <= 10) {
-                    relief[index(x, y)] = 0.3f
-                    linearity[index(x, y)] = 0.3f
+                when {
+                    distanceSquared <= 8 -> {
+                        depression[index(x, y)] = 0.55f
+                        curvature[index(x, y)] = 0.65f
+                        relief[index(x, y)] = -0.5f
+                        rugged[index(x, y)] = if ((x + y) % 2 == 0) 0.7f else 0.4f
+                    }
+                    distanceSquared <= 18 -> {
+                        relief[index(x, y)] = 0.45f
+                        linearity[index(x, y)] = 0.5f
+                        hillshade[index(x, y)] = 0.5f
+                    }
                 }
             }
         }
@@ -112,10 +125,10 @@ class MetalDetectingTargetRefinerTest {
         val targets = MetalDetectingTargetRefiner.refine(result)
         val types = targets.map { it.type }.toSet()
 
-        assertTrue("Expected a foundation/platform candidate", MetalDetectingTargetType.FOUNDATION in types)
-        assertTrue("Expected a road/trail candidate", MetalDetectingTargetType.ROAD_TRAIL in types)
-        assertTrue("Expected a cellar-hole candidate", MetalDetectingTargetType.CELLAR_HOLE in types)
-        assertTrue("Expected a homesite-context candidate", MetalDetectingTargetType.OLD_HOMESITE in types)
+        assertTrue("Expected a foundation/platform candidate; got $types", MetalDetectingTargetType.FOUNDATION in types)
+        assertTrue("Expected a road/trail candidate; got $types", MetalDetectingTargetType.ROAD_TRAIL in types)
+        assertTrue("Expected a cellar-hole candidate; got $types", MetalDetectingTargetType.CELLAR_HOLE in types)
+        assertTrue("Expected a homesite-context candidate; got $types", MetalDetectingTargetType.OLD_HOMESITE in types)
     }
 
     @Test
