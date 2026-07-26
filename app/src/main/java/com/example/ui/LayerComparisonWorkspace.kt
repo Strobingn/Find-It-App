@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,6 +41,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -178,8 +180,14 @@ fun LayerComparisonWorkspace(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
+                    .clipToBounds()
                     .transformable(transformState)
-                    .onSizeChanged { paneSize = IntSize(it.width / 2, it.height) }
+                    .onSizeChanged {
+                        paneSize = IntSize(
+                            width = ((it.width - 1).coerceAtLeast(2)) / 2,
+                            height = it.height.coerceAtLeast(1),
+                        )
+                    }
                     .testTag("layer_comparison_row"),
             ) {
                 ComparisonPane(
@@ -188,9 +196,13 @@ fun LayerComparisonWorkspace(
                     pan = pan,
                     layer = leftLayer,
                     onLayerSelected = { leftLayer = it },
-                    modifier = Modifier.weight(1f).fillMaxSize().testTag("comparison_pane_left"),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clipToBounds()
+                        .testTag("comparison_pane_left"),
                 )
-                Box(modifier = Modifier.width(1.dp).fillMaxSize().padding(vertical = 4.dp)) {
+                Box(modifier = Modifier.width(1.dp).fillMaxHeight()) {
                     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.outlineVariant) {}
                 }
                 ComparisonPane(
@@ -199,7 +211,11 @@ fun LayerComparisonWorkspace(
                     pan = pan,
                     layer = rightLayer,
                     onLayerSelected = { rightLayer = it },
-                    modifier = Modifier.weight(1f).fillMaxSize().testTag("comparison_pane_right"),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clipToBounds()
+                        .testTag("comparison_pane_right"),
                 )
             }
         }
@@ -220,7 +236,7 @@ private fun ComparisonPane(
         bitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
     }
 
-    Column(modifier = modifier) {
+    Column(modifier = modifier.clipToBounds()) {
         Box {
             Surface(
                 tonalElevation = 2.dp,
@@ -250,7 +266,9 @@ private fun ComparisonPane(
         }
         Canvas(
             modifier = Modifier
-                .fillMaxSize()
+                .weight(1f)
+                .fillMaxWidth()
+                .clipToBounds()
                 .testTag("comparison_canvas_${layer.name}"),
         ) {
             if (imageBitmap == null) return@Canvas
