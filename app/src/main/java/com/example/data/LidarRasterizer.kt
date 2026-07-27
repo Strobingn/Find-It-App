@@ -38,6 +38,7 @@ internal class LidarRasterizer(
         ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
         ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
     private val sampleStride = ceil(estimatedPointsInFocus / MAX_BINNED_POINTS).toInt().coerceAtLeast(1)
+    private var pointsUntilNextSample = 0
 
     var pointsDecoded: Long = 0
         private set
@@ -60,12 +61,30 @@ internal class LidarRasterizer(
         allCount = IntArray(width * height)
     }
 
-    /** Streams every return while sampling bins evenly across the complete file. */
-    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
-        val pointIndex = pointsDecoded++
+    /**
+     * Records one decoded return and decides whether its payload needs to be converted and binned.
+     * A countdown avoids a modulo operation for every point in very large point clouds.
+     */
+    internal fun shouldBinNextPoint(): Boolean {
+        pointsDecoded++
+        if (pointsUntilNextSample == 0) {
+            pointsUntilNextSample = sampleStride - 1
+            return true
+        }
+        pointsUntilNextSample--
+        return false
+    }
+
+    /** Adds a point that already passed the sampling gate. */
+    internal fun addSampledPoint(
+        x: Double,
+        y: Double,
+        z: Float,
+        classification: Int,
+        isKeyPoint: Boolean = false,
+    ): Boolean {
         if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return true
         if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return true
-        if (pointIndex % sampleStride.toLong() != 0L) return true
 
         val gx = (((x - cropMinX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
         val gy = ((1.0 - (y - cropMinY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
@@ -86,6 +105,12 @@ internal class LidarRasterizer(
             groundPointsBinned++
         }
         return true
+    }
+
+    /** Streams every return while sampling bins evenly across the complete file. */
+    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
+        if (!shouldBinNextPoint()) return true
+        return addSampledPoint(x, y, z, classification, isKeyPoint)
     }
 
     fun finish(pointFormat: Int, sourceLabel: String): DemGenerator.LasLoadResult? {
