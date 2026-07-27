@@ -170,9 +170,17 @@ class LazTerrainCache(
         return Lookup(null, Hit.MISS)
     }
 
-    fun put(file: File, options: LidarImportOptions, result: DemGenerator.TerrainLoadResult) {
+    fun putMemory(file: File, options: LidarImportOptions, result: DemGenerator.TerrainLoadResult) {
         memory.put(file, options, result)
+    }
+
+    fun putDisk(file: File, options: LidarImportOptions, result: DemGenerator.TerrainLoadResult) {
         disk.put(file, options, result)
+    }
+
+    fun put(file: File, options: LidarImportOptions, result: DemGenerator.TerrainLoadResult) {
+        putMemory(file, options, result)
+        putDisk(file, options, result)
     }
 
     fun remove(file: File) {
