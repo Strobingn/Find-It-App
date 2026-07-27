@@ -82,20 +82,25 @@ class TerrainDecodeCoordinator(
     ): DemGenerator.TerrainLoadResult? = withContext(Dispatchers.IO) {
         val decodeContext = currentCoroutineContext()
         decodeContext.ensureActive()
-        FileInputStream(file).buffered(256 * 1024).use { input ->
-            if (displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true)) {
-                val laz = LazTerrainReader.read(
-                    input,
-                    options,
-                    shouldContinue = { decodeContext.isActive },
-                )
-                    ?: return@use null
-                DemGenerator.TerrainLoadResult(
-                    grid = laz.grid,
-                    summary = laz.note,
-                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
-                )
-            } else {
+        val isLaz = displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true) ||
+            file.extension.equals("laz", ignoreCase = true)
+
+        if (isLaz) {
+            // Keep LAZ decoding file-backed. This preserves laszip4j's seek/spatial-query path and
+            // lets focused re-rasterization use insideRectangle() instead of streaming and
+            // decompressing the complete file before discarding points outside the viewport.
+            val laz = LazTerrainReader.read(
+                file = file,
+                options = options,
+                shouldContinue = { decodeContext.isActive },
+            ) ?: return@withContext null
+            DemGenerator.TerrainLoadResult(
+                grid = laz.grid,
+                summary = laz.note,
+                isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+            )
+        } else {
+            FileInputStream(file).buffered(256 * 1024).use { input ->
                 DemGenerator.parseFromStreamDetailed(displayName, input, options)
             }
         }
