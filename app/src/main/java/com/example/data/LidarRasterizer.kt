@@ -5,7 +5,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-/** Memory-bounded point-cloud binning shared by the LAS and LAZ readers. */
+/** Memory-bounded, exact point-cloud binning shared by the LAS and LAZ readers. */
 internal class LidarRasterizer(
     minX: Double,
     maxX: Double,
@@ -25,6 +25,8 @@ internal class LidarRasterizer(
     private val rangeX = (cropMaxX - cropMinX).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val rangeY = (cropMaxY - cropMinY).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val longSide = this.options.rasterResolution
+    @Suppress("unused")
+    private val expectedPointCount = declaredPointCount.coerceAtLeast(0L)
     val width: Int
     val height: Int
 
@@ -34,11 +36,6 @@ internal class LidarRasterizer(
     private val allMax: FloatArray
     private val allCount: IntArray
     private val classHistogram = IntArray(256)
-    private val estimatedPointsInFocus = declaredPointCount.coerceAtLeast(1L).toDouble() *
-        ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
-        ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
-    private val sampleStride = ceil(estimatedPointsInFocus / MAX_BINNED_POINTS).toInt().coerceAtLeast(1)
-    private var pointsUntilNextSample = 0
 
     var pointsDecoded: Long = 0
         private set
@@ -61,21 +58,13 @@ internal class LidarRasterizer(
         allCount = IntArray(width * height)
     }
 
-    /**
-     * Records one decoded return and decides whether its payload needs to be converted and binned.
-     * A countdown avoids a modulo operation for every point in very large point clouds.
-     */
+    /** Records one decoded return. Exact mode never drops a return before cell aggregation. */
     internal fun shouldBinNextPoint(): Boolean {
         pointsDecoded++
-        if (pointsUntilNextSample == 0) {
-            pointsUntilNextSample = sampleStride - 1
-            return true
-        }
-        pointsUntilNextSample--
-        return false
+        return true
     }
 
-    /** Adds a point that already passed the sampling gate. */
+    /** Adds a decoded point to the exact min/max cell accumulators. */
     internal fun addSampledPoint(
         x: Double,
         y: Double,
@@ -107,9 +96,8 @@ internal class LidarRasterizer(
         return true
     }
 
-    /** Streams every return while sampling bins evenly across the complete file. */
     fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
-        if (!shouldBinNextPoint()) return true
+        shouldBinNextPoint()
         return addSampledPoint(x, y, z, classification, isKeyPoint)
     }
 
@@ -168,13 +156,9 @@ internal class LidarRasterizer(
         val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
-        val samplingNote = when {
-            sampleStride > 1 -> "binned every ${sampleStride}th return across $pointsDecoded decoded points"
-            else -> "$pointsDecoded points decoded"
-        }
         val modeNote = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED ->
-                "ASPRS ground classes: $groundPointsBinned / $pointsBinned sampled returns"
+                "ASPRS ground classes: $groundPointsBinned / $pointsBinned returns"
             GroundSurfaceMode.AUTO_LOWEST -> if (requestedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 "classified ground coverage was sparse; used automatic lowest-return ground estimate"
             } else {
@@ -200,7 +184,7 @@ internal class LidarRasterizer(
             },
             usedClassificationFilter = appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED,
             pointFormat = pointFormat,
-            note = "$sourceLabel · $focusNote · $modeNote · $classNote · $samplingNote · ${width}×$height $smoothingNote",
+            note = "$sourceLabel · $focusNote · $modeNote · $classNote · all $pointsDecoded returns aggregated · ${width}×$height $smoothingNote",
             requestedGroundMode = requestedMode,
             appliedGroundMode = appliedMode,
             sampledPoints = pointsBinned,
@@ -212,7 +196,6 @@ internal class LidarRasterizer(
         private const val MIN_SHORT_SIDE = 48
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12
-        private const val MAX_BINNED_POINTS = 8_000_000.0
     }
 }
 
@@ -228,8 +211,6 @@ internal fun fillMissingNearest(grid: FloatArray, width: Int, height: Int) {
         return
     }
 
-    // Multi-source propagation grows from every measured cell at once. Unlike directional scan
-    // filling, this cannot smear the first value in a row across large parts of the raster.
     while (head < tail) {
         val index = queue[head++]
         val x = index % width
@@ -254,8 +235,6 @@ internal fun buildCoverageMask(counts: IntArray, width: Int, height: Int): Boole
     val populated = counts.count { it > 0 }
     if (populated == 0) return BooleanArray(counts.size)
 
-    // Bridge ordinary raster-bin gaps, but keep large holes and space outside irregular flight
-    // footprints transparent. Radius adapts to sampled point density and remains tightly bounded.
     val averageSpacing = sqrt(counts.size.toDouble() / populated)
     val radius = (ceil(averageSpacing * 2.0).toInt()).coerceIn(2, 8)
     val distance = IntArray(counts.size) { Int.MAX_VALUE }
@@ -305,7 +284,6 @@ private fun suppressIsolatedLowNoise(source: FloatArray, width: Int, height: Int
             neighbors.sort(0, count)
             val median = neighbors[count / 2]
             val index = y * width + x
-            // Remove only extreme low outliers; shallow cellars, ditches and tracks remain untouched.
             if (source[index] < median - LOW_NOISE_THRESHOLD_METERS) output[index] = median
         }
     }
