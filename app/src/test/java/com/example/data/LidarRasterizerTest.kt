@@ -7,9 +7,36 @@ import org.junit.Test
 
 class LidarRasterizerTest {
     @Test
-    fun importOptionsAllowHighResolutionWithoutUnboundedAllocation() {
-        assertEquals(1_024, LidarImportOptions(rasterResolution = 4_096).sanitized().rasterResolution)
+    fun importOptionsUseFastOverviewAndAllowHighResolutionRefinement() {
+        assertEquals(
+            512,
+            LidarImportOptions(rasterResolution = 4_096).sanitized().rasterResolution,
+        )
+        assertEquals(
+            1_024,
+            LidarImportOptions(
+                rasterResolution = 4_096,
+                focusBounds = NormalizedRasterBounds(0.2, 0.2, 0.8, 0.8),
+            ).sanitized().rasterResolution,
+        )
         assertEquals(4, LidarImportOptions(smoothingRadius = 99).sanitized().smoothingRadius)
+    }
+
+    @Test
+    fun optimizedPointWorkSkipsMostGettersOnLargeOverviews() {
+        val rasterizer = LidarRasterizer(
+            minX = 0.0,
+            maxX = 100.0,
+            minY = 0.0,
+            maxY = 100.0,
+            options = LidarImportOptions(rasterResolution = 512),
+            declaredPointCount = 64_000_000,
+        )
+
+        assertEquals(LidarPointWork.ELEVATION, rasterizer.nextPointWork())
+        rasterizer.skipPoint()
+        repeat(7) { rasterizer.skipPoint() }
+        assertEquals(LidarPointWork.COVERAGE, rasterizer.nextPointWork())
     }
 
     @Test
