@@ -5,6 +5,13 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+/** Amount of per-return work required by the optimized LAZ reader. */
+internal enum class LidarPointWork {
+    SKIP,
+    COVERAGE,
+    ELEVATION,
+}
+
 /** Memory-bounded point-cloud binning shared by the LAS and LAZ readers. */
 internal class LidarRasterizer(
     minX: Double,
@@ -39,9 +46,8 @@ internal class LidarRasterizer(
     private val estimatedPointsInFocus = declaredPointCount.coerceAtLeast(1L).toDouble() *
         ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
         ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
-    private val sampleStride = ceil(
-        estimatedPointsInFocus / maxBinnedPoints.coerceAtLeast(1.0),
-    ).toInt().coerceAtLeast(1)
+    private val sampleStride: Int
+    private val coverageStride: Int
 
     var pointsDecoded: Long = 0
         private set
@@ -63,23 +69,49 @@ internal class LidarRasterizer(
         allMax = FloatArray(width * height) { -Float.MAX_VALUE }
         allCount = IntArray(width * height)
         coverageCount = IntArray(width * height)
+
+        // A 512 px overview does not benefit from eight million elevation samples. Target enough
+        // returns to populate each output cell several times, with a hard ceiling for large files.
+        val usefulSampleBudget = minOf(
+            maxBinnedPoints.coerceAtLeast(1.0),
+            (width.toDouble() * height.toDouble() * TARGET_SAMPLES_PER_CELL).coerceAtLeast(1.0),
+        )
+        sampleStride = ceil(estimatedPointsInFocus / usefulSampleBudget).toInt().coerceAtLeast(1)
+        // Footprint coverage needs denser sampling than elevation statistics, but processing every
+        // return caused multi-minute waits on ordinary 100–200 MiB LAZ files.
+        coverageStride = sampleStride.coerceAtMost(MAX_COVERAGE_STRIDE)
+    }
+
+    /** Lets the low-level reader avoid coordinate/classification getters for discarded returns. */
+    fun nextPointWork(): LidarPointWork {
+        val index = pointsDecoded
+        return when {
+            index % sampleStride.toLong() == 0L -> LidarPointWork.ELEVATION
+            index % coverageStride.toLong() == 0L -> LidarPointWork.COVERAGE
+            else -> LidarPointWork.SKIP
+        }
+    }
+
+    fun skipPoint(): Boolean {
+        pointsDecoded++
+        return true
+    }
+
+    fun addCoveragePoint(x: Double, y: Double): Boolean {
+        pointsDecoded++
+        cellIndex(x, y)?.let { coverageCount[it]++ }
+        return true
     }
 
     /**
-     * Streams every return. The full decoded stream records source coverage, while elevation and
-     * classification statistics remain sampled so very large files stay memory and CPU bounded.
+     * Adds a complete elevation sample. Existing callers may still invoke this for every return;
+     * the method retains its own stride guard for compatibility.
      */
     fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
         val pointIndex = pointsDecoded++
-        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return true
-        if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return true
+        if (!z.isFinite()) return true
+        val index = cellIndex(x, y) ?: return true
 
-        val gx = (((x - cropMinX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
-        val gy = ((1.0 - (y - cropMinY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
-        val index = gy * width + gx
-
-        // Coverage must be based on every decoded return. Using only the sampled elevation stream
-        // makes dense, continuous LAZ tiles render as disconnected transparent postage stamps.
         coverageCount[index]++
         if (pointIndex % sampleStride.toLong() != 0L) return true
 
@@ -99,6 +131,14 @@ internal class LidarRasterizer(
             groundPointsBinned++
         }
         return true
+    }
+
+    private fun cellIndex(x: Double, y: Double): Int? {
+        if (!x.isFinite() || !y.isFinite()) return null
+        if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return null
+        val gx = (((x - cropMinX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
+        val gy = ((1.0 - (y - cropMinY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
+        return gy * width + gx
     }
 
     fun finish(pointFormat: Int, sourceLabel: String): DemGenerator.LasLoadResult? {
@@ -157,7 +197,8 @@ internal class LidarRasterizer(
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
         val samplingNote = when {
-            sampleStride > 1 -> "binned every ${sampleStride}th return across $pointsDecoded decoded points"
+            sampleStride > 1 ->
+                "sampled every ${sampleStride}th elevation return and every ${coverageStride}th footprint return across $pointsDecoded decoded points"
             else -> "$pointsDecoded points decoded"
         }
         val modeNote = when (appliedMode) {
@@ -200,7 +241,9 @@ internal class LidarRasterizer(
         private const val MIN_SHORT_SIDE = 48
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12
-        private const val MAX_BINNED_POINTS = 8_000_000.0
+        private const val TARGET_SAMPLES_PER_CELL = 8.0
+        private const val MAX_COVERAGE_STRIDE = 8
+        private const val MAX_BINNED_POINTS = 4_000_000.0
     }
 }
 
