@@ -1,19 +1,19 @@
 package com.example.data
 
 import com.github.mreutegg.laszip4j.laslib.LASreaderLAS
+import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION
+import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_FLAGS
+import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_Z
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
-import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION
-import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_FLAGS
-import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_Z
 
 /** Pure-Java LAZ decoding backed by laszip4j; all rasterization remains memory bounded. */
 internal object LazTerrainReader {
     private const val DECODE_BATCH_POINTS = 32_768
     private const val FILE_BUFFER_BYTES = 1024 * 1024
-    private const val TERRAIN_DECOMPRESS_FIELDS =
+    private val TERRAIN_DECOMPRESS_FIELDS =
         LASZIP_DECOMPRESS_SELECTIVE_Z or
             LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION or
             LASZIP_DECOMPRESS_SELECTIVE_FLAGS
