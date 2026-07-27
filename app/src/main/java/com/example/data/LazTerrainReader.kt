@@ -111,30 +111,34 @@ internal object LazTerrainReader {
             minY = header.minY,
             maxY = header.maxY,
             options = options,
-            declaredPointCount = progressTotal,
+            declaredPointCount = header.pointCount,
         )
         var pointsInBatch = 0
         onProgress?.invoke(0L, progressTotal)
         for (point in points) {
-            val x = point.getX() * header.scaleX + header.offsetX
-            val y = point.getY() * header.scaleY + header.offsetY
-            val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
-            if (!rasterizer.addPoint(
-                    x = x,
-                    y = y,
-                    z = z,
-                    classification = point.getClassification().toInt(),
-                    isKeyPoint = point.isKeyPoint(),
-                )
-            ) {
-                break
-            }
+            val shouldBin = rasterizer.shouldBinNextPoint()
             pointsInBatch++
+
+            if (shouldBin) {
+                val x = point.getX() * header.scaleX + header.offsetX
+                val y = point.getY() * header.scaleY + header.offsetY
+                val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
+                if (!rasterizer.addSampledPoint(
+                        x = x,
+                        y = y,
+                        z = z,
+                        classification = point.getClassification().toInt(),
+                        isKeyPoint = point.isKeyPoint(),
+                    )
+                ) {
+                    break
+                }
+            }
+
             if (pointsInBatch >= DECODE_BATCH_POINTS) {
                 pointsInBatch = 0
                 onProgress?.invoke(rasterizer.pointsDecoded, progressTotal)
                 if (!shouldContinue()) return null
-                Thread.yield()
             }
         }
         onProgress?.invoke(progressTotal, progressTotal)
