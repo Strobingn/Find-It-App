@@ -5,7 +5,7 @@ import org.junit.Test
 
 class LidarRasterizerSamplingTest {
     @Test
-    fun samplingGateSkipsPayloadConversionForLargePointClouds() {
+    fun exactGateKeepsEveryReturnForLargePointClouds() {
         val rasterizer = LidarRasterizer(
             minX = 0.0,
             maxX = 100.0,
@@ -20,7 +20,7 @@ class LidarRasterizerSamplingTest {
             if (rasterizer.shouldBinNextPoint()) selected++
         }
 
-        assertEquals(5, selected)
+        assertEquals(10, selected)
         assertEquals(10L, rasterizer.pointsDecoded)
     }
 }
