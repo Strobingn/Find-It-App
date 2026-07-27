@@ -1,9 +1,11 @@
 package com.example.data
 
-import com.github.mreutegg.laszip4j.LASReader
 import com.github.mreutegg.laszip4j.LASPoint
-import java.io.File
+import com.github.mreutegg.laszip4j.LASReader
+import com.github.mreutegg.laszip4j.laslib.LASreadOpener
+import com.github.mreutegg.laszip4j.laslib.LASreader
 import java.io.BufferedInputStream
+import java.io.File
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -12,6 +14,11 @@ import java.nio.ByteOrder
 internal object LazTerrainReader {
     private const val DECODE_BATCH_POINTS = 65_536
 
+    /**
+     * Fast file-backed path. Uses laszip4j's low-level reader directly so the same mutable LASpoint
+     * is reused for every return. The convenience Iterable allocates a new LASPoint wrapper per
+     * return, which creates severe GC pressure on multi-million-point terrain tiles.
+     */
     fun read(
         file: File,
         options: LidarImportOptions,
@@ -19,44 +26,44 @@ internal object LazTerrainReader {
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)? = null,
     ): DemGenerator.LasLoadResult? {
         return try {
-            val reader = LASReader(file)
-            val sourceHeader = reader.header
-            val header = Header(
-                versionMajor = sourceHeader.versionMajor.toInt() and 0xFF,
-                versionMinor = sourceHeader.versionMinor.toInt() and 0xFF,
-                pointFormat = sourceHeader.pointDataRecordFormat.toInt() and 0x3F,
-                pointCount = sourceHeader.numberOfPointRecords.takeIf { it > 0 }
-                    ?: (sourceHeader.legacyNumberOfPointRecords.toLong() and 0xFFFFFFFFL),
-                scaleX = sourceHeader.xScaleFactor,
-                scaleY = sourceHeader.yScaleFactor,
-                scaleZ = sourceHeader.zScaleFactor,
-                offsetX = sourceHeader.xOffset,
-                offsetY = sourceHeader.yOffset,
-                offsetZ = sourceHeader.zOffset,
-                maxX = sourceHeader.maxX,
-                minX = sourceHeader.minX,
-                maxY = sourceHeader.maxY,
-                minY = sourceHeader.minY,
-            )
-            val focus = options.sanitized().focusBounds
-            val constrained = focus?.let {
-                val rangeX = header.maxX - header.minX
-                val rangeY = header.maxY - header.minY
-                reader.insideRectangle(
-                    header.minX + it.left * rangeX,
-                    header.minY + (1.0 - it.bottom) * rangeY,
-                    header.minX + it.right * rangeX,
-                    header.minY + (1.0 - it.top) * rangeY,
+            val lowLevelReader = LASreadOpener().open(file.absolutePath) ?: return null
+            lowLevelReader.use { reader ->
+                val sourceHeader = reader.header
+                val header = Header(
+                    versionMajor = sourceHeader.version_major.toInt() and 0xFF,
+                    versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
+                    pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
+                    pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
+                        ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL),
+                    scaleX = sourceHeader.x_scale_factor,
+                    scaleY = sourceHeader.y_scale_factor,
+                    scaleZ = sourceHeader.z_scale_factor,
+                    offsetX = sourceHeader.x_offset,
+                    offsetY = sourceHeader.y_offset,
+                    offsetZ = sourceHeader.z_offset,
+                    maxX = sourceHeader.max_x,
+                    minX = sourceHeader.min_x,
+                    maxY = sourceHeader.max_y,
+                    minY = sourceHeader.min_y,
                 )
-            } ?: reader
-            val estimatedPoints = focus?.let {
-                (header.pointCount * (it.right - it.left) * (it.bottom - it.top))
-                    .toLong()
-                    .coerceAtLeast(1L)
-            } ?: header.pointCount
-            constrained.getCloseablePoints().use { points ->
-                rasterize(
-                    points = points,
+                val focus = options.sanitized().focusBounds
+                if (focus != null) {
+                    val rangeX = header.maxX - header.minX
+                    val rangeY = header.maxY - header.minY
+                    reader.inside_rectangle(
+                        header.minX + focus.left * rangeX,
+                        header.minY + (1.0 - focus.bottom) * rangeY,
+                        header.minX + focus.right * rangeX,
+                        header.minY + (1.0 - focus.top) * rangeY,
+                    )
+                }
+                val estimatedPoints = focus?.let {
+                    (header.pointCount * (it.right - it.left) * (it.bottom - it.top))
+                        .toLong()
+                        .coerceAtLeast(1L)
+                } ?: header.pointCount
+                rasterizeLowLevel(
+                    reader = reader,
                     header = header,
                     options = options,
                     progressTotal = estimatedPoints,
@@ -70,6 +77,7 @@ internal object LazTerrainReader {
         }
     }
 
+    /** Stream fallback for content providers that cannot be copied to a local file. */
     fun read(
         inputStream: InputStream,
         options: LidarImportOptions,
@@ -83,7 +91,7 @@ internal object LazTerrainReader {
                 BufferedInputStream(inputStream, 256 * 1024)
             }
             val header = readHeader(buffered) ?: return null
-            rasterize(
+            rasterizeIterable(
                 points = LASReader.getPoints(buffered),
                 header = header,
                 options = options,
@@ -97,7 +105,46 @@ internal object LazTerrainReader {
         }
     }
 
-    private fun rasterize(
+    private fun rasterizeLowLevel(
+        reader: LASreader,
+        header: Header,
+        options: LidarImportOptions,
+        progressTotal: Long,
+        shouldContinue: () -> Boolean,
+        onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+    ): DemGenerator.LasLoadResult? {
+        val rasterizer = createRasterizer(header, options)
+        var pointsInBatch = 0
+        onProgress?.invoke(0L, progressTotal)
+
+        while (reader.read_point()) {
+            val point = reader.point
+            rasterizer.shouldBinNextPoint()
+            val x = point.getX() * header.scaleX + header.offsetX
+            val y = point.getY() * header.scaleY + header.offsetY
+            val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
+            if (!rasterizer.addSampledPoint(
+                    x = x,
+                    y = y,
+                    z = z,
+                    classification = point.getClassification().toInt(),
+                    isKeyPoint = point.getKeypoint_flag().toInt() == 1,
+                )
+            ) {
+                break
+            }
+
+            pointsInBatch++
+            if (pointsInBatch >= DECODE_BATCH_POINTS) {
+                pointsInBatch = 0
+                onProgress?.invoke(rasterizer.pointsDecoded, progressTotal)
+                if (!shouldContinue()) return null
+            }
+        }
+        return finishRasterizer(rasterizer, header, progressTotal, onProgress)
+    }
+
+    private fun rasterizeIterable(
         points: Iterable<LASPoint>,
         header: Header,
         options: LidarImportOptions,
@@ -105,46 +152,54 @@ internal object LazTerrainReader {
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
     ): DemGenerator.LasLoadResult? {
-        val rasterizer = LidarRasterizer(
-            minX = header.minX,
-            maxX = header.maxX,
-            minY = header.minY,
-            maxY = header.maxY,
-            options = options,
-            declaredPointCount = header.pointCount,
-        )
+        val rasterizer = createRasterizer(header, options)
         var pointsInBatch = 0
         onProgress?.invoke(0L, progressTotal)
         for (point in points) {
-            val shouldBin = rasterizer.shouldBinNextPoint()
-            pointsInBatch++
-
-            if (shouldBin) {
-                val x = point.getX() * header.scaleX + header.offsetX
-                val y = point.getY() * header.scaleY + header.offsetY
-                val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
-                if (!rasterizer.addSampledPoint(
-                        x = x,
-                        y = y,
-                        z = z,
-                        classification = point.getClassification().toInt(),
-                        isKeyPoint = point.isKeyPoint(),
-                    )
-                ) {
-                    break
-                }
+            rasterizer.shouldBinNextPoint()
+            val x = point.getX() * header.scaleX + header.offsetX
+            val y = point.getY() * header.scaleY + header.offsetY
+            val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
+            if (!rasterizer.addSampledPoint(
+                    x = x,
+                    y = y,
+                    z = z,
+                    classification = point.getClassification().toInt(),
+                    isKeyPoint = point.isKeyPoint(),
+                )
+            ) {
+                break
             }
 
+            pointsInBatch++
             if (pointsInBatch >= DECODE_BATCH_POINTS) {
                 pointsInBatch = 0
                 onProgress?.invoke(rasterizer.pointsDecoded, progressTotal)
                 if (!shouldContinue()) return null
             }
         }
+        return finishRasterizer(rasterizer, header, progressTotal, onProgress)
+    }
+
+    private fun createRasterizer(header: Header, options: LidarImportOptions) = LidarRasterizer(
+        minX = header.minX,
+        maxX = header.maxX,
+        minY = header.minY,
+        maxY = header.maxY,
+        options = options,
+        declaredPointCount = header.pointCount,
+    )
+
+    private fun finishRasterizer(
+        rasterizer: LidarRasterizer,
+        header: Header,
+        progressTotal: Long,
+        onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+    ): DemGenerator.LasLoadResult? {
         onProgress?.invoke(progressTotal, progressTotal)
         return rasterizer.finish(
             pointFormat = header.pointFormat,
-            sourceLabel = "LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat}",
+            sourceLabel = "LAS/LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat}",
         )
     }
 
