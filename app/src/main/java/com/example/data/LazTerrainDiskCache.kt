@@ -8,6 +8,11 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Persistent byte-bounded cache for decoded LAZ/LAS rasters.
@@ -150,7 +155,10 @@ class LazTerrainDiskCache(
     }
 }
 
-/** Two-tier decoded terrain cache: fast memory LRU backed by a bounded persistent cache. */
+/**
+ * Two-tier decoded terrain cache: a synchronous memory LRU backed by an asynchronously persisted,
+ * byte-bounded disk cache. First render no longer waits for several megabytes of float-array I/O.
+ */
 class LazTerrainCache(
     private val memory: LazTerrainMemoryCache,
     private val disk: LazTerrainDiskCache,
@@ -161,6 +169,9 @@ class LazTerrainCache(
         val result: DemGenerator.TerrainLoadResult?,
         val hit: Hit,
     )
+
+    private val diskWriteScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val diskWriteGeneration = AtomicLong(0L)
 
     fun get(file: File, options: LidarImportOptions): Lookup {
         memory.get(file, options)?.let { return Lookup(it, Hit.MEMORY) }
@@ -173,15 +184,20 @@ class LazTerrainCache(
 
     fun put(file: File, options: LidarImportOptions, result: DemGenerator.TerrainLoadResult) {
         memory.put(file, options, result)
-        disk.put(file, options, result)
+        val generation = diskWriteGeneration.get()
+        diskWriteScope.launch {
+            if (generation == diskWriteGeneration.get()) disk.put(file, options, result)
+        }
     }
 
     fun remove(file: File) {
+        diskWriteGeneration.incrementAndGet()
         disk.remove(file)
         // Memory keys include source metadata and are naturally invalidated by deletion/replacement.
     }
 
     fun clear() {
+        diskWriteGeneration.incrementAndGet()
         memory.clear()
         disk.clear()
     }
