@@ -3,31 +3,34 @@ package com.example.data
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Result from the terrain decode path. Expensive cache persistence and 3D mesh work are deferred. */
+/** Result from the terrain decode path. */
 data class TerrainDecodeOutcome(
     val terrain: DemGenerator.TerrainLoadResult,
     val cacheHit: LazTerrainCache.Hit,
-    val needsDiskCacheWrite: Boolean,
+    val gpuScene: TerrainGpuScene,
 )
 
 /**
  * Serializes duplicate work per source/options key while allowing unrelated datasets to decode in
- * parallel. The critical path ends as soon as an exact terrain raster is available. Disk-cache
- * serialization and multi-LOD GPU mesh construction are intentionally handled by callers after the
- * 2D terrain is visible.
+ * parallel. The critical path ends as soon as an exact terrain raster and coarse GPU scene are
+ * available. Persistent cache serialization and higher-detail 3D meshes continue off the UI path.
  */
 class TerrainDecodeCoordinator(
     private val cache: LazTerrainCache,
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
+    private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     suspend fun decode(
         file: File,
@@ -41,7 +44,7 @@ class TerrainDecodeCoordinator(
             return lock.withLock {
                 currentCoroutineContext().ensureActive()
                 val firstLookup = withContext(Dispatchers.IO) { cache.get(file, options) }
-                if (firstLookup.result != null) {
+                val terrain = if (firstLookup.result != null) {
                     onStage(
                         when (firstLookup.hit) {
                             LazTerrainCache.Hit.MEMORY -> "Opening decoded terrain from memory cache…"
@@ -49,26 +52,26 @@ class TerrainDecodeCoordinator(
                             LazTerrainCache.Hit.MISS -> "Reading point cloud…"
                         },
                     )
-                    return@withLock TerrainDecodeOutcome(
-                        terrain = firstLookup.result,
-                        cacheHit = firstLookup.hit,
-                        needsDiskCacheWrite = false,
-                    )
+                    firstLookup.result
+                } else {
+                    onStage("Decoding exact LAZ/LAS terrain…")
+                    val decoded = decodeFile(file, displayName, options)
+                        ?: error("Could not decode ${file.name}")
+                    currentCoroutineContext().ensureActive()
+
+                    // Prevent duplicate decodes immediately, but keep slow persistent serialization
+                    // off the first-frame path.
+                    cache.putMemory(file, options, decoded)
+                    maintenanceScope.launch { cache.putDisk(file, options, decoded) }
+                    decoded
                 }
 
-                onStage("Decoding exact LAZ/LAS terrain…")
-                val decoded = decodeFile(file, displayName, options)
-                    ?: error("Could not decode ${file.name}")
                 currentCoroutineContext().ensureActive()
-
-                // Memory insertion is cheap and prevents duplicate work immediately. Persistent
-                // serialization is deliberately deferred so it cannot delay the first terrain frame.
-                cache.putMemory(file, options, decoded)
-                TerrainDecodeOutcome(
-                    terrain = decoded,
-                    cacheHit = LazTerrainCache.Hit.MISS,
-                    needsDiskCacheWrite = true,
-                )
+                onStage("Preparing terrain preview…")
+                val scene = withContext(Dispatchers.Default) {
+                    TerrainGpuSceneBuilder.buildProgressive(terrain.grid)
+                }
+                TerrainDecodeOutcome(terrain, firstLookup.hit, scene)
             }
         } finally {
             if (!lock.isLocked) locks.remove(key, lock)
@@ -114,5 +117,19 @@ class TerrainDecodeCoordinator(
             append('|').append(sanitized.smoothingRadius)
             append('|').append(sanitized.focusBounds)
         }
+    }
+}
+
+/** App-wide current GPU terrain session consumed by the Compose/OpenGL renderer. */
+object TerrainPerformanceSession {
+    private val _gpuScene = kotlinx.coroutines.flow.MutableStateFlow<TerrainGpuScene?>(null)
+    val gpuScene: kotlinx.coroutines.flow.StateFlow<TerrainGpuScene?> = _gpuScene.asStateFlow()
+
+    fun publish(scene: TerrainGpuScene) {
+        _gpuScene.value = scene
+    }
+
+    fun clear() {
+        _gpuScene.value = null
     }
 }
