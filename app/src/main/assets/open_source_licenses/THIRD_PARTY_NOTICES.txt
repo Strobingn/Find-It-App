@@ -1,0 +1,18 @@
+FIND IT — THIRD-PARTY SOFTWARE NOTICES
+
+laszip4j 0.21
+Find It uses the unmodified com.github.mreutegg:laszip4j:0.21 library to decode LAS/LAZ point clouds on-device.
+Project and corresponding source: https://github.com/mreutegg/laszip4j
+Exact source tag: https://github.com/mreutegg/laszip4j/tree/laszip4j-0.21
+Artifact license metadata: GNU Lesser General Public License, version 2.1
+Complete bundled license: open_source_licenses/LGPL-2.1.txt
+
+Android build tooling compiles the dependency bytecode with the application into DEX output. Find It source and Gradle build files are available at https://github.com/Strobingn/Find-It-App. A recipient may replace the laszip4j dependency with a compatible modified build and rebuild the application. Nothing in Find It's distribution terms is intended to prohibit modification for the recipient's own use or reverse engineering required to debug such modifications.
+
+NGA TIFF 3.0.0
+Find It uses the unmodified mil.nga:tiff:3.0.0 library to decode TIFF and GeoTIFF elevation rasters on-device.
+Project and corresponding source: https://github.com/ngageoint/tiff-java
+License: MIT License
+Complete bundled notice and license: open_source_licenses/NGA_TIFF_MIT.txt
+
+Rebuild instructions are provided in the source repository's THIRD_PARTY_NOTICES.md file.
