@@ -65,6 +65,46 @@ class TerrainPhase2PerformanceTest {
     }
 
     @Test
+    fun firstOpenGpuPreviewIsExplicitlyBounded() {
+        assertEquals(256, TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION)
+        assertEquals(128, TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE)
+        val scene = TerrainGpuSceneBuilder.build(
+            source = sampleGrid(1_024, 768),
+            maxFinestDimension = TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION,
+            tileSize = TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE,
+        )
+
+        assertTrue(scene.levels.first().gridWidth <= 256)
+        assertTrue(scene.levels.first().gridHeight <= 256)
+    }
+
+    @Test
+    fun twoTierCacheMakesNewTerrainAvailableFromMemoryImmediately() {
+        val root = Files.createTempDirectory("findit-async-cache").toFile()
+        try {
+            val source = File(root, "source.laz").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            val cache = LazTerrainCache(
+                memory = LazTerrainMemoryCache(),
+                disk = LazTerrainDiskCache(File(root, "cache"), maxBytes = 8L * 1024L * 1024L),
+            )
+            val options = LidarImportOptions(rasterResolution = 128)
+            val expected = DemGenerator.TerrainLoadResult(
+                grid = sampleGrid(64, 32),
+                summary = "memory-first terrain",
+                isBareEarth = true,
+            )
+
+            cache.put(source, options, expected)
+            val lookup = cache.get(source, options)
+
+            assertEquals(LazTerrainCache.Hit.MEMORY, lookup.hit)
+            assertEquals(expected, lookup.result)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun persistentCacheRoundTripsTerrainAndInvalidatesWhenSourceChanges() {
         val root = Files.createTempDirectory("findit-phase2-cache").toFile()
         try {
