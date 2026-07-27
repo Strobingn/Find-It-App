@@ -1,5 +1,6 @@
 package com.example.data
 
+import java.util.concurrent.CompletableFuture
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -26,17 +27,34 @@ data class TerrainGpuLevel(
     val triangleCount: Int = batches.sumOf(TerrainGpuBatch::triangleCount)
 }
 
-/** Immutable multi-LOD scene ready to upload to OpenGL vertex/index buffers. */
-data class TerrainGpuScene(
-    val levels: List<TerrainGpuLevel>,
+/**
+ * Multi-LOD scene ready for OpenGL upload.
+ *
+ * A scene may start with only its coarse preview level. Exact higher-detail levels can replace the
+ * level snapshot after construction without replacing the scene object held by Compose/OpenGL.
+ */
+class TerrainGpuScene internal constructor(
+    initialLevels: List<TerrainGpuLevel>,
     val sourceWidth: Int,
     val sourceHeight: Int,
 ) {
+    @Volatile
+    private var availableLevels: List<TerrainGpuLevel> = initialLevels.sortedBy(TerrainGpuLevel::reductionFactor)
+
     init {
-        require(levels.isNotEmpty())
+        require(initialLevels.isNotEmpty())
+    }
+
+    val levels: List<TerrainGpuLevel> get() = availableLevels
+
+    internal fun replaceLevels(levels: List<TerrainGpuLevel>) {
+        if (levels.isNotEmpty()) {
+            availableLevels = levels.sortedBy(TerrainGpuLevel::reductionFactor)
+        }
     }
 
     fun selectForZoom(zoom: Float): TerrainGpuLevel {
+        val snapshot = availableLevels
         val safeZoom = zoom.coerceAtLeast(1f)
         val desiredFactor = when {
             safeZoom >= 5f -> 1
@@ -45,9 +63,9 @@ data class TerrainGpuScene(
             else -> Int.MAX_VALUE
         }
         return if (desiredFactor == Int.MAX_VALUE) {
-            levels.last()
+            snapshot.last()
         } else {
-            levels.minByOrNull { kotlin.math.abs(it.reductionFactor - desiredFactor) } ?: levels.first()
+            snapshot.minByOrNull { kotlin.math.abs(it.reductionFactor - desiredFactor) } ?: snapshot.first()
         }
     }
 }
@@ -71,21 +89,52 @@ object TerrainGpuSceneBuilder {
             minDimension = 64,
             maxLevels = 4,
         )
-        val levels = pyramid.levels.map { level ->
-            val index = TerrainSpatialGridIndex.build(level.grid, tileSize)
-            val elevationBounds = elevationBounds(level.grid)
-            TerrainGpuLevel(
-                reductionFactor = level.reductionFactor,
-                gridWidth = level.grid.width,
-                gridHeight = level.grid.height,
-                batches = index.nonEmptyTiles().mapNotNull { tile ->
-                    buildBatch(level.grid, tile, elevationBounds.first, elevationBounds.second)
-                },
-            )
-        }.filter { it.batches.isNotEmpty() }
-
+        val levels = pyramid.levels.mapNotNull { level -> buildLevel(level, tileSize) }
         require(levels.isNotEmpty()) { "Terrain contains no renderable cells" }
         return TerrainGpuScene(levels, source.width, source.height)
+    }
+
+    /**
+     * Builds only the coarse preview mesh on the caller's critical path. Higher-detail meshes are
+     * generated from the same exact DEM on a worker thread and atomically installed afterward.
+     */
+    fun buildProgressive(
+        source: ElevationGrid,
+        maxFinestDimension: Int = 512,
+        tileSize: Int = 64,
+    ): TerrainGpuScene {
+        val pyramid = TerrainLodPyramid.build(
+            source = source,
+            maxFinestDimension = maxFinestDimension,
+            minDimension = 64,
+            maxLevels = 4,
+        )
+        val coarse = requireNotNull(buildLevel(pyramid.coarsest, tileSize)) {
+            "Terrain contains no renderable cells"
+        }
+        val scene = TerrainGpuScene(listOf(coarse), source.width, source.height)
+        if (pyramid.levels.size > 1) {
+            CompletableFuture.runAsync {
+                val exactLevels = pyramid.levels.mapNotNull { level -> buildLevel(level, tileSize) }
+                scene.replaceLevels(exactLevels)
+            }
+        }
+        return scene
+    }
+
+    private fun buildLevel(level: TerrainLodLevel, tileSize: Int): TerrainGpuLevel? {
+        val index = TerrainSpatialGridIndex.build(level.grid, tileSize)
+        val elevationBounds = elevationBounds(level.grid)
+        val batches = index.nonEmptyTiles().mapNotNull { tile ->
+            buildBatch(level.grid, tile, elevationBounds.first, elevationBounds.second)
+        }
+        if (batches.isEmpty()) return null
+        return TerrainGpuLevel(
+            reductionFactor = level.reductionFactor,
+            gridWidth = level.grid.width,
+            gridHeight = level.grid.height,
+            batches = batches,
+        )
     }
 
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
