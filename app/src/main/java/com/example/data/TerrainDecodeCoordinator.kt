@@ -1,5 +1,6 @@
 package com.example.data
 
+import android.net.Uri
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.ConcurrentHashMap
@@ -10,7 +11,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -28,6 +31,13 @@ data class TerrainDecodeOutcome(
     val isPreview: Boolean = false,
 )
 
+data class TerrainExactUpdate(
+    val decodeKey: String,
+    val terrain: DemGenerator.TerrainLoadResult,
+    val source: TerrainImportSource,
+    val gpuScene: TerrainGpuScene,
+)
+
 /**
  * Serializes duplicate work per source/options key while allowing unrelated datasets to decode in
  * parallel. Large full-tile LAZ files first return a uniformly sampled chunk preview. The exact
@@ -40,6 +50,26 @@ class TerrainDecodeCoordinator(
     private val locks = ConcurrentHashMap<String, Mutex>()
     private val exactJobs = ConcurrentHashMap<String, Deferred<TerrainDecodeOutcome?>>()
     private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Exact-only overload used by positional trailing-lambda calls. The mosaic picker uses this
+     * signature, preventing any preview raster from entering a saved multi-tile project.
+     *
+     * Single-tile loaders use the named `onStage =` parameter on the primary overload below and
+     * therefore keep progressive preview behavior.
+     */
+    suspend fun decode(
+        file: File,
+        displayName: String,
+        options: LidarImportOptions,
+        stageCallback: suspend (String) -> Unit,
+    ): TerrainDecodeOutcome = decode(
+        file = file,
+        displayName = displayName,
+        options = options,
+        allowProgressivePreview = false,
+        onStage = stageCallback,
+    )
 
     suspend fun decode(
         file: File,
@@ -84,11 +114,17 @@ class TerrainDecodeCoordinator(
                         val previewScene = withContext(Dispatchers.Default) {
                             TerrainGpuSceneBuilder.buildProgressive(preview.grid)
                         }
+                        val source = TerrainImportSource(
+                            uri = Uri.fromFile(file).toString(),
+                            displayName = displayName,
+                            options = safeOptions,
+                        )
                         val exact = exactJobs[key] ?: startExactJob(
                             key = key,
                             file = file,
                             displayName = displayName,
                             options = safeOptions,
+                            source = source,
                         ).also { exactJobs[key] = it }
                         return@withLock TerrainDecodeOutcome(
                             terrain = preview,
@@ -126,6 +162,7 @@ class TerrainDecodeCoordinator(
         file: File,
         displayName: String,
         options: LidarImportOptions,
+        source: TerrainImportSource,
     ): Deferred<TerrainDecodeOutcome?> = maintenanceScope.async {
         try {
             val decoded = decodeFile(file, displayName, options) ?: return@async null
@@ -134,11 +171,20 @@ class TerrainDecodeCoordinator(
             val scene = withContext(Dispatchers.Default) {
                 TerrainGpuSceneBuilder.buildProgressive(decoded.grid)
             }
-            TerrainDecodeOutcome(
+            val outcome = TerrainDecodeOutcome(
                 terrain = decoded,
                 cacheHit = LazTerrainCache.Hit.MISS,
                 gpuScene = scene,
             )
+            TerrainPerformanceSession.publishExact(
+                TerrainExactUpdate(
+                    decodeKey = key,
+                    terrain = decoded,
+                    source = source,
+                    gpuScene = scene,
+                ),
+            )
+            outcome
         } finally {
             exactJobs.remove(key)
         }
@@ -202,13 +248,23 @@ class TerrainDecodeCoordinator(
     }
 }
 
-/** App-wide current GPU terrain session consumed by the Compose/OpenGL renderer. */
+/** App-wide terrain performance session consumed by the Compose/OpenGL and ViewModel layers. */
 object TerrainPerformanceSession {
     private val _gpuScene = MutableStateFlow<TerrainGpuScene?>(null)
     val gpuScene: StateFlow<TerrainGpuScene?> = _gpuScene
 
+    private val _exactTerrainUpdates = MutableSharedFlow<TerrainExactUpdate>(
+        replay = 0,
+        extraBufferCapacity = 2,
+    )
+    val exactTerrainUpdates: SharedFlow<TerrainExactUpdate> = _exactTerrainUpdates
+
     fun publish(scene: TerrainGpuScene) {
         _gpuScene.value = scene
+    }
+
+    internal fun publishExact(update: TerrainExactUpdate) {
+        _exactTerrainUpdates.tryEmit(update)
     }
 
     fun clear() {
