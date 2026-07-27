@@ -65,9 +65,26 @@ data class LidarImportOptions(
     /** Optional normalized viewport to re-rasterize from the original point cloud. */
     val focusBounds: NormalizedRasterBounds? = null,
 ) {
-    fun sanitized(): LidarImportOptions = copy(
-        rasterResolution = rasterResolution.coerceIn(128, 1_024),
-        smoothingRadius = smoothingRadius.coerceIn(0, 4),
-        focusBounds = focusBounds?.sanitized(),
-    )
+    fun sanitized(): LidarImportOptions {
+        val sanitizedFocus = focusBounds?.sanitized()
+        val maxResolution = if (sanitizedFocus == null) {
+            // Full LAZ tiles are overview products. A 1,024-cell full-footprint decode makes a phone
+            // process millions of returns before displaying anything, while exposing no extra local
+            // detail at normal zoom. Higher resolutions remain available for cropped Refine requests.
+            MAX_OVERVIEW_RESOLUTION
+        } else {
+            MAX_REFINED_RESOLUTION
+        }
+        return copy(
+            rasterResolution = rasterResolution.coerceIn(MIN_RASTER_RESOLUTION, maxResolution),
+            smoothingRadius = smoothingRadius.coerceIn(0, 4),
+            focusBounds = sanitizedFocus,
+        )
+    }
+
+    companion object {
+        internal const val MIN_RASTER_RESOLUTION = 128
+        internal const val MAX_OVERVIEW_RESOLUTION = 512
+        internal const val MAX_REFINED_RESOLUTION = 1_024
+    }
 }
