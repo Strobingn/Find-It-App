@@ -8,6 +8,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -122,8 +124,8 @@ class TerrainDecodeCoordinator(
 
 /** App-wide current GPU terrain session consumed by the Compose/OpenGL renderer. */
 object TerrainPerformanceSession {
-    private val _gpuScene = kotlinx.coroutines.flow.MutableStateFlow<TerrainGpuScene?>(null)
-    val gpuScene: kotlinx.coroutines.flow.StateFlow<TerrainGpuScene?> = _gpuScene.asStateFlow()
+    private val _gpuScene = MutableStateFlow<TerrainGpuScene?>(null)
+    val gpuScene: StateFlow<TerrainGpuScene?> = _gpuScene
 
     fun publish(scene: TerrainGpuScene) {
         _gpuScene.value = scene
