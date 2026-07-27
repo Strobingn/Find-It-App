@@ -23,7 +23,7 @@ data class TerrainDecodeOutcome(
 
 /**
  * Serializes duplicate work per source/options key while allowing unrelated datasets to decode in
- * parallel. File/cache I/O runs on Dispatchers.IO; LOD/spatial/GPU batch construction runs on
+ * parallel. File/cache I/O runs on Dispatchers.IO; bounded GPU preview construction runs on
  * Dispatchers.Default. Coroutine cancellation is checked between LAZ point batches.
  */
 class TerrainDecodeCoordinator(
@@ -57,16 +57,24 @@ class TerrainDecodeCoordinator(
                     val decoded = decodeFile(file, displayName, options)
                         ?: error("Could not decode ${file.name}")
                     currentCoroutineContext().ensureActive()
-                    onStage("Saving decoded terrain cache…")
-                    withContext(Dispatchers.IO) { cache.put(file, options, decoded) }
+                    // Memory caching is immediate. Persistent cache writing is queued on Dispatchers.IO
+                    // by LazTerrainCache so it no longer extends the user-visible first-open delay.
+                    cache.put(file, options, decoded)
                     decoded
                 }
 
                 currentCoroutineContext().ensureActive()
-                onStage("Building spatial index, LOD levels, and GPU batches…")
+                onStage("Preparing lightweight GPU terrain preview…")
                 val scene = withContext(Dispatchers.Default) {
                     currentCoroutineContext().ensureActive()
-                    TerrainGpuSceneBuilder.build(terrain.grid)
+                    // The 2D analysis grid keeps the requested resolution. GPU 3D is intentionally
+                    // bounded to a 256-cell preview so opening a dataset is not blocked by generating
+                    // four large mesh levels before the first hillshade can appear.
+                    TerrainGpuSceneBuilder.build(
+                        source = terrain.grid,
+                        maxFinestDimension = GPU_PREVIEW_MAX_DIMENSION,
+                        tileSize = GPU_PREVIEW_TILE_SIZE,
+                    )
                 }
                 TerrainDecodeOutcome(terrain, firstLookup.hit, scene)
             }
@@ -82,20 +90,21 @@ class TerrainDecodeCoordinator(
     ): DemGenerator.TerrainLoadResult? = withContext(Dispatchers.IO) {
         val decodeContext = currentCoroutineContext()
         decodeContext.ensureActive()
-        FileInputStream(file).buffered(256 * 1024).use { input ->
-            if (displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true)) {
-                val laz = LazTerrainReader.read(
-                    input,
-                    options,
-                    shouldContinue = { decodeContext.isActive },
-                )
-                    ?: return@use null
-                DemGenerator.TerrainLoadResult(
-                    grid = laz.grid,
-                    summary = laz.note,
-                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
-                )
-            } else {
+        if (displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true)) {
+            // Use LASReader(File), not the generic InputStream path. This avoids another buffering
+            // layer and lets laszip4j apply insideRectangle() for cropped refinement requests.
+            val laz = LazTerrainReader.read(
+                file = file,
+                options = options,
+                shouldContinue = { decodeContext.isActive },
+            ) ?: return@withContext null
+            DemGenerator.TerrainLoadResult(
+                grid = laz.grid,
+                summary = laz.note,
+                isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+            )
+        } else {
+            FileInputStream(file).buffered(256 * 1024).use { input ->
                 DemGenerator.parseFromStreamDetailed(displayName, input, options)
             }
         }
@@ -112,6 +121,11 @@ class TerrainDecodeCoordinator(
             append('|').append(sanitized.smoothingRadius)
             append('|').append(sanitized.focusBounds)
         }
+    }
+
+    companion object {
+        internal const val GPU_PREVIEW_MAX_DIMENSION = 256
+        internal const val GPU_PREVIEW_TILE_SIZE = 128
     }
 }
 
