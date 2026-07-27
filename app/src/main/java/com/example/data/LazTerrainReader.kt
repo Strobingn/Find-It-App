@@ -2,8 +2,10 @@ package com.example.data
 
 import com.github.mreutegg.laszip4j.LASPoint
 import com.github.mreutegg.laszip4j.LASReader
-import com.github.mreutegg.laszip4j.laslib.LASreadOpener
 import com.github.mreutegg.laszip4j.laslib.LASreader
+import com.github.mreutegg.laszip4j.laslib.SelectiveLasReaderFactory
+import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION
+import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_Z
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
@@ -12,12 +14,15 @@ import java.nio.ByteOrder
 
 /** Pure-Java LAZ decoding backed by laszip4j; all rasterization remains memory bounded. */
 internal object LazTerrainReader {
-    private const val DECODE_BATCH_POINTS = 65_536
+    private const val DECODE_BATCH_POINTS = 131_072
 
     /**
-     * Fast file-backed path. Uses laszip4j's low-level reader directly so the same mutable LASpoint
-     * is reused for every return. The convenience Iterable allocates a new LASPoint wrapper per
-     * return, which creates severe GC pressure on multi-million-point terrain tiles.
+     * Fast file-backed path.
+     *
+     * The low-level reader reuses one mutable LASpoint instead of allocating a wrapper for every
+     * return. Selective decompression keeps XY plus only the layers required for terrain: Z and,
+     * when source-classified ground is requested, classification. Elevation precision and return
+     * coverage remain unchanged.
      */
     fun read(
         file: File,
@@ -26,7 +31,13 @@ internal object LazTerrainReader {
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)? = null,
     ): DemGenerator.LasLoadResult? {
         return try {
-            val lowLevelReader = LASreadOpener().open(file.absolutePath) ?: return null
+            val safeOptions = options.sanitized()
+            val needsClassification = safeOptions.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED
+            val selectiveMask = LASZIP_DECOMPRESS_SELECTIVE_Z or
+                if (needsClassification) LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION else 0
+            val lowLevelReader = SelectiveLasReaderFactory.open(file.absolutePath, selectiveMask)
+                ?: return null
+
             lowLevelReader.use { reader ->
                 val sourceHeader = reader.header
                 val header = Header(
@@ -46,7 +57,7 @@ internal object LazTerrainReader {
                     maxY = sourceHeader.max_y,
                     minY = sourceHeader.min_y,
                 )
-                val focus = options.sanitized().focusBounds
+                val focus = safeOptions.focusBounds
                 if (focus != null) {
                     val rangeX = header.maxX - header.minX
                     val rangeY = header.maxY - header.minY
@@ -65,8 +76,9 @@ internal object LazTerrainReader {
                 rasterizeLowLevel(
                     reader = reader,
                     header = header,
-                    options = options,
+                    options = safeOptions,
                     progressTotal = estimatedPoints,
+                    needsClassification = needsClassification,
                     shouldContinue = shouldContinue,
                     onProgress = onProgress,
                 )
@@ -88,14 +100,16 @@ internal object LazTerrainReader {
             val buffered = if (inputStream is BufferedInputStream) {
                 inputStream
             } else {
-                BufferedInputStream(inputStream, 256 * 1024)
+                BufferedInputStream(inputStream, 1024 * 1024)
             }
             val header = readHeader(buffered) ?: return null
+            val safeOptions = options.sanitized()
             rasterizeIterable(
                 points = LASReader.getPoints(buffered),
                 header = header,
-                options = options,
+                options = safeOptions,
                 progressTotal = header.pointCount,
+                needsClassification = safeOptions.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED,
                 shouldContinue = shouldContinue,
                 onProgress = onProgress,
             )
@@ -110,6 +124,7 @@ internal object LazTerrainReader {
         header: Header,
         options: LidarImportOptions,
         progressTotal: Long,
+        needsClassification: Boolean,
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
     ): DemGenerator.LasLoadResult? {
@@ -120,19 +135,20 @@ internal object LazTerrainReader {
         while (reader.read_point()) {
             val point = reader.point
             rasterizer.shouldBinNextPoint()
+            val classification = if (needsClassification) {
+                normalizeClassification(point.getClassification().toInt(), header.pointFormat)
+            } else {
+                0
+            }
             val x = point.getX() * header.scaleX + header.offsetX
             val y = point.getY() * header.scaleY + header.offsetY
             val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
-            if (!rasterizer.addSampledPoint(
-                    x = x,
-                    y = y,
-                    z = z,
-                    classification = point.getClassification().toInt(),
-                    isKeyPoint = point.getKeypoint_flag().toInt() == 1,
-                )
-            ) {
-                break
-            }
+            rasterizer.addSampledPoint(
+                x = x,
+                y = y,
+                z = z,
+                classification = classification,
+            )
 
             pointsInBatch++
             if (pointsInBatch >= DECODE_BATCH_POINTS) {
@@ -149,6 +165,7 @@ internal object LazTerrainReader {
         header: Header,
         options: LidarImportOptions,
         progressTotal: Long,
+        needsClassification: Boolean,
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
     ): DemGenerator.LasLoadResult? {
@@ -157,19 +174,20 @@ internal object LazTerrainReader {
         onProgress?.invoke(0L, progressTotal)
         for (point in points) {
             rasterizer.shouldBinNextPoint()
+            val classification = if (needsClassification) {
+                normalizeClassification(point.getClassification().toInt(), header.pointFormat)
+            } else {
+                0
+            }
             val x = point.getX() * header.scaleX + header.offsetX
             val y = point.getY() * header.scaleY + header.offsetY
             val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
-            if (!rasterizer.addSampledPoint(
-                    x = x,
-                    y = y,
-                    z = z,
-                    classification = point.getClassification().toInt(),
-                    isKeyPoint = point.isKeyPoint(),
-                )
-            ) {
-                break
-            }
+            rasterizer.addSampledPoint(
+                x = x,
+                y = y,
+                z = z,
+                classification = classification,
+            )
 
             pointsInBatch++
             if (pointsInBatch >= DECODE_BATCH_POINTS) {
@@ -202,6 +220,9 @@ internal object LazTerrainReader {
             sourceLabel = "LAS/LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat}",
         )
     }
+
+    private fun normalizeClassification(raw: Int, pointFormat: Int): Int =
+        if (pointFormat <= 5) raw and 0x1F else raw and 0xFF
 
     private fun readHeader(input: BufferedInputStream): Header? {
         input.mark(4_096)
