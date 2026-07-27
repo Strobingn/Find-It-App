@@ -11,13 +11,19 @@ import java.io.File
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.min
 
 /** Pure-Java LAZ decoding backed by laszip4j; all rasterization remains memory bounded. */
 internal object LazTerrainReader {
     private const val DECODE_BATCH_POINTS = 131_072
+    private const val PREVIEW_MIN_SOURCE_POINTS = 3_000_000L
+    private const val PREVIEW_TARGET_POINTS = 1_500_000
+    private const val PREVIEW_MAX_CHUNKS = 256
+    private const val PREVIEW_MAX_RESOLUTION = 512
+    private const val DEFAULT_CHUNK_POINTS = 50_000
 
     /**
-     * Fast file-backed path.
+     * Fast file-backed exact path.
      *
      * The low-level reader reuses one mutable LASpoint instead of allocating a wrapper for every
      * return. Selective decompression keeps XY plus only the layers required for terrain: Z and,
@@ -33,46 +39,10 @@ internal object LazTerrainReader {
         return try {
             val safeOptions = options.sanitized()
             val needsClassification = safeOptions.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED
-            val selectiveMask = LASZIP_DECOMPRESS_SELECTIVE_Z or
-                if (needsClassification) LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION else 0
-            val lowLevelReader = SelectiveLasReaderFactory.open(file.absolutePath, selectiveMask)
-                ?: return null
-
-            lowLevelReader.use { reader ->
-                val sourceHeader = reader.header
-                val header = Header(
-                    versionMajor = sourceHeader.version_major.toInt() and 0xFF,
-                    versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
-                    pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
-                    pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
-                        ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL),
-                    scaleX = sourceHeader.x_scale_factor,
-                    scaleY = sourceHeader.y_scale_factor,
-                    scaleZ = sourceHeader.z_scale_factor,
-                    offsetX = sourceHeader.x_offset,
-                    offsetY = sourceHeader.y_offset,
-                    offsetZ = sourceHeader.z_offset,
-                    maxX = sourceHeader.max_x,
-                    minX = sourceHeader.min_x,
-                    maxY = sourceHeader.max_y,
-                    minY = sourceHeader.min_y,
-                )
-                val focus = safeOptions.focusBounds
-                if (focus != null) {
-                    val rangeX = header.maxX - header.minX
-                    val rangeY = header.maxY - header.minY
-                    reader.inside_rectangle(
-                        header.minX + focus.left * rangeX,
-                        header.minY + (1.0 - focus.bottom) * rangeY,
-                        header.minX + focus.right * rangeX,
-                        header.minY + (1.0 - focus.top) * rangeY,
-                    )
-                }
-                val estimatedPoints = focus?.let {
-                    (header.pointCount * (it.right - it.left) * (it.bottom - it.top))
-                        .toLong()
-                        .coerceAtLeast(1L)
-                } ?: header.pointCount
+            openSelectiveReader(file, needsClassification)?.use { reader ->
+                val header = headerFrom(reader)
+                applyFocus(reader, header, safeOptions.focusBounds)
+                val estimatedPoints = estimatedFocusedPoints(header, safeOptions.focusBounds)
                 rasterizeLowLevel(
                     reader = reader,
                     header = header,
@@ -81,6 +51,94 @@ internal object LazTerrainReader {
                     needsClassification = needsClassification,
                     shouldContinue = shouldContinue,
                     onProgress = onProgress,
+                )
+            }
+        } catch (exception: Exception) {
+            exception.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Creates a uniformly distributed, full-footprint preview using LAZ chunk seeking.
+     *
+     * This does not become the persistent terrain result. It exists only so the map can appear
+     * quickly while a separate exact pass aggregates every return in the background.
+     */
+    fun readPreview(
+        file: File,
+        options: LidarImportOptions,
+        shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+        onProgress: ((sampledPoints: Long, targetPoints: Long) -> Unit)? = null,
+    ): DemGenerator.LasLoadResult? {
+        val safeOptions = options.sanitized()
+        if (safeOptions.focusBounds != null) return null
+        val needsClassification = safeOptions.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED
+
+        return try {
+            openSelectiveReader(file, needsClassification)?.use { reader ->
+                val header = headerFrom(reader)
+                if (header.pointCount < PREVIEW_MIN_SOURCE_POINTS || header.pointCount > Int.MAX_VALUE.toLong()) {
+                    return@use null
+                }
+
+                val sourceChunkSize = reader.header.laszip?.chunk_size
+                    ?.takeIf { it in 1..5_000_000 }
+                    ?: DEFAULT_CHUNK_POINTS
+                val totalChunks = ((header.pointCount + sourceChunkSize - 1L) / sourceChunkSize)
+                    .coerceAtLeast(1L)
+                    .coerceAtMost(Int.MAX_VALUE.toLong())
+                    .toInt()
+                val chunksToSample = min(totalChunks, PREVIEW_MAX_CHUNKS).coerceAtLeast(1)
+                val pointsPerChunk = (PREVIEW_TARGET_POINTS / chunksToSample)
+                    .coerceIn(1, sourceChunkSize)
+                val previewOptions = safeOptions.copy(
+                    rasterResolution = min(safeOptions.rasterResolution, PREVIEW_MAX_RESOLUTION),
+                    smoothingRadius = 0,
+                ).sanitized()
+                val rasterizer = createRasterizer(header, previewOptions)
+                val targetSamples = chunksToSample.toLong() * pointsPerChunk.toLong()
+                var sampled = 0L
+                onProgress?.invoke(0L, targetSamples)
+
+                for (sampleIndex in 0 until chunksToSample) {
+                    if (!shouldContinue()) return@use null
+                    val chunkIndex = when {
+                        chunksToSample == 1 -> 0
+                        chunksToSample == totalChunks -> sampleIndex
+                        else -> ((sampleIndex.toLong() * (totalChunks - 1L)) / (chunksToSample - 1L)).toInt()
+                    }
+                    val startPoint = chunkIndex.toLong() * sourceChunkSize.toLong()
+                    if (!reader.seek(startPoint)) continue
+
+                    var readInChunk = 0
+                    while (readInChunk < pointsPerChunk && reader.read_point()) {
+                        val point = reader.point
+                        rasterizer.shouldBinNextPoint()
+                        val classification = if (needsClassification) {
+                            normalizeClassification(point.getClassification().toInt(), header.pointFormat)
+                        } else {
+                            0
+                        }
+                        rasterizer.addSampledPoint(
+                            x = point.getX() * header.scaleX + header.offsetX,
+                            y = point.getY() * header.scaleY + header.offsetY,
+                            z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat(),
+                            classification = classification,
+                        )
+                        readInChunk++
+                        sampled++
+                    }
+                    onProgress?.invoke(sampled, targetSamples)
+                }
+
+                val result = rasterizer.finish(
+                    pointFormat = header.pointFormat,
+                    sourceLabel = "Fast chunk preview of LAS/LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat}",
+                ) ?: return@use null
+                result.copy(
+                    note = "${result.note} · exact lossless terrain is still processing",
+                    wasTruncated = true,
                 )
             }
         } catch (exception: Exception) {
@@ -119,6 +177,52 @@ internal object LazTerrainReader {
         }
     }
 
+    private fun openSelectiveReader(file: File, needsClassification: Boolean): LASreader? {
+        val selectiveMask = LASZIP_DECOMPRESS_SELECTIVE_Z or
+            if (needsClassification) LASZIP_DECOMPRESS_SELECTIVE_CLASSIFICATION else 0
+        return SelectiveLasReaderFactory.open(file.absolutePath, selectiveMask)
+    }
+
+    private fun headerFrom(reader: LASreader): Header {
+        val sourceHeader = reader.header
+        return Header(
+            versionMajor = sourceHeader.version_major.toInt() and 0xFF,
+            versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
+            pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
+            pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
+                ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL),
+            scaleX = sourceHeader.x_scale_factor,
+            scaleY = sourceHeader.y_scale_factor,
+            scaleZ = sourceHeader.z_scale_factor,
+            offsetX = sourceHeader.x_offset,
+            offsetY = sourceHeader.y_offset,
+            offsetZ = sourceHeader.z_offset,
+            maxX = sourceHeader.max_x,
+            minX = sourceHeader.min_x,
+            maxY = sourceHeader.max_y,
+            minY = sourceHeader.min_y,
+        )
+    }
+
+    private fun applyFocus(reader: LASreader, header: Header, focus: NormalizedRasterBounds?) {
+        if (focus == null) return
+        val rangeX = header.maxX - header.minX
+        val rangeY = header.maxY - header.minY
+        reader.inside_rectangle(
+            header.minX + focus.left * rangeX,
+            header.minY + (1.0 - focus.bottom) * rangeY,
+            header.minX + focus.right * rangeX,
+            header.minY + (1.0 - focus.top) * rangeY,
+        )
+    }
+
+    private fun estimatedFocusedPoints(header: Header, focus: NormalizedRasterBounds?): Long =
+        focus?.let {
+            (header.pointCount * (it.right - it.left) * (it.bottom - it.top))
+                .toLong()
+                .coerceAtLeast(1L)
+        } ?: header.pointCount
+
     private fun rasterizeLowLevel(
         reader: LASreader,
         header: Header,
@@ -140,13 +244,10 @@ internal object LazTerrainReader {
             } else {
                 0
             }
-            val x = point.getX() * header.scaleX + header.offsetX
-            val y = point.getY() * header.scaleY + header.offsetY
-            val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
             rasterizer.addSampledPoint(
-                x = x,
-                y = y,
-                z = z,
+                x = point.getX() * header.scaleX + header.offsetX,
+                y = point.getY() * header.scaleY + header.offsetY,
+                z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat(),
                 classification = classification,
             )
 
@@ -179,13 +280,10 @@ internal object LazTerrainReader {
             } else {
                 0
             }
-            val x = point.getX() * header.scaleX + header.offsetX
-            val y = point.getY() * header.scaleY + header.offsetY
-            val z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat()
             rasterizer.addSampledPoint(
-                x = x,
-                y = y,
-                z = z,
+                x = point.getX() * header.scaleX + header.offsetX,
+                y = point.getY() * header.scaleY + header.offsetY,
+                z = (point.getZ() * header.scaleZ + header.offsetZ).toFloat(),
                 classification = classification,
             )
 
