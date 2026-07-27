@@ -23,11 +23,14 @@ class MainActivity : ComponentActivity() {
         val vm: HillshadeViewModel = viewModel()
 
         // Large LAZ files open with a fast, uniformly distributed preview. When the lossless
-        // all-return pass finishes, replace that preview only if the same source is still active.
-        // This prevents an older background decode from overwriting a newly selected terrain.
+        // all-return pass finishes, replace that preview only if the same source is still active
+        // and the user has not already opened a more detailed viewport.
         LaunchedEffect(vm) {
           TerrainPerformanceSession.exactTerrainUpdates.collect { update ->
-            if (vm.activeTerrainKey.value == "lidar:${update.source.uri}") {
+            val sameSourceIsActive = vm.activeTerrainKey.value == "lidar:${update.source.uri}"
+            val viewportStillUsesOverview =
+              !vm.isDetailedTerrain.value && !vm.isRefiningTerrain.value
+            if (sameSourceIsActive && viewportStillUsesOverview) {
               TerrainPerformanceSession.publish(update.gpuScene)
               vm.setCustomTerrain(update.terrain, update.source)
             }
