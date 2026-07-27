@@ -25,11 +25,16 @@ internal class LidarRasterizer(
     private val rangeX = (cropMaxX - cropMinX).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val rangeY = (cropMaxY - cropMinY).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val longSide = this.options.rasterResolution
+    private val tracksSourceClasses = this.options.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED
+
     @Suppress("unused")
     private val expectedPointCount = declaredPointCount.coerceAtLeast(0L)
+
     val width: Int
     val height: Int
 
+    private val xToGrid: Double
+    private val yToGrid: Double
     private val groundMin: FloatArray
     private val groundCount: IntArray
     private val allMin: FloatArray
@@ -51,6 +56,8 @@ internal class LidarRasterizer(
             height = longSide
             width = (longSide * rangeX / rangeY).roundToInt().coerceIn(MIN_SHORT_SIDE, longSide)
         }
+        xToGrid = (width - 1).toDouble() / rangeX
+        yToGrid = (height - 1).toDouble() / rangeY
         groundMin = FloatArray(width * height) { Float.MAX_VALUE }
         groundCount = IntArray(width * height)
         allMin = FloatArray(width * height) { Float.MAX_VALUE }
@@ -64,39 +71,48 @@ internal class LidarRasterizer(
         return true
     }
 
-    /** Adds a decoded point to the exact min/max cell accumulators. */
+    /** Adds one decoded point to the exact min/max cell accumulators. */
     internal fun addSampledPoint(
         x: Double,
         y: Double,
         z: Float,
         classification: Int,
-        isKeyPoint: Boolean = false,
+        @Suppress("UNUSED_PARAMETER") isKeyPoint: Boolean = false,
     ): Boolean {
         if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return true
         if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return true
 
-        val gx = (((x - cropMinX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
-        val gy = ((1.0 - (y - cropMinY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
+        // Multiplication by precomputed reciprocals is substantially cheaper than two divisions for
+        // every return and produces the same raster-cell mapping.
+        val gx = ((x - cropMinX) * xToGrid).toInt().coerceIn(0, width - 1)
+        val gy = ((cropMaxY - y) * yToGrid).toInt().coerceIn(0, height - 1)
         val index = gy * width + gx
         if (z < allMin[index]) allMin[index] = z
         if (z > allMax[index]) allMax[index] = z
         allCount[index]++
         pointsBinned++
 
-        val normalizedClass = classification.coerceIn(0, 255)
-        classHistogram[normalizedClass]++
-        // Class 2 is Ground. Class 8 was historically Model Key-Point; modern files use the key-point flag.
-        val isSourceGround = normalizedClass == 2 || normalizedClass == 8 ||
-            (isKeyPoint && normalizedClass == 2)
-        if (isSourceGround) {
-            if (z < groundMin[index]) groundMin[index] = z
-            groundCount[index]++
-            groundPointsBinned++
+        if (tracksSourceClasses) {
+            val normalizedClass = classification.coerceIn(0, 255)
+            classHistogram[normalizedClass]++
+            // Class 2 is ASPRS Ground. Class 8 is the legacy Model Key-Point class retained for
+            // compatibility with older source datasets.
+            if (normalizedClass == 2 || normalizedClass == 8) {
+                if (z < groundMin[index]) groundMin[index] = z
+                groundCount[index]++
+                groundPointsBinned++
+            }
         }
         return true
     }
 
-    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
+    fun addPoint(
+        x: Double,
+        y: Double,
+        z: Float,
+        classification: Int,
+        isKeyPoint: Boolean = false,
+    ): Boolean {
         shouldBinNextPoint()
         return addSampledPoint(x, y, z, classification, isKeyPoint)
     }
@@ -105,9 +121,10 @@ internal class LidarRasterizer(
         if (pointsBinned == 0 || allCount.none { it > 0 }) return null
 
         val populatedCells = allCount.count { it > 0 }
-        val classifiedCells = groundCount.count { it > 0 }
+        val classifiedCells = if (tracksSourceClasses) groundCount.count { it > 0 } else 0
         val classifiedCoverageIsUsable =
-            groundPointsBinned >= MIN_CLASSIFIED_POINTS &&
+            tracksSourceClasses &&
+                groundPointsBinned >= MIN_CLASSIFIED_POINTS &&
                 classifiedCells >= max(MIN_CLASSIFIED_CELLS, (populatedCells * 0.08f).roundToInt())
 
         val requestedMode = options.groundMode
@@ -168,11 +185,15 @@ internal class LidarRasterizer(
         }
         val focusNote = if (focus == null) "complete footprint" else "detailed viewport"
         val smoothingNote = if (options.smoothingRadius == 0) "unsmoothed" else "smoothing radius ${options.smoothingRadius}"
-        val classNote = classHistogram.withIndex()
-            .filter { it.value > 0 }
-            .sortedByDescending { it.value }
-            .take(5)
-            .joinToString(prefix = "classes ", separator = ", ") { "${it.index}:${it.value}" }
+        val classNote = if (tracksSourceClasses) {
+            classHistogram.withIndex()
+                .filter { it.value > 0 }
+                .sortedByDescending { it.value }
+                .take(5)
+                .joinToString(prefix = "classes ", separator = ", ") { "${it.index}:${it.value}" }
+        } else {
+            "classification not required"
+        }
 
         return DemGenerator.LasLoadResult(
             grid = ElevationGrid(width, height, bareEarth, canopy, cellSize, coverageMask),
@@ -281,7 +302,17 @@ private fun suppressIsolatedLowNoise(source: FloatArray, width: Int, height: Int
                     neighbors[count++] = source[(y + dy) * width + x + dx]
                 }
             }
-            neighbors.sort(0, count)
+            // Eight-element insertion sort avoids the repeated generic array-sort overhead across
+            // up to a million raster cells while producing the same median.
+            for (i in 1 until count) {
+                val value = neighbors[i]
+                var j = i - 1
+                while (j >= 0 && neighbors[j] > value) {
+                    neighbors[j + 1] = neighbors[j]
+                    j--
+                }
+                neighbors[j + 1] = value
+            }
             val median = neighbors[count / 2]
             val index = y * width + x
             if (source[index] < median - LOW_NOISE_THRESHOLD_METERS) output[index] = median
