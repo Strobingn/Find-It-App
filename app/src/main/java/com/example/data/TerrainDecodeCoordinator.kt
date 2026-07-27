@@ -4,8 +4,10 @@ import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,32 +23,39 @@ data class TerrainDecodeOutcome(
     val terrain: DemGenerator.TerrainLoadResult,
     val cacheHit: LazTerrainCache.Hit,
     val gpuScene: TerrainGpuScene,
+    /** Non-null only when [terrain] is a fast preview and an exact lossless pass is still running. */
+    val exactOutcome: Deferred<TerrainDecodeOutcome?>? = null,
+    val isPreview: Boolean = false,
 )
 
 /**
  * Serializes duplicate work per source/options key while allowing unrelated datasets to decode in
- * parallel. The critical path ends as soon as an exact terrain raster and coarse GPU scene are
- * available. Persistent cache serialization and higher-detail 3D meshes continue off the UI path.
+ * parallel. Large full-tile LAZ files first return a uniformly sampled chunk preview. The exact
+ * all-return result is then decoded, cached, and prepared for GPU rendering off the visible load
+ * path. Focused refinements, mosaics, LAS files, and small LAZ files remain exact-first.
  */
 class TerrainDecodeCoordinator(
     private val cache: LazTerrainCache,
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
+    private val exactJobs = ConcurrentHashMap<String, Deferred<TerrainDecodeOutcome?>>()
     private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     suspend fun decode(
         file: File,
         displayName: String = file.name,
         options: LidarImportOptions,
+        allowProgressivePreview: Boolean = true,
         onStage: suspend (String) -> Unit = {},
     ): TerrainDecodeOutcome {
-        val key = decodeKey(file, options)
+        val safeOptions = options.sanitized()
+        val key = decodeKey(file, safeOptions)
         val lock = locks.getOrPut(key) { Mutex() }
         try {
             return lock.withLock {
                 currentCoroutineContext().ensureActive()
-                val firstLookup = withContext(Dispatchers.IO) { cache.get(file, options) }
-                val terrain = if (firstLookup.result != null) {
+                val firstLookup = withContext(Dispatchers.IO) { cache.get(file, safeOptions) }
+                firstLookup.result?.let { cached ->
                     onStage(
                         when (firstLookup.hit) {
                             LazTerrainCache.Hit.MEMORY -> "Opening decoded terrain from memory cache…"
@@ -54,30 +63,102 @@ class TerrainDecodeCoordinator(
                             LazTerrainCache.Hit.MISS -> "Reading point cloud…"
                         },
                     )
-                    firstLookup.result
-                } else {
-                    onStage("Decoding exact LAZ/LAS terrain…")
-                    val decoded = decodeFile(file, displayName, options)
-                        ?: error("Could not decode ${file.name}")
-                    currentCoroutineContext().ensureActive()
-
-                    // Prevent duplicate decodes immediately, but keep slow persistent serialization
-                    // off the first-frame path.
-                    cache.putMemory(file, options, decoded)
-                    maintenanceScope.launch { cache.putDisk(file, options, decoded) }
-                    decoded
+                    val scene = withContext(Dispatchers.Default) {
+                        TerrainGpuSceneBuilder.buildProgressive(cached.grid)
+                    }
+                    return@withLock TerrainDecodeOutcome(
+                        terrain = cached,
+                        cacheHit = firstLookup.hit,
+                        gpuScene = scene,
+                    )
                 }
 
+                val canPreview = allowProgressivePreview &&
+                    isLazFile(file, displayName) &&
+                    safeOptions.focusBounds == null
+                if (canPreview) {
+                    onStage("Building fast full-tile preview…")
+                    val preview = decodePreviewFile(file, safeOptions)
+                    if (preview != null) {
+                        currentCoroutineContext().ensureActive()
+                        val previewScene = withContext(Dispatchers.Default) {
+                            TerrainGpuSceneBuilder.buildProgressive(preview.grid)
+                        }
+                        val exact = exactJobs[key] ?: startExactJob(
+                            key = key,
+                            file = file,
+                            displayName = displayName,
+                            options = safeOptions,
+                        ).also { exactJobs[key] = it }
+                        return@withLock TerrainDecodeOutcome(
+                            terrain = preview,
+                            cacheHit = LazTerrainCache.Hit.MISS,
+                            gpuScene = previewScene,
+                            exactOutcome = exact,
+                            isPreview = true,
+                        )
+                    }
+                }
+
+                onStage("Decoding exact LAZ/LAS terrain…")
+                val decoded = decodeFile(file, displayName, safeOptions)
+                    ?: error("Could not decode ${file.name}")
                 currentCoroutineContext().ensureActive()
+                cache.putMemory(file, safeOptions, decoded)
+                maintenanceScope.launch { cache.putDisk(file, safeOptions, decoded) }
                 onStage("Preparing terrain preview…")
                 val scene = withContext(Dispatchers.Default) {
-                    TerrainGpuSceneBuilder.buildProgressive(terrain.grid)
+                    TerrainGpuSceneBuilder.buildProgressive(decoded.grid)
                 }
-                TerrainDecodeOutcome(terrain, firstLookup.hit, scene)
+                TerrainDecodeOutcome(
+                    terrain = decoded,
+                    cacheHit = LazTerrainCache.Hit.MISS,
+                    gpuScene = scene,
+                )
             }
         } finally {
             if (!lock.isLocked) locks.remove(key, lock)
         }
+    }
+
+    private fun startExactJob(
+        key: String,
+        file: File,
+        displayName: String,
+        options: LidarImportOptions,
+    ): Deferred<TerrainDecodeOutcome?> = maintenanceScope.async {
+        try {
+            val decoded = decodeFile(file, displayName, options) ?: return@async null
+            cache.putMemory(file, options, decoded)
+            maintenanceScope.launch { cache.putDisk(file, options, decoded) }
+            val scene = withContext(Dispatchers.Default) {
+                TerrainGpuSceneBuilder.buildProgressive(decoded.grid)
+            }
+            TerrainDecodeOutcome(
+                terrain = decoded,
+                cacheHit = LazTerrainCache.Hit.MISS,
+                gpuScene = scene,
+            )
+        } finally {
+            exactJobs.remove(key)
+        }
+    }
+
+    private suspend fun decodePreviewFile(
+        file: File,
+        options: LidarImportOptions,
+    ): DemGenerator.TerrainLoadResult? = withContext(Dispatchers.IO) {
+        val decodeContext = currentCoroutineContext()
+        val preview = LazTerrainReader.readPreview(
+            file = file,
+            options = options,
+            shouldContinue = { decodeContext.isActive },
+        ) ?: return@withContext null
+        DemGenerator.TerrainLoadResult(
+            grid = preview.grid,
+            summary = preview.note,
+            isBareEarth = preview.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+        )
     }
 
     private suspend fun decodeFile(
@@ -87,10 +168,8 @@ class TerrainDecodeCoordinator(
     ): DemGenerator.TerrainLoadResult? = withContext(Dispatchers.IO) {
         val decodeContext = currentCoroutineContext()
         decodeContext.ensureActive()
-        val isLaz = displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true) ||
-            file.extension.equals("laz", ignoreCase = true)
 
-        if (isLaz) {
+        if (isLazFile(file, displayName)) {
             val laz = LazTerrainReader.read(
                 file = file,
                 options = options,
@@ -102,23 +181,24 @@ class TerrainDecodeCoordinator(
                 isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
             )
         } else {
-            FileInputStream(file).buffered(256 * 1024).use { input ->
+            FileInputStream(file).buffered(1024 * 1024).use { input ->
                 DemGenerator.parseFromStreamDetailed(displayName, input, options)
             }
         }
     }
 
-    private fun decodeKey(file: File, options: LidarImportOptions): String {
-        val sanitized = options.sanitized()
-        return buildString {
-            append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
-            append('|').append(file.length())
-            append('|').append(file.lastModified())
-            append('|').append(sanitized.groundMode)
-            append('|').append(sanitized.rasterResolution)
-            append('|').append(sanitized.smoothingRadius)
-            append('|').append(sanitized.focusBounds)
-        }
+    private fun isLazFile(file: File, displayName: String): Boolean =
+        displayName.substringAfterLast('.', "").equals("laz", ignoreCase = true) ||
+            file.extension.equals("laz", ignoreCase = true)
+
+    private fun decodeKey(file: File, options: LidarImportOptions): String = buildString {
+        append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
+        append('|').append(file.length())
+        append('|').append(file.lastModified())
+        append('|').append(options.groundMode)
+        append('|').append(options.rasterResolution)
+        append('|').append(options.smoothingRadius)
+        append('|').append(options.focusBounds)
     }
 }
 
