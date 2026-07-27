@@ -6,25 +6,23 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Result from the complete Phase 2 decode pipeline. */
+/** Result from the terrain decode path. Expensive cache persistence and 3D mesh work are deferred. */
 data class TerrainDecodeOutcome(
     val terrain: DemGenerator.TerrainLoadResult,
     val cacheHit: LazTerrainCache.Hit,
-    val gpuScene: TerrainGpuScene,
+    val needsDiskCacheWrite: Boolean,
 )
 
 /**
  * Serializes duplicate work per source/options key while allowing unrelated datasets to decode in
- * parallel. File/cache I/O runs on Dispatchers.IO; LOD/spatial/GPU batch construction runs on
- * Dispatchers.Default. Coroutine cancellation is checked between LAZ point batches.
+ * parallel. The critical path ends as soon as an exact terrain raster is available. Disk-cache
+ * serialization and multi-LOD GPU mesh construction are intentionally handled by callers after the
+ * 2D terrain is visible.
  */
 class TerrainDecodeCoordinator(
     private val cache: LazTerrainCache,
@@ -43,7 +41,7 @@ class TerrainDecodeCoordinator(
             return lock.withLock {
                 currentCoroutineContext().ensureActive()
                 val firstLookup = withContext(Dispatchers.IO) { cache.get(file, options) }
-                val terrain = if (firstLookup.result != null) {
+                if (firstLookup.result != null) {
                     onStage(
                         when (firstLookup.hit) {
                             LazTerrainCache.Hit.MEMORY -> "Opening decoded terrain from memory cache…"
@@ -51,24 +49,26 @@ class TerrainDecodeCoordinator(
                             LazTerrainCache.Hit.MISS -> "Reading point cloud…"
                         },
                     )
-                    firstLookup.result
-                } else {
-                    onStage("Decoding LAZ/LAS point batches…")
-                    val decoded = decodeFile(file, displayName, options)
-                        ?: error("Could not decode ${file.name}")
-                    currentCoroutineContext().ensureActive()
-                    onStage("Saving decoded terrain cache…")
-                    withContext(Dispatchers.IO) { cache.put(file, options, decoded) }
-                    decoded
+                    return@withLock TerrainDecodeOutcome(
+                        terrain = firstLookup.result,
+                        cacheHit = firstLookup.hit,
+                        needsDiskCacheWrite = false,
+                    )
                 }
 
+                onStage("Decoding exact LAZ/LAS terrain…")
+                val decoded = decodeFile(file, displayName, options)
+                    ?: error("Could not decode ${file.name}")
                 currentCoroutineContext().ensureActive()
-                onStage("Building spatial index, LOD levels, and GPU batches…")
-                val scene = withContext(Dispatchers.Default) {
-                    currentCoroutineContext().ensureActive()
-                    TerrainGpuSceneBuilder.build(terrain.grid)
-                }
-                TerrainDecodeOutcome(terrain, firstLookup.hit, scene)
+
+                // Memory insertion is cheap and prevents duplicate work immediately. Persistent
+                // serialization is deliberately deferred so it cannot delay the first terrain frame.
+                cache.putMemory(file, options, decoded)
+                TerrainDecodeOutcome(
+                    terrain = decoded,
+                    cacheHit = LazTerrainCache.Hit.MISS,
+                    needsDiskCacheWrite = true,
+                )
             }
         } finally {
             if (!lock.isLocked) locks.remove(key, lock)
@@ -86,9 +86,6 @@ class TerrainDecodeCoordinator(
             file.extension.equals("laz", ignoreCase = true)
 
         if (isLaz) {
-            // Keep LAZ decoding file-backed. This preserves laszip4j's seek/spatial-query path and
-            // lets focused re-rasterization use insideRectangle() instead of streaming and
-            // decompressing the complete file before discarding points outside the viewport.
             val laz = LazTerrainReader.read(
                 file = file,
                 options = options,
@@ -117,19 +114,5 @@ class TerrainDecodeCoordinator(
             append('|').append(sanitized.smoothingRadius)
             append('|').append(sanitized.focusBounds)
         }
-    }
-}
-
-/** App-wide current GPU terrain session consumed by the Compose/OpenGL renderer. */
-object TerrainPerformanceSession {
-    private val _gpuScene = MutableStateFlow<TerrainGpuScene?>(null)
-    val gpuScene: StateFlow<TerrainGpuScene?> = _gpuScene.asStateFlow()
-
-    fun publish(scene: TerrainGpuScene) {
-        _gpuScene.value = scene
-    }
-
-    fun clear() {
-        _gpuScene.value = null
     }
 }
