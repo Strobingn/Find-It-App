@@ -6,11 +6,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Point
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,6 +33,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EditLocationAlt
 import androidx.compose.material.icons.filled.ExpandLess
@@ -70,6 +75,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -104,10 +114,18 @@ import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
 import java.io.File
 import java.security.MessageDigest
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** A drag shorter than this in either axis is a stray tap, not a search box. */
+private const val MIN_SEARCH_BOX_PIXELS = 24f
+
+private val SearchBoxFill = Color(0x3329B6F6)
+private val SearchBoxStroke = Color(0xFF29B6F6)
 
 @Composable
 fun TerrainGoogleMapScreen(
@@ -360,8 +378,56 @@ fun TerrainGoogleMapScreen(
         }
     }
 
+    // Drawing a search box has to sit above the map rather than inside it: the map consumes drags
+    // for panning, so the rectangle is captured by a transparent overlay that covers exactly the
+    // same area, letting screen coordinates map straight through the map's own projection.
+    var drawingSearchBox by remember { mutableStateOf(false) }
+    var boxStart by remember { mutableStateOf<Offset?>(null) }
+    var boxEnd by remember { mutableStateOf<Offset?>(null) }
+
+    fun clearSearchBox() {
+        boxStart = null
+        boxEnd = null
+    }
+
     Box(modifier.fillMaxSize()) {
         AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+
+        if (drawingSearchBox) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("lidar_search_box_canvas")
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { start ->
+                                boxStart = start
+                                boxEnd = start
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                boxEnd = change.position
+                            },
+                        )
+                    },
+            ) {
+                val start = boxStart
+                val end = boxEnd
+                if (start != null && end != null) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        val topLeft = Offset(minOf(start.x, end.x), minOf(start.y, end.y))
+                        val size = Size(abs(end.x - start.x), abs(end.y - start.y))
+                        drawRect(color = SearchBoxFill, topLeft = topLeft, size = size)
+                        drawRect(
+                            color = SearchBoxStroke,
+                            topLeft = topLeft,
+                            size = size,
+                            style = Stroke(width = 3f),
+                        )
+                    }
+                }
+            }
+        }
 
         OverlayHeader(
             mapType = mapType,
@@ -377,68 +443,72 @@ fun TerrainGoogleMapScreen(
             modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(0.96f),
         )
 
-        OverlayControls(
-            opacity = opacity,
-            onOpacityChanged = { opacity = it },
-            alignmentMode = alignmentMode,
-            onAlignmentModeChanged = { alignmentMode = it },
-            alignment = alignment,
-            canPlace = terrainBitmap != null,
-            onPlaceAtCenter = {
-                updateAlignment(
-                    (alignment ?: TerrainMapAlignment(cameraCenter)).copy(center = cameraCenter),
-                )
-            },
-            onWidthScaleChanged = { value ->
-                alignment?.let { updateAlignment(it.copy(widthScale = value)) }
-            },
-            onHeightScaleChanged = { value ->
-                alignment?.let { updateAlignment(it.copy(heightScale = value)) }
-            },
-            onBearingChanged = { value ->
-                alignment?.let { updateAlignment(it.copy(bearingDegrees = value)) }
-            },
-            onNudge = { eastFraction, northFraction ->
-                alignment?.let {
+        // The drawing prompt owns the bottom of the screen while a box is being drawn, and
+        // opacity/alignment controls are not what the user is reaching for mid-drag.
+        if (!drawingSearchBox) {
+            OverlayControls(
+                opacity = opacity,
+                onOpacityChanged = { opacity = it },
+                alignmentMode = alignmentMode,
+                onAlignmentModeChanged = { alignmentMode = it },
+                alignment = alignment,
+                canPlace = terrainBitmap != null,
+                onPlaceAtCenter = {
                     updateAlignment(
-                        it.copy(
-                            center = nudgeCenter(
-                                center = it.center,
-                                eastMeters = naturalSize.widthMeters * it.widthScale * eastFraction,
-                                northMeters = naturalSize.heightMeters * it.heightScale * northFraction,
-                            ),
-                        ),
+                        (alignment ?: TerrainMapAlignment(cameraCenter)).copy(center = cameraCenter),
                     )
-                }
-            },
-            onEditBounds = { editBounds = true },
-            canShowSurvey = surveyPoints.isNotEmpty(),
-            onShowSurvey = {
-                val map = googleMap ?: return@OverlayControls
-                val first = surveyPoints.firstOrNull() ?: return@OverlayControls
-                mapView.post {
-                    if (surveyPoints.size == 1) {
-                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(first, 17f))
-                    } else {
-                        val bounds = LatLngBounds.builder().apply {
-                            surveyPoints.forEach(::include)
-                        }.build()
-                        runCatching {
-                            map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 88))
-                        }.onFailure {
-                            map.moveCamera(CameraUpdateFactory.newLatLngZoom(first, 16f))
+                },
+                onWidthScaleChanged = { value ->
+                    alignment?.let { updateAlignment(it.copy(widthScale = value)) }
+                },
+                onHeightScaleChanged = { value ->
+                    alignment?.let { updateAlignment(it.copy(heightScale = value)) }
+                },
+                onBearingChanged = { value ->
+                    alignment?.let { updateAlignment(it.copy(bearingDegrees = value)) }
+                },
+                onNudge = { eastFraction, northFraction ->
+                    alignment?.let {
+                        updateAlignment(
+                            it.copy(
+                                center = nudgeCenter(
+                                    center = it.center,
+                                    eastMeters = naturalSize.widthMeters * it.widthScale * eastFraction,
+                                    northMeters = naturalSize.heightMeters * it.heightScale * northFraction,
+                                ),
+                            ),
+                        )
+                    }
+                },
+                onEditBounds = { editBounds = true },
+                canShowSurvey = surveyPoints.isNotEmpty(),
+                onShowSurvey = {
+                    val map = googleMap ?: return@OverlayControls
+                    val first = surveyPoints.firstOrNull() ?: return@OverlayControls
+                    mapView.post {
+                        if (surveyPoints.size == 1) {
+                            map.animateCamera(CameraUpdateFactory.newLatLngZoom(first, 17f))
+                        } else {
+                            val bounds = LatLngBounds.builder().apply {
+                                surveyPoints.forEach(::include)
+                            }.build()
+                            runCatching {
+                                map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 88))
+                            }.onFailure {
+                                map.moveCamera(CameraUpdateFactory.newLatLngZoom(first, 16f))
+                            }
                         }
                     }
-                }
-            },
-            canReset = hasSavedAlignment,
-            onReset = {
-                alignmentStore.clear(terrainKey)
-                alignment = defaultAlignment
-                hasSavedAlignment = false
-            },
-            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
-        )
+                },
+                canReset = hasSavedAlignment,
+                onReset = {
+                    alignmentStore.clear(terrainKey)
+                    alignment = defaultAlignment
+                    hasSavedAlignment = false
+                },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
+            )
+        }
 
         if (alignmentMode) {
             Surface(
@@ -496,6 +566,22 @@ fun TerrainGoogleMapScreen(
             val findTiles = onFindLidarTiles
             if (findTiles != null) {
                 SmallFloatingActionButton(
+                    onClick = {
+                        drawingSearchBox = !drawingSearchBox
+                        clearSearchBox()
+                    },
+                    modifier = Modifier.testTag("draw_lidar_search_box"),
+                ) {
+                    Icon(
+                        if (drawingSearchBox) Icons.Default.Close else Icons.Default.Crop,
+                        contentDescription = if (drawingSearchBox) {
+                            "Cancel drawing a search box"
+                        } else {
+                            "Draw a search box for LiDAR tiles"
+                        },
+                    )
+                }
+                SmallFloatingActionButton(
                     onClick = { visibleSearchBounds(googleMap)?.let(findTiles) },
                     modifier = Modifier.testTag("find_lidar_tiles_in_view"),
                 ) {
@@ -507,6 +593,19 @@ fun TerrainGoogleMapScreen(
                     Icon(Icons.Default.History, contentDescription = "Historic maps")
                 }
             }
+        }
+
+        if (drawingSearchBox) {
+            SearchBoxPrompt(
+                bounds = drawnSearchBounds(googleMap, boxStart, boxEnd),
+                onClear = ::clearSearchBox,
+                onConfirm = { bounds ->
+                    drawingSearchBox = false
+                    clearSearchBox()
+                    onFindLidarTiles?.invoke(bounds)
+                },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
+            )
         }
     }
 
@@ -1035,6 +1134,89 @@ private fun GeoSpatialLibrary.GeographicBounds.toLatLngBounds(): LatLngBounds =
  * one, which would read as an inverted box downstream. No LiDAR source this app queries spans that
  * line, so such a view is reported as unsearchable rather than silently mangled.
  */
+/**
+ * Converts a rectangle drawn in overlay pixels into geographic bounds.
+ *
+ * The overlay covers exactly the same area as the map view, so screen coordinates pass straight
+ * through the map's projection. A stray tap produces a degenerate rectangle covering no ground,
+ * which is rejected rather than turned into an empty search.
+ */
+private fun drawnSearchBounds(
+    map: GoogleMap?,
+    start: Offset?,
+    end: Offset?,
+): GeoSpatialLibrary.GeographicBounds? {
+    if (start == null || end == null) return null
+    if (abs(end.x - start.x) < MIN_SEARCH_BOX_PIXELS || abs(end.y - start.y) < MIN_SEARCH_BOX_PIXELS) return null
+    val projection = map?.projection ?: return null
+    val first = projection.fromScreenLocation(Point(start.x.roundToInt(), start.y.roundToInt()))
+    val second = projection.fromScreenLocation(Point(end.x.roundToInt(), end.y.roundToInt()))
+    return searchBoundsFromCorners(first, second)
+}
+
+/**
+ * Normalizes two opposite corners into geographic bounds.
+ *
+ * A box can be drawn in any direction, so neither corner is reliably the north-west one. A box
+ * spanning the antimeridian would produce a west greater than its east, which reads downstream as
+ * an inverted box; no LiDAR source this app queries crosses that line, so it is rejected rather
+ * than silently mangled.
+ */
+internal fun searchBoundsFromCorners(
+    first: LatLng,
+    second: LatLng,
+): GeoSpatialLibrary.GeographicBounds? {
+    val west = minOf(first.longitude, second.longitude)
+    val east = maxOf(first.longitude, second.longitude)
+    val south = minOf(first.latitude, second.latitude)
+    val north = maxOf(first.latitude, second.latitude)
+    if (west >= east || south >= north) return null
+    if (!west.isFinite() || !east.isFinite() || !south.isFinite() || !north.isFinite()) return null
+    return GeoSpatialLibrary.GeographicBounds(
+        minLat = south,
+        maxLat = north,
+        minLon = west,
+        maxLon = east,
+    )
+}
+
+@Composable
+private fun SearchBoxPrompt(
+    bounds: GeoSpatialLibrary.GeographicBounds?,
+    onClear: () -> Unit,
+    onConfirm: (GeoSpatialLibrary.GeographicBounds) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(tonalElevation = 3.dp, shape = RoundedCornerShape(10.dp), modifier = modifier) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (bounds == null) {
+                    "Drag across the map to draw a search box."
+                } else {
+                    "Box ready · %.4f, %.4f to %.4f, %.4f".format(
+                        bounds.minLat,
+                        bounds.minLon,
+                        bounds.maxLat,
+                        bounds.maxLon,
+                    )
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
+            if (bounds != null) {
+                TextButton(onClick = onClear) { Text("Redraw") }
+                Button(
+                    onClick = { onConfirm(bounds) },
+                    modifier = Modifier.testTag("confirm_lidar_search_box"),
+                ) { Text("Find tiles") }
+            }
+        }
+    }
+}
+
 private fun visibleSearchBounds(map: GoogleMap?): GeoSpatialLibrary.GeographicBounds? {
     val bounds = map?.projection?.visibleRegion?.latLngBounds ?: return null
     if (bounds.southwest.longitude > bounds.northeast.longitude) return null
