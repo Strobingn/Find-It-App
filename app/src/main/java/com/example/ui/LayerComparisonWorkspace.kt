@@ -107,6 +107,7 @@ fun LayerComparisonWorkspace(
     var leftLayer by rememberSaveable { mutableStateOf(TerrainDerivedLayer.LOCAL_RELIEF) }
     var rightLayer by rememberSaveable { mutableStateOf(TerrainDerivedLayer.SLOPE) }
 
+    val availableLayers = remember(result) { result?.layers?.values?.keys.orEmpty() }
     val leftBitmap = remember(result, leftLayer) { result?.let { TerrainIntelligenceRenderer.renderLayer(it, leftLayer) } }
     val rightBitmap = remember(result, rightLayer) { result?.let { TerrainIntelligenceRenderer.renderLayer(it, rightLayer) } }
 
@@ -277,6 +278,7 @@ fun LayerComparisonWorkspace(
                     zoom = zoom,
                     pan = pan,
                     layer = leftLayer,
+                    availableLayers = availableLayers,
                     onLayerSelected = { leftLayer = it },
                     // Both panes are laid out identically, so the left pane's canvas is the
                     // authoritative viewport size - measured below the layer header, unlike the
@@ -292,6 +294,7 @@ fun LayerComparisonWorkspace(
                     zoom = zoom,
                     pan = pan,
                     layer = rightLayer,
+                    availableLayers = availableLayers,
                     onLayerSelected = { rightLayer = it },
                     onCanvasSizeChanged = {},
                     modifier = Modifier.weight(1f).fillMaxSize().testTag("comparison_pane_right"),
@@ -307,6 +310,8 @@ private fun ComparisonPane(
     zoom: Float,
     pan: Offset,
     layer: TerrainDerivedLayer,
+    /** Only layers this result carries; offering an absent one throws when it is selected. */
+    availableLayers: Set<TerrainDerivedLayer>,
     onLayerSelected: (TerrainDerivedLayer) -> Unit,
     onCanvasSizeChanged: (IntSize) -> Unit,
     modifier: Modifier = Modifier,
@@ -333,7 +338,7 @@ private fun ComparisonPane(
                 }
             }
             DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                TerrainDerivedLayer.entries.forEach { candidate ->
+                TerrainDerivedLayer.entries.filter { it in availableLayers }.forEach { candidate ->
                     DropdownMenuItem(
                         text = { Text(candidate.label) },
                         onClick = {

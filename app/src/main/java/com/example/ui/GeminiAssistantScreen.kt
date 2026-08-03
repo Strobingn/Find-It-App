@@ -620,7 +620,9 @@ fun GeminiAssistantScreen(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
-                    TerrainDerivedLayer.entries.forEach { layer ->
+                    // Only layers this result actually carries. A chip for an absent layer
+                    // renders fine and then throws when it is selected.
+                    TerrainDerivedLayer.entries.filter { result.layers.values.containsKey(it) }.forEach { layer ->
                         FilterChip(
                             selected = state.selectedLayer == layer,
                             onClick = { assistantViewModel.selectLocalLayer(layer) },

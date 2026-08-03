@@ -835,7 +835,17 @@ class TerrainDerivedLayerCache(
 
     companion object {
         private const val CACHE_MAGIC = 0x54494E54
-        private const val CACHE_VERSION = 1
+        /**
+         * Bumped whenever the set of layers written here changes.
+         *
+         * A cache holding fewer layers than the current code renders restores perfectly happily —
+         * the detectors only require the layers they read — and then throws the moment someone
+         * selects the missing one. Rejecting the older payload costs one recompute and removes
+         * that whole class of failure.
+         *
+         * v2: adds MULTI_SCALE_RELIEF.
+         */
+        private const val CACHE_VERSION = 2
     }
 }
 
