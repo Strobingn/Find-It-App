@@ -82,6 +82,21 @@ object MetalDetectingTargetRefiner {
     private const val MAX_PER_TYPE = 12
     private const val MAX_TOTAL = 48
 
+    /**
+     * Per-caution demotion, and the most any number of them can remove.
+     *
+     * Deliberately smaller than the 0.28 a field-verified rejection removes: a caution is the
+     * detector saying a natural explanation is available, whereas a rejection is someone having
+     * stood on the spot. The cap keeps a heavily-cautioned strong candidate visible and ranked
+     * low rather than silently deleted, so it can still be field-checked and fed back.
+     */
+    internal const val CAUTION_PENALTY_EACH = 0.06f
+    internal const val CAUTION_PENALTY_CAP = 0.18f
+
+    /** Demotion for a candidate carrying [count] caution reasons. */
+    internal fun cautionPenalty(count: Int): Float =
+        (count.coerceAtLeast(0) * CAUTION_PENALTY_EACH).coerceAtMost(CAUTION_PENALTY_CAP)
+
     fun refine(
         result: TerrainIntelligenceResult,
         feedback: List<VerifiedFeedbackPoint> = emptyList(),
@@ -310,11 +325,18 @@ object MetalDetectingTargetRefiner {
             val nearestFeedback = feedback.minByOrNull { distanceSquared(it.xPercent, it.yPercent, xPercent, yPercent) }
             val feedbackMatched = nearestFeedback != null &&
                 distanceSquared(nearestFeedback.xPercent, nearestFeedback.yPercent, xPercent, yPercent) <= VerifiedFeedback.MATCH_DISTANCE_SQUARED
-            val adjusted = if (feedbackMatched) {
+            val afterFeedback = if (feedbackMatched) {
                 (rawValue + if (nearestFeedback!!.confirmed) 0.14f else -0.28f).coerceIn(0f, 1f)
             } else {
                 rawValue
             }
+            // Caution reasons name the ways a candidate could be a natural feature or a rendering
+            // artifact rather than something built. They used to be labels only, so a candidate
+            // carrying every caution the detector could raise still outranked a clean one with a
+            // slightly lower raw response. They now subtract, which is what makes human features
+            // cluster above isolated natural anomalies rather than merely reading differently.
+            val cautions = classifyCaution(type, x, y, index, ctx, feedback, xPercent, yPercent)
+            val adjusted = (afterFeedback - cautionPenalty(cautions.size)).coerceIn(0f, 1f)
             // Mirrors TerrainIntelligenceEngine's feedback rule: a rejected match can drop an
             // already-qualified candidate, but feedback never resurrects one that never cleared
             // the raw per-pixel threshold in the first place.
@@ -326,7 +348,7 @@ object MetalDetectingTargetRefiner {
                 score = adjusted,
                 radiusMeters = radiusMeters,
                 evidence = explainCandidate(type, x, y, index, ctx),
-                cautionReasons = classifyCaution(type, x, y, index, ctx, feedback, xPercent, yPercent),
+                cautionReasons = cautions,
                 verifiedNearby = feedbackMatched,
             )
         }
