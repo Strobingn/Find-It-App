@@ -474,6 +474,9 @@ object DemGenerator {
                 if (!realX.isFinite() || !realY.isFinite() || !realZ.isFinite()) continue
 
                 val classification = record[classOffset].toInt() and classMask
+                // Producer-flagged noise must not define a cell's min or max; a class 7 low point
+                // carves a false pit that the detectors then read as a cellar hole.
+                if (LidarRasterizer.isNoise(classification)) continue
                 val gx = (((realX - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
                 val gy = ((1.0 - (realY - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
                 val index = gy * gridW + gx
@@ -660,10 +663,13 @@ object DemGenerator {
                 val gy = ((1.0 - (realY - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
                 val idx = gy * gridW + gx
 
-                // Always track all returns for fallback / canopy estimate
-                if (realZ < allMin[idx]) allMin[idx] = realZ
-                if (realZ > allMax[idx]) allMax[idx] = realZ
-                allCnt[idx]++
+                // All returns except producer-flagged noise feed the fallback / canopy estimate.
+                // A class 7 low point sits below true ground and would carve a false pit.
+                if (!LidarRasterizer.isNoise(classification)) {
+                    if (realZ < allMin[idx]) allMin[idx] = realZ
+                    if (realZ > allMax[idx]) allMax[idx] = realZ
+                    allCnt[idx]++
+                }
 
                 // ASPRS: 2 = Ground, 8 = Model Key-Point (often bare earth)
                 // Skip noise (7), water (9), reserved, high veg, buildings for ground DEM
