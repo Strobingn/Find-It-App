@@ -26,6 +26,53 @@ import androidx.compose.ui.unit.dp
 import java.util.Locale
 import kotlin.math.roundToInt
 
+/** One selectable choice in a control card. Shared with the Map workspace's layer switcher. */
+data class ControlOption(val value: Int, val title: String, val subtitle: String)
+
+/**
+ * The nine relief renderings, indexed by [com.example.ui.HillshadeViewModel.visualizationMode].
+ * Exposed so the Map header's layer switcher and the Analyze sheet's peek row name them the same
+ * way this panel does.
+ */
+val ReliefStyleOptions = listOf(
+    ControlOption(0, "Hillshade", "Single light source"),
+    ControlOption(1, "Multi-light", "Four balanced directions"),
+    ControlOption(2, "Slope", "Highlight steep ground"),
+    ControlOption(3, "Local relief", "Banks, walls and cellars"),
+    ControlOption(4, "Curvature", "Breaks and edges in slope"),
+    ControlOption(5, "Disturbance", "Screen anomaly candidates"),
+    ControlOption(6, "Aspect", "Slope direction by color"),
+    ControlOption(7, "Elevation", "Unshaded height colors"),
+    ControlOption(8, "Canopy", "DSM minus bare earth"),
+)
+
+/** The eight cardinal light directions offered by the Lighting card. */
+val SunDirectionOptions = listOf(
+    ControlOption(0, "N", "0°"),
+    ControlOption(45, "NE", "45°"),
+    ControlOption(90, "E", "90°"),
+    ControlOption(135, "SE", "135°"),
+    ControlOption(180, "S", "180°"),
+    ControlOption(225, "SW", "225°"),
+    ControlOption(270, "W", "270°"),
+    ControlOption(315, "NW", "315°"),
+)
+
+/** The three historical overlays offered by the Historical overlay card. */
+val HistoricalOverlayOptions = listOf(
+    ControlOption(0, "None", "Terrain only"),
+    ControlOption(1, "1880s plat", "Illustrative site layer"),
+    ControlOption(2, "1940s contours", "Illustrative contour layer"),
+)
+
+/** The survey-grid spacings offered by the Survey grid card, keyed by cell spacing. */
+val SurveyGridOptions = listOf(
+    ControlOption(0, "Off", "No planning grid"),
+    ControlOption(20, "5 × 5", "Broad coverage"),
+    ControlOption(10, "10 × 10", "Standard coverage"),
+    ControlOption(5, "20 × 20", "Detailed coverage"),
+)
+
 @Composable
 fun LidarControlPanel(
     selectedSiteIndex: Int,
@@ -76,250 +123,315 @@ fun LidarControlPanel(
             style = MaterialTheme.typography.bodyMedium,
         )
 
-        ControlCard("Terrain source") {
-            OptionGrid(
-                options = listOf(
-                    Option(0, "Homestead", "Cellar, well and wall"),
-                    Option(1, "Fort", "Ramparts and trench"),
-                    Option(2, "Villa", "Foundations and road"),
-                    Option(3, "Imported", "Load it from Import"),
-                ),
-                selected = selectedSiteIndex,
-                onSelected = onSiteSelected,
-                tagPrefix = "site_tab",
-            )
-        }
+        TerrainSourceCard(selectedSiteIndex, onSiteSelected)
+        ReliefStyleCard(visualizationMode, onVisualizationModeChanged)
+        SurfaceModelCard(vegetationFilter, onVegetationFilterChanged)
+        HistoricalOverlayCard(overlayType, onOverlayTypeChanged, overlayOpacity, onOverlayOpacityChanged)
+        SurveyGridCard(gridSpacing, onGridSpacingChanged)
+        LightingCard(
+            sunAzimuth = sunAzimuth,
+            onSunAzimuthChanged = onSunAzimuthChanged,
+            sunAltitude = sunAltitude,
+            onSunAltitudeChanged = onSunAltitudeChanged,
+            contrast = contrast,
+            onContrastChanged = onContrastChanged,
+            zScale = zScale,
+            onZScaleChanged = onZScaleChanged,
+        )
+        FeatureScreeningCard(
+            featureScaleMeters = featureScaleMeters,
+            onFeatureScaleChanged = onFeatureScaleChanged,
+            analysisSensitivity = analysisSensitivity,
+            onAnalysisSensitivityChanged = onAnalysisSensitivityChanged,
+            contourIntervalMeters = contourIntervalMeters,
+            onContourIntervalChanged = onContourIntervalChanged,
+        )
+        LiveOverlaysCard(
+            heatmapEnabled = heatmapEnabled,
+            onHeatmapEnabledChanged = onHeatmapEnabledChanged,
+            basemapEnabled = basemapEnabled,
+            onBasemapEnabledChanged = onBasemapEnabledChanged,
+            basemapOpacity = basemapOpacity,
+            onBasemapOpacityChanged = onBasemapOpacityChanged,
+            basemapStatus = basemapStatus,
+        )
+        ElevationPaletteCard(paletteType, onPaletteTypeChanged)
+    }
+}
 
-        ControlCard("Relief style") {
-            OptionGrid(
-                options = listOf(
-                    Option(0, "Standard", "Single light source"),
-                    Option(1, "Multi-light", "Four balanced directions"),
-                    Option(2, "Slope", "Highlight steep ground"),
-                    Option(3, "Local relief", "Banks, walls and cellars"),
-                    Option(4, "Curvature", "Breaks and edges in slope"),
-                    Option(5, "Disturbance", "Screen anomaly candidates"),
-                    Option(6, "Aspect", "Slope direction by color"),
-                    Option(7, "Elevation", "Unshaded height colors"),
-                    Option(8, "Canopy", "DSM minus bare earth"),
-                ),
-                selected = visualizationMode,
-                onSelected = onVisualizationModeChanged,
-                tagPrefix = "visualization",
-            )
-        }
+@Composable
+fun TerrainSourceCard(selectedSiteIndex: Int, onSiteSelected: (Int) -> Unit) {
+    ControlCard("Terrain source") {
+        OptionGrid(
+            options = listOf(
+                ControlOption(0, "Homestead", "Cellar, well and wall"),
+                ControlOption(1, "Fort", "Ramparts and trench"),
+                ControlOption(2, "Villa", "Foundations and road"),
+                ControlOption(3, "Imported", "Load it from Data"),
+            ),
+            selected = selectedSiteIndex,
+            onSelected = onSiteSelected,
+            tagPrefix = "site_tab",
+        )
+    }
+}
 
-        ControlCard("Surface model") {
-            LabeledSlider(
-                label = "Canopy removal",
-                displayValue = "${(vegetationFilter * 100).toInt()}%",
-                value = vegetationFilter,
-                range = 0f..1f,
-                onValueChange = onVegetationFilterChanged,
-                modifier = Modifier.testTag("vegetation_slider"),
-            )
-            Text(
-                if (vegetationFilter >= 0.99f) "Bare-earth DEM" else "Canopy is blended into the surface",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
+@Composable
+fun ReliefStyleCard(visualizationMode: Int, onVisualizationModeChanged: (Int) -> Unit) {
+    ControlCard("Relief style") {
+        OptionGrid(
+            options = ReliefStyleOptions,
+            selected = visualizationMode,
+            onSelected = onVisualizationModeChanged,
+            tagPrefix = "visualization",
+        )
+    }
+}
 
-        ControlCard("Historical overlay") {
-            OptionGrid(
-                options = listOf(
-                    Option(0, "None", "Terrain only"),
-                    Option(1, "1880s plat", "Illustrative site layer"),
-                    Option(2, "1940s contours", "Illustrative contour layer"),
-                ),
-                selected = overlayType,
-                onSelected = onOverlayTypeChanged,
-                tagPrefix = "overlay",
-            )
-            if (overlayType > 0) {
-                Spacer(Modifier.height(4.dp))
-                LabeledSlider(
-                    label = "Overlay opacity",
-                    displayValue = "${(overlayOpacity * 100).toInt()}%",
-                    value = overlayOpacity,
-                    range = 0.1f..0.9f,
-                    onValueChange = onOverlayOpacityChanged,
-                )
-            }
-        }
+@Composable
+fun SurfaceModelCard(vegetationFilter: Float, onVegetationFilterChanged: (Float) -> Unit) {
+    ControlCard("Surface model") {
+        LabeledSlider(
+            label = "Canopy removal",
+            displayValue = "${(vegetationFilter * 100).toInt()}%",
+            value = vegetationFilter,
+            range = 0f..1f,
+            onValueChange = onVegetationFilterChanged,
+            modifier = Modifier.testTag("vegetation_slider"),
+        )
+        Text(
+            if (vegetationFilter >= 0.99f) "Bare-earth DEM" else "Canopy is blended into the surface",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
 
-        ControlCard("Survey grid") {
-            OptionGrid(
-                options = listOf(
-                    Option(0, "Off", "No planning grid"),
-                    Option(20, "5 × 5", "Broad coverage"),
-                    Option(10, "10 × 10", "Standard coverage"),
-                    Option(5, "20 × 20", "Detailed coverage"),
-                ),
-                selected = gridSpacing.toInt(),
-                onSelected = { onGridSpacingChanged(it.toFloat()) },
-                tagPrefix = "grid",
-            )
-        }
-
-        ControlCard("Lighting and relief") {
-            Text(
-                "Light direction: ${compassDirection(sunAzimuth)}",
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold,
-            )
-            OptionGrid(
-                options = listOf(
-                    Option(0, "N", "0°"),
-                    Option(45, "NE", "45°"),
-                    Option(90, "E", "90°"),
-                    Option(135, "SE", "135°"),
-                    Option(180, "S", "180°"),
-                    Option(225, "SW", "225°"),
-                    Option(270, "W", "270°"),
-                    Option(315, "NW", "315°"),
-                ),
-                selected = ((sunAzimuth / 45f).roundToInt() * 45).mod(360),
-                onSelected = { onSunAzimuthChanged(it.toFloat()) },
-                tagPrefix = "sun_direction",
-            )
-            LabeledSlider(
-                label = "Sun azimuth",
-                displayValue = "${sunAzimuth.toInt()}°",
-                value = sunAzimuth,
-                range = 0f..360f,
-                onValueChange = onSunAzimuthChanged,
-                modifier = Modifier.testTag("sun_azimuth_slider"),
-            )
-            LabeledSlider(
-                label = "Sun altitude",
-                displayValue = "${sunAltitude.toInt()}°",
-                value = sunAltitude,
-                range = 5f..85f,
-                onValueChange = onSunAltitudeChanged,
-                modifier = Modifier.testTag("sun_altitude_slider"),
-            )
-            LabeledSlider(
-                label = "Shadow contrast",
-                displayValue = String.format(Locale.US, "%.1f×", contrast),
-                value = contrast,
-                range = 1f..2.5f,
-                onValueChange = onContrastChanged,
-                modifier = Modifier.testTag("contrast_slider"),
-            )
-            LabeledSlider(
-                label = "Vertical exaggeration",
-                displayValue = String.format(Locale.US, "%.1f×", zScale),
-                value = zScale,
-                range = 0.5f..4f,
-                onValueChange = onZScaleChanged,
-                modifier = Modifier.testTag("z_scale_slider"),
-            )
-        }
-
-        ControlCard("Feature screening") {
-            LabeledSlider(
-                label = "Feature scale",
-                displayValue = String.format(Locale.US, "%.1f m", featureScaleMeters),
-                value = featureScaleMeters,
-                range = 1f..40f,
-                onValueChange = onFeatureScaleChanged,
-                modifier = Modifier.testTag("feature_scale_slider"),
-            )
-            LabeledSlider(
-                label = "Candidate sensitivity",
-                displayValue = String.format(Locale.US, "%.1f×", analysisSensitivity),
-                value = analysisSensitivity,
-                range = 0.4f..2.5f,
-                onValueChange = onAnalysisSensitivityChanged,
-                modifier = Modifier.testTag("analysis_sensitivity_slider"),
-            )
-            LabeledSlider(
-                label = "Measured contours",
-                displayValue = if (contourIntervalMeters < 0.05f) {
-                    "Off"
-                } else {
-                    String.format(Locale.US, "%.2f m", contourIntervalMeters)
-                },
-                value = contourIntervalMeters,
-                range = 0f..5f,
-                onValueChange = onContourIntervalChanged,
-                modifier = Modifier.testTag("contour_interval_slider"),
-            )
-            Text(
-                "Local relief, curvature, and disturbance views flag terrain shapes for review; they do not identify or date a foundation by themselves.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-
-        ControlCard("Live overlays") {
-            Text(
-                "Dig priority heatmap",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            OptionGrid(
-                options = listOf(Option(0, "Off", "No density layer"), Option(1, "On", "Unexcavated finds")),
-                selected = if (heatmapEnabled) 1 else 0,
-                onSelected = { onHeatmapEnabledChanged(it == 1) },
-                tagPrefix = "heatmap",
-            )
+@Composable
+fun HistoricalOverlayCard(
+    overlayType: Int,
+    onOverlayTypeChanged: (Int) -> Unit,
+    overlayOpacity: Float,
+    onOverlayOpacityChanged: (Float) -> Unit,
+) {
+    ControlCard("Historical overlay") {
+        OptionGrid(
+            options = HistoricalOverlayOptions,
+            selected = overlayType,
+            onSelected = onOverlayTypeChanged,
+            tagPrefix = "overlay",
+        )
+        if (overlayType > 0) {
             Spacer(Modifier.height(4.dp))
-            Text(
-                "Offline basemap",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            OptionGrid(
-                options = listOf(Option(0, "Off", "Terrain only"), Option(1, "On", "OpenStreetMap tiles")),
-                selected = if (basemapEnabled) 1 else 0,
-                onSelected = { onBasemapEnabledChanged(it == 1) },
-                tagPrefix = "basemap",
-            )
-            if (basemapEnabled) {
-                Spacer(Modifier.height(4.dp))
-                LabeledSlider(
-                    label = "Basemap opacity",
-                    displayValue = "${(basemapOpacity * 100).toInt()}%",
-                    value = basemapOpacity,
-                    range = 0.1f..1f,
-                    onValueChange = onBasemapOpacityChanged,
-                    modifier = Modifier.testTag("basemap_opacity_slider"),
-                )
-                basemapStatus?.let {
-                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-                }
-                Text(
-                    "Tiles are fetched once per site and cached on-device — later views work offline.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-
-        ControlCard("Elevation palette") {
-            OptionGrid(
-                options = listOf(
-                    Option(0, "Clay", "Neutral relief"),
-                    Option(1, "Copper", "Warm LiDAR tint"),
-                    Option(2, "Terrain", "Hypsometric colors"),
-                ),
-                selected = paletteType,
-                onSelected = onPaletteTypeChanged,
-                tagPrefix = "palette",
+            LabeledSlider(
+                label = "Overlay opacity",
+                displayValue = "${(overlayOpacity * 100).toInt()}%",
+                value = overlayOpacity,
+                range = 0.1f..0.9f,
+                onValueChange = onOverlayOpacityChanged,
             )
         }
     }
 }
 
-private fun compassDirection(azimuth: Float): String {
+@Composable
+fun SurveyGridCard(gridSpacing: Float, onGridSpacingChanged: (Float) -> Unit) {
+    ControlCard("Survey grid") {
+        OptionGrid(
+            options = SurveyGridOptions,
+            selected = gridSpacing.toInt(),
+            onSelected = { onGridSpacingChanged(it.toFloat()) },
+            tagPrefix = "grid",
+        )
+    }
+}
+
+@Composable
+fun LightingCard(
+    sunAzimuth: Float,
+    onSunAzimuthChanged: (Float) -> Unit,
+    sunAltitude: Float,
+    onSunAltitudeChanged: (Float) -> Unit,
+    contrast: Float,
+    onContrastChanged: (Float) -> Unit,
+    zScale: Float,
+    onZScaleChanged: (Float) -> Unit,
+) {
+    ControlCard("Lighting and relief") {
+        Text(
+            "Light direction: ${compassDirection(sunAzimuth)}",
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        OptionGrid(
+            options = SunDirectionOptions,
+            selected = ((sunAzimuth / 45f).roundToInt() * 45).mod(360),
+            onSelected = { onSunAzimuthChanged(it.toFloat()) },
+            tagPrefix = "sun_direction",
+        )
+        LabeledSlider(
+            label = "Sun azimuth",
+            displayValue = "${sunAzimuth.toInt()}°",
+            value = sunAzimuth,
+            range = 0f..360f,
+            onValueChange = onSunAzimuthChanged,
+            modifier = Modifier.testTag("sun_azimuth_slider"),
+        )
+        LabeledSlider(
+            label = "Sun altitude",
+            displayValue = "${sunAltitude.toInt()}°",
+            value = sunAltitude,
+            range = 5f..85f,
+            onValueChange = onSunAltitudeChanged,
+            modifier = Modifier.testTag("sun_altitude_slider"),
+        )
+        LabeledSlider(
+            label = "Shadow contrast",
+            displayValue = String.format(Locale.US, "%.1f×", contrast),
+            value = contrast,
+            range = 1f..2.5f,
+            onValueChange = onContrastChanged,
+            modifier = Modifier.testTag("contrast_slider"),
+        )
+        LabeledSlider(
+            label = "Vertical exaggeration",
+            displayValue = String.format(Locale.US, "%.1f×", zScale),
+            value = zScale,
+            range = 0.5f..4f,
+            onValueChange = onZScaleChanged,
+            modifier = Modifier.testTag("z_scale_slider"),
+        )
+    }
+}
+
+@Composable
+fun FeatureScreeningCard(
+    featureScaleMeters: Float,
+    onFeatureScaleChanged: (Float) -> Unit,
+    analysisSensitivity: Float,
+    onAnalysisSensitivityChanged: (Float) -> Unit,
+    contourIntervalMeters: Float,
+    onContourIntervalChanged: (Float) -> Unit,
+) {
+    ControlCard("Feature screening") {
+        LabeledSlider(
+            label = "Feature scale",
+            displayValue = String.format(Locale.US, "%.1f m", featureScaleMeters),
+            value = featureScaleMeters,
+            range = 1f..40f,
+            onValueChange = onFeatureScaleChanged,
+            modifier = Modifier.testTag("feature_scale_slider"),
+        )
+        LabeledSlider(
+            label = "Candidate sensitivity",
+            displayValue = String.format(Locale.US, "%.1f×", analysisSensitivity),
+            value = analysisSensitivity,
+            range = 0.4f..2.5f,
+            onValueChange = onAnalysisSensitivityChanged,
+            modifier = Modifier.testTag("analysis_sensitivity_slider"),
+        )
+        LabeledSlider(
+            label = "Measured contours",
+            displayValue = contourLabel(contourIntervalMeters),
+            value = contourIntervalMeters,
+            range = 0f..5f,
+            onValueChange = onContourIntervalChanged,
+            modifier = Modifier.testTag("contour_interval_slider"),
+        )
+        Text(
+            "Local relief, curvature, and disturbance views flag terrain shapes for review; they do not identify or date a foundation by themselves.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+fun LiveOverlaysCard(
+    heatmapEnabled: Boolean,
+    onHeatmapEnabledChanged: (Boolean) -> Unit,
+    basemapEnabled: Boolean,
+    onBasemapEnabledChanged: (Boolean) -> Unit,
+    basemapOpacity: Float,
+    onBasemapOpacityChanged: (Float) -> Unit,
+    basemapStatus: String?,
+) {
+    ControlCard("Live overlays") {
+        Text(
+            "Dig priority heatmap",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        OptionGrid(
+            options = listOf(
+                ControlOption(0, "Off", "No density layer"),
+                ControlOption(1, "On", "Unexcavated finds"),
+            ),
+            selected = if (heatmapEnabled) 1 else 0,
+            onSelected = { onHeatmapEnabledChanged(it == 1) },
+            tagPrefix = "heatmap",
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Offline basemap",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        OptionGrid(
+            options = listOf(
+                ControlOption(0, "Off", "Terrain only"),
+                ControlOption(1, "On", "OpenStreetMap tiles"),
+            ),
+            selected = if (basemapEnabled) 1 else 0,
+            onSelected = { onBasemapEnabledChanged(it == 1) },
+            tagPrefix = "basemap",
+        )
+        if (basemapEnabled) {
+            Spacer(Modifier.height(4.dp))
+            LabeledSlider(
+                label = "Basemap opacity",
+                displayValue = "${(basemapOpacity * 100).toInt()}%",
+                value = basemapOpacity,
+                range = 0.1f..1f,
+                onValueChange = onBasemapOpacityChanged,
+                modifier = Modifier.testTag("basemap_opacity_slider"),
+            )
+            basemapStatus?.let {
+                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            }
+            Text(
+                "Tiles are fetched once per site and cached on-device — later views work offline.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+fun ElevationPaletteCard(paletteType: Int, onPaletteTypeChanged: (Int) -> Unit) {
+    ControlCard("Elevation palette") {
+        OptionGrid(
+            options = listOf(
+                ControlOption(0, "Clay", "Neutral relief"),
+                ControlOption(1, "Copper", "Warm LiDAR tint"),
+                ControlOption(2, "Terrain", "Hypsometric colors"),
+            ),
+            selected = paletteType,
+            onSelected = onPaletteTypeChanged,
+            tagPrefix = "palette",
+        )
+    }
+}
+
+internal fun contourLabel(intervalMeters: Float): String =
+    if (intervalMeters < 0.05f) "Off" else String.format(Locale.US, "%.2f m", intervalMeters)
+
+internal fun compassDirection(azimuth: Float): String {
     val directions = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
     val normalized = ((azimuth % 360f) + 360f) % 360f
     return directions[((normalized / 45f).roundToInt()).mod(directions.size)]
 }
-
-private data class Option(val value: Int, val title: String, val subtitle: String)
 
 @Composable
 private fun ControlCard(title: String, content: @Composable ColumnScope.() -> Unit) {
@@ -339,7 +451,7 @@ private fun ControlCard(title: String, content: @Composable ColumnScope.() -> Un
 
 @Composable
 private fun OptionGrid(
-    options: List<Option>,
+    options: List<ControlOption>,
     selected: Int,
     onSelected: (Int) -> Unit,
     tagPrefix: String,
