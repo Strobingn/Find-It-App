@@ -12,11 +12,11 @@ This audit checks the production UI and persisted state paths against the Phase 
 | AI dig-location markers | AI candidates are labeled on the terrain, can be written as saved finds, and carry both dataset and terrain keys. Saved markers are filtered to the active terrain source. | Implemented; debug verified | Add process-restart and migration instrumented tests. |
 | Synchronized layer comparison | Compare renders two terrain layers from one grid with a shared zoom and pan state and supports manual visible-area refinement. | Implemented; debug verified | Add screenshot and gesture synchronization regression tests. |
 | Multi-dataset candidate comparison | Analyzed dataset snapshots persist and can be compared by geographic proximity. | Implemented; unit coverage present | Validate with two independently imported, overlapping georeferenced datasets. |
-| NYS/USGS tile discovery | The Import tab provides coordinate lookup through the USGS/NYS catalog and downloads an exact LAZ tile with progress and cancellation. | Partial | Replace point lookup with reusable rectangle/polygon/radius area selection, size estimate, multi-tile queue, retry, grouping, and mosaic open. |
+| NYS/USGS tile discovery | The Import tab provides coordinate lookup plus reusable rectangle, radius, and polygon selection. Each shape resolves its safe enclosing query envelope, filters returned tile footprints against the exact shape, shows the result geometry, estimates storage, queues downloads, retries failed files, and stores the selection with the mosaic. | Partial; unit verified | Make the selector directly reachable from every import path and add instrumented area-selection coverage. |
 | GPX/KML survey workflow | The Import tab securely parses GPX waypoints, routes, and tracks plus KML points, lines, and polygons. Layers persist per terrain source, render on georeferenced terrain and Google Maps, and can be framed or deleted. | Implemented; emulator and tablet build verified | Add instrumented document-picker, Room migration, and round-trip export coverage. |
 | Offline basemap regions | The Import tab estimates and downloads named USGS Topo regions for the active georeferenced terrain. Region state and progress persist per terrain source; missing tiles can be retried, active work canceled, stored size inspected, and completed regions reopened without a network. | Implemented; airplane-mode emulator and tablet UI verified | Add multi-region queue instrumentation and larger-area cancellation fixtures. |
 | Image and report export | Finds exports the complete source terrain footprint as an annotated PNG and a schema-versioned PDF field report. Compare exports both selected derived layers in aspect-correct side-by-side panes. | Implemented; emulator and external PDF render verified | Add instrumented DocumentsUI coverage and larger imported-LAZ export fixtures. |
-| Multi-tile projects | Individual downloaded tiles persist and reopen. Logical project grouping, source-preserving mosaics, duplicate prevention, and partial-project recovery are incomplete. | Partial | Implement the Phase 2 tile/project schema before adding mosaic rendering. |
+| Multi-tile projects | A logical project is persisted before the first transfer. Every source keeps URL, local filename, and bounds; existing source-URL matches are reused; completed members update the manifest; paused or failed projects show ready-count and resume controls; complete projects reopen as one georeferenced mosaic. | Implemented; unit verified | Add cancellation/restart instrumentation and release-build device validation with a real multi-tile area. |
 | Release validation | Debug unit tests and APK builds pass, and current workflows run on the emulator and Samsung tablet. | Partial | Add release build, instrumented suite, migration fixtures, and external GIS export checks to the release gate. |
 
 ## First completed increment
@@ -104,10 +104,9 @@ Validation:
 
 ## Next implementation target
 
-Stabilize multi-tile projects:
+Make the public LiDAR area selector reachable from every terrain-import path:
 
-1. Define logical project and source-preserving tile membership records.
-2. Reuse existing tiles and prevent duplicate project downloads.
-3. Track partial download and recovery state per project.
-4. Open grouped tiles as one logical project before introducing seamless mosaic rendering.
-5. Add migration, reopen, and interrupted-project fixtures.
+1. Route compatible URL and document-import entry points into the same selector without losing their existing direct-file workflows.
+2. Add instrumented area-selection, cancellation, resume, and mosaic-reopening coverage.
+3. Validate a real multi-tile area through the release build on device.
+4. Add migration, reopen, and interrupted-project fixtures.

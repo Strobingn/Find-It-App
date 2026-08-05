@@ -118,4 +118,27 @@ class LazDatasetStoreSourceIndexTest {
 
         assertNull(store.fileForSource("https://example.org/a/tile.laz"))
     }
+
+    @Test
+    fun renamePreservesSourceReuseAcrossStoreInstances() {
+        val directory = folder.newFolder("renamed")
+        val first = LazDatasetStore(directory)
+        val original = File(directory, "tile.laz").apply { writeText("LASF payload") }
+        first.recordSource("https://example.org/a/tile.laz", original)
+
+        val renamed = first.rename(first.list().single(), "my hunting area")
+
+        assertEquals("my hunting area.laz", renamed.file.name)
+        assertEquals(renamed.file, LazDatasetStore(directory).fileForSource("https://example.org/a/tile.laz"))
+    }
+
+    @Test
+    fun deleteRemovesSourceReuseAssociation() {
+        val store = store()
+        val file = store.put("tile.laz")
+        store.recordSource("https://example.org/a/tile.laz", file)
+
+        assertTrue(store.delete(store.list().single()))
+        assertNull(store.fileForSource("https://example.org/a/tile.laz"))
+    }
 }

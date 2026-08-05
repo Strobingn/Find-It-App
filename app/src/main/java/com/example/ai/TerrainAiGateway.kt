@@ -107,7 +107,7 @@ internal class TerrainAiGateway(context: Context) {
         }
 
         error(
-            "No cloud AI provider is configured. Add OPENAI_API_KEY for the primary provider and GEMINI_API_KEY for automatic fallback. Offline terrain analysis still works without either key.",
+            "No cloud AI provider is configured. Add a provider key under AI settings. Offline terrain analysis still works without either key.",
         )
     }
 

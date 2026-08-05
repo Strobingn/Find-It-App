@@ -43,7 +43,7 @@ internal class GeminiApiClient(
     ): String = withContext(Dispatchers.IO) {
         val apiKey = configuredApiKey(appContext)
         require(apiKey.isNotBlank()) {
-            "Gemini is not configured. Add a Gemini API key in the app or configure GEMINI_API_KEY for the build."
+            "Gemini is not configured. Add a valid Gemini API key under AI settings on this device."
         }
 
         val model = configuredModel()
@@ -156,39 +156,28 @@ internal class GeminiApiClient(
         private const val DEFAULT_MODEL = "gemini-3.5-flash"
         private const val LOG_TAG = "FindItGemini"
         private const val MAX_HISTORY_TURNS = 16
-        private const val PREFS_NAME = "gemini_credentials"
-        private const val PREF_API_KEY = "api_key"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         fun isConfigured(context: Context): Boolean = configuredApiKey(context).isNotBlank()
 
+        /** True when a key was saved on-device (excludes build-time [BuildConfig.GEMINI_API_KEY]). */
         fun hasDeviceApiKey(context: Context): Boolean =
-            sanitizeApiKey(
-                context.applicationContext
-                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .getString(PREF_API_KEY, null),
-            ).isNotBlank()
+            sanitizeApiKey(GeminiCredentialVault.read(context, ::sanitizeApiKey)).isNotBlank()
 
         fun saveDeviceApiKey(context: Context, value: String): Boolean {
             val cleaned = sanitizeApiKey(value)
             if (cleaned.isBlank()) return false
-            context.applicationContext
-                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(PREF_API_KEY, cleaned)
-                .apply()
-            return true
+            return GeminiCredentialVault.write(context, cleaned)
         }
 
         fun clearDeviceApiKey(context: Context) {
-            context.applicationContext
-                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .remove(PREF_API_KEY)
-                .apply()
+            GeminiCredentialVault.clear(context)
         }
 
         fun configuredModel(): String = BuildConfig.GEMINI_MODEL.trim().ifBlank { DEFAULT_MODEL }
+
+        /** Build-time key from local.properties / env (never logged). */
+        fun hasBuildConfigApiKey(): Boolean = sanitizeApiKey(BuildConfig.GEMINI_API_KEY).isNotBlank()
 
         @Suppress("DEPRECATION")
         private fun androidSigningCertificateSha1(context: Context): String? {
@@ -214,13 +203,14 @@ internal class GeminiApiClient(
                 .joinToString(separator = "") { byte -> "%02X".format(byte) }
         }
 
+        /**
+         * Device vault first (user can rotate without rebuild), then [BuildConfig.GEMINI_API_KEY]
+         * from local.properties / env `GEMINI_API_KEY`.
+         */
         private fun configuredApiKey(context: Context): String {
-            val deviceKey = context.applicationContext
-                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(PREF_API_KEY, null)
-            return sanitizeApiKey(deviceKey).ifBlank {
-                sanitizeApiKey(BuildConfig.GEMINI_API_KEY)
-            }
+            val deviceKey = sanitizeApiKey(GeminiCredentialVault.read(context, ::sanitizeApiKey))
+            if (deviceKey.isNotBlank()) return deviceKey
+            return sanitizeApiKey(BuildConfig.GEMINI_API_KEY)
         }
 
         private fun sanitizeApiKey(value: String?): String {

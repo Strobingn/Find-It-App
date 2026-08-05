@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,8 +27,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Construction
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
@@ -36,16 +41,21 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -70,21 +80,40 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.data.LogSignalResult
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
+import com.example.data.field.BoundaryVertex
 import com.example.data.field.BreadcrumbTrack
+import com.example.data.field.ExcavationLogEntry
 import com.example.data.field.FieldNavigation
+import com.example.data.field.FieldWaypoint
+import com.example.data.field.FindSiteClusterer
+import com.example.data.field.OptimizedFieldRoute
+import com.example.data.field.PendingSyncEntry
+import com.example.data.field.SurveyBoundary
+import com.example.data.field.TargetRouteOptimizer
 import com.example.data.field.VoiceNoteRecorder
 import com.example.data.field.createVoiceNoteFile
 import com.example.data.field.deleteVoiceNoteFile
+import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.trueToMagneticBearingDegrees
 import com.example.data.export.buildCsv
 import com.example.data.export.buildGeoJson
 import com.example.data.export.buildGpx
 import com.example.data.export.buildKml
+import com.example.data.export.buildKmz
+import com.example.data.export.buildShapefileZip
 import com.example.data.export.ProjectExportFiles
 import com.example.geospatial.MeasurementFormat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
+import kotlin.math.cos
 
 @Composable
 fun TargetLoggerPanel(
@@ -93,6 +122,9 @@ fun TargetLoggerPanel(
     currentSweepY: Float,
     breadcrumbTracks: List<BreadcrumbTrack>,
     isBreadcrumbRecording: Boolean,
+    excavationLogs: List<ExcavationLogEntry> = emptyList(),
+    surveyBoundaries: List<SurveyBoundary> = emptyList(),
+    pendingSyncEntries: List<PendingSyncEntry> = emptyList(),
     gpsEnabled: Boolean,
     deviceLatitude: Double?,
     deviceLongitude: Double?,
@@ -103,16 +135,34 @@ fun TargetLoggerPanel(
     onStartBreadcrumb: () -> Unit,
     onPauseBreadcrumb: () -> Unit,
     onClearBreadcrumbs: () -> Unit,
-    onLogSignal: () -> Unit,
+    /** Logs current sweep; pass force=true after user confirms a proximity warning. */
+    onLogSignal: (forceDespiteProximity: Boolean) -> LogSignalResult,
     onDeleteSignal: (TargetSignal) -> Unit,
     onUpdateSignal: (TargetSignal) -> Unit,
+    onToggleStarred: (TargetSignal) -> Unit = {},
     onClearAll: () -> Unit,
     onBuildProjectExport: suspend () -> ProjectExportFiles,
+    onBuildQgisBundle: suspend () -> ByteArray? = { null },
+    onBuildProjectArchive: suspend () -> ByteArray = { ByteArray(0) },
+    onRoutePlanned: (OptimizedFieldRoute?) -> Unit = {},
+    onSaveExcavationLog: (ExcavationLogEntry) -> Unit = {},
+    onDeleteExcavationLog: (ExcavationLogEntry) -> Unit = {},
+    onStartExcavationLog: (Long) -> ExcavationLogEntry? = { null },
+    onCreateBoundaryFromTrail: (BreadcrumbTrack) -> Unit = {},
+    onCreateBoundaryAroundGps: () -> Unit = {},
+    onDeleteSurveyBoundary: (SurveyBoundary) -> Unit = {},
+    onMarkSyncSent: (Long) -> Unit = {},
+    onClearSyncQueue: () -> Unit = {},
+    /** Ordered signal ids from AI NAV_TARGET tags (shared AiTerrainViewModel). */
+    pendingNavTargetIds: List<Long> = emptyList(),
+    /** Clears pending NAV_TARGET (and other structured tags) after navigation starts. */
+    onConsumeNavTargets: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var editingSignal by remember { mutableStateOf<TargetSignal?>(null) }
+    var digLogSignal by remember { mutableStateOf<TargetSignal?>(null) }
     var showExport by remember { mutableStateOf(false) }
     var showProjectExport by remember { mutableStateOf(false) }
     var isBuildingProjectExport by remember { mutableStateOf(false) }
@@ -123,8 +173,37 @@ fun TargetLoggerPanel(
     var pendingGpx by remember { mutableStateOf("") }
     var pendingKml by remember { mutableStateOf("") }
     var pendingGeoJson by remember { mutableStateOf("") }
+    var pendingBinaryBytes by remember { mutableStateOf(ByteArray(0)) }
+    var binarySuccessMessage by remember { mutableStateOf("") }
     var pendingProjectBytes by remember { mutableStateOf(ByteArray(0)) }
     var navigationTarget by remember { mutableStateOf<TargetSignal?>(null) }
+    var plannedRoute by remember { mutableStateOf<OptimizedFieldRoute?>(null) }
+    var pendingProximity by remember { mutableStateOf<LogSignalResult?>(null) }
+    var logMessage by remember { mutableStateOf<String?>(null) }
+    val routeStopCount = loggedSignals.count { it.latitude != null && it.longitude != null }
+
+    fun attemptLog(force: Boolean = false) {
+        val result = onLogSignal(force)
+        if (result.nearbyFind != null && !force) {
+            pendingProximity = result
+            return
+        }
+        pendingProximity = null
+        logMessage = "Logged ${result.signal.metalType.label}"
+    }
+    val planRoute: () -> Unit = {
+        scope.launch {
+            val waypoints = loggedSignals.mapNotNull { signal ->
+                val latitude = signal.latitude ?: return@mapNotNull null
+                val longitude = signal.longitude ?: return@mapNotNull null
+                FieldWaypoint(signal.id.toString(), latitude, longitude, signal.metalType.label)
+            }
+            plannedRoute = withContext(Dispatchers.Default) {
+                TargetRouteOptimizer.optimize(waypoints, deviceLatitude, deviceLongitude)
+            }
+            onRoutePlanned(plannedRoute)
+        }
+    }
 
     LaunchedEffect(navigationTarget?.id) {
         onSetCompassNavigationActive(navigationTarget != null)
@@ -132,6 +211,15 @@ fun TargetLoggerPanel(
     LaunchedEffect(loggedSignals) {
         navigationTarget?.let { active ->
             if (loggedSignals.none { it.id == active.id }) navigationTarget = null
+        }
+    }
+    // Apply first AI NAV_TARGET that matches a geo-located find; consume so it is not re-applied.
+    LaunchedEffect(pendingNavTargetIds, loggedSignals) {
+        val firstId = pendingNavTargetIds.firstOrNull() ?: return@LaunchedEffect
+        val match = loggedSignals.firstOrNull { it.id == firstId }
+        if (match != null && match.latitude != null && match.longitude != null) {
+            navigationTarget = match
+            onConsumeNavTargets()
         }
     }
     DisposableEffect(Unit) {
@@ -160,6 +248,17 @@ fun TargetLoggerPanel(
                 .onFailure { exportMessage = "Save failed: ${it.localizedMessage}" }
         }
     }
+    val projectZipLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { it.write(pendingProjectBytes) }
+                    ?: error("Could not open the selected destination")
+            }.onSuccess { exportMessage = "Archive saved" }
+                .onFailure { exportMessage = "Save failed: ${it.localizedMessage}" }
+        }
+    }
 
     val buildProjectExport: (Boolean) -> Unit = { pdf ->
         showProjectExport = false
@@ -174,6 +273,40 @@ fun TargetLoggerPanel(
                     } else {
                         terrainImageLauncher.launch("${files.fileStem}-terrain.png")
                     }
+                }
+                .onFailure { exportMessage = "Export failed: ${it.localizedMessage}" }
+            isBuildingProjectExport = false
+        }
+    }
+
+    val buildQgisBundleExport: () -> Unit = {
+        showProjectExport = false
+        isBuildingProjectExport = true
+        exportMessage = "Building QGIS bundle..."
+        scope.launch {
+            runCatching { onBuildQgisBundle() }
+                .onSuccess { bytes ->
+                    if (bytes == null) {
+                        exportMessage = "This terrain has no geographic bounds, so a GeoTIFF/QGIS bundle cannot be placed safely."
+                    } else {
+                        pendingProjectBytes = bytes
+                        projectZipLauncher.launch("find-it-qgis-bundle.zip")
+                    }
+                }
+                .onFailure { exportMessage = "Export failed: ${it.localizedMessage}" }
+            isBuildingProjectExport = false
+        }
+    }
+
+    val buildArchiveExport: () -> Unit = {
+        showProjectExport = false
+        isBuildingProjectExport = true
+        exportMessage = "Building portable project archive..."
+        scope.launch {
+            runCatching { onBuildProjectArchive() }
+                .onSuccess { bytes ->
+                    pendingProjectBytes = bytes
+                    projectZipLauncher.launch("find-it-project-archive.zip")
                 }
                 .onFailure { exportMessage = "Export failed: ${it.localizedMessage}" }
             isBuildingProjectExport = false
@@ -213,6 +346,28 @@ fun TargetLoggerPanel(
                 .onFailure { exportMessage = "Save failed: ${it.localizedMessage}" }
         }
     }
+    val shapefileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { it.write(pendingBinaryBytes) }
+                    ?: error("Could not open the selected destination")
+            }.onSuccess { exportMessage = binarySuccessMessage }
+                .onFailure { exportMessage = "Save failed: ${it.localizedMessage}" }
+        }
+    }
+    val kmzLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.google-earth.kmz"),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { it.write(pendingBinaryBytes) }
+                    ?: error("Could not open the selected destination")
+            }.onSuccess { exportMessage = binarySuccessMessage }
+                .onFailure { exportMessage = "Save failed: ${it.localizedMessage}" }
+        }
+    }
     val geoJsonLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/geo+json"),
     ) { uri ->
@@ -242,13 +397,48 @@ fun TargetLoggerPanel(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("ethics_dig_disclaimer"),
+                ) {
+                    Text(
+                        "Ethics: only detect on land you have permission to search. " +
+                            "LiDAR does not prove buried metal or ownership. " +
+                            "Verify laws and access before digging.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    )
+                }
+                if (pendingNavTargetIds.isNotEmpty()) {
+                    val matched = loggedSignals.any { it.id == pendingNavTargetIds.first() && it.latitude != null }
+                    if (!matched) {
+                        Text(
+                            "AI navigation pending: ${pendingNavTargetIds.size} stop(s) — " +
+                                "no matching geo-located find yet for id ${pendingNavTargetIds.first()}.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("ai_nav_pending_unmatched"),
+                        )
+                    }
+                }
                 Button(
-                    onClick = onLogSignal,
+                    onClick = { attemptLog(force = false) },
                     modifier = Modifier.fillMaxWidth().height(52.dp).testTag("log_signal_button"),
                 ) {
                     Icon(Icons.Default.AddLocationAlt, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Log current position")
+                }
+                logMessage?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
                 OutlinedButton(
                     onClick = { showProjectExport = true },
@@ -259,10 +449,40 @@ fun TargetLoggerPanel(
                     Spacer(Modifier.width(8.dp))
                     Text(if (isBuildingProjectExport) "Building export…" else "Export terrain and report")
                 }
+                OutlinedButton(
+                    onClick = planRoute,
+                    enabled = routeStopCount >= 2,
+                    modifier = Modifier.fillMaxWidth().height(52.dp).testTag("plan_route_button"),
+                ) {
+                    Icon(Icons.Default.Route, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Plan target route · $routeStopCount stops")
+                }
             }
         }
 
+        SitesCard(loggedSignals)
+
+        plannedRoute?.let { route ->
+            PlannedRouteCard(
+                route = route,
+                signals = loggedSignals,
+                onNavigate = { navigationTarget = it },
+                onDismiss = {
+                    plannedRoute = null
+                    onRoutePlanned(null)
+                },
+            )
+        }
+
         val recordedBreadcrumbPoints = breadcrumbTracks.sumOf { it.points.size }
+        val trailDistanceMeters = remember(breadcrumbTracks) {
+            breadcrumbTracks.sumOf { track ->
+                track.points.zipWithNext { a, b ->
+                    FieldNavigation.distanceMeters(a.latitude, a.longitude, b.latitude, b.longitude)
+                }.sum()
+            }
+        }
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             modifier = Modifier.fillMaxWidth(),
@@ -272,7 +492,11 @@ fun TargetLoggerPanel(
                 Text(
                     when {
                         isBreadcrumbRecording -> "Recording ${recordedBreadcrumbPoints} GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"}. Trails are saved with this terrain project."
-                        recordedBreadcrumbPoints > 0 -> "$recordedBreadcrumbPoints saved GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"} across ${breadcrumbTracks.size} trail${if (breadcrumbTracks.size == 1) "" else "s"}."
+                        recordedBreadcrumbPoints > 0 -> {
+                            val dist = MeasurementFormat.length(trailDistanceMeters.toFloat())
+                            "$recordedBreadcrumbPoints GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"} · " +
+                                "${breadcrumbTracks.size} trail${if (breadcrumbTracks.size == 1) "" else "s"} · $dist walked"
+                        }
                         else -> "Record a project-scoped path for offline field checking. GPS jitter is filtered automatically."
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -300,6 +524,24 @@ fun TargetLoggerPanel(
             }
         }
 
+        SurveyBoundaryCard(
+            boundaries = surveyBoundaries,
+            breadcrumbTracks = breadcrumbTracks,
+            hasGpsFix = deviceLatitude != null && deviceLongitude != null,
+            onCreateFromTrail = onCreateBoundaryFromTrail,
+            onCreateAroundGps = {
+                if (deviceLatitude == null || deviceLongitude == null) onEnableGps()
+                onCreateBoundaryAroundGps()
+            },
+            onDelete = onDeleteSurveyBoundary,
+        )
+
+        OfflineSyncQueueCard(
+            entries = pendingSyncEntries,
+            onMarkSent = onMarkSyncSent,
+            onClear = onClearSyncQueue,
+        )
+
         navigationTarget?.let { target ->
             FieldNavigationCard(
                 target = target,
@@ -321,6 +563,124 @@ fun TargetLoggerPanel(
             )
         }
 
+        var outcomeFilter by remember { mutableStateOf<VerificationOutcome?>(null) }
+        var typeFilter by remember { mutableStateOf<String?>(null) }
+        var starredOnly by remember { mutableStateOf(false) }
+        var sortMode by remember { mutableStateOf(FindSortMode.STARRED_FIRST) }
+        val typeOptions = remember(loggedSignals) {
+            loggedSignals.map { it.metalType.label }.distinct().sorted()
+        }
+        val filteredSignals = remember(
+            loggedSignals,
+            outcomeFilter,
+            typeFilter,
+            starredOnly,
+            sortMode,
+            deviceLatitude,
+            deviceLongitude,
+        ) {
+            val filtered = loggedSignals.filter { signal ->
+                (outcomeFilter == null || signal.outcome == outcomeFilter) &&
+                    (typeFilter == null || signal.metalType.label == typeFilter) &&
+                    (!starredOnly || signal.starred)
+            }
+            when (sortMode) {
+                FindSortMode.STARRED_FIRST -> filtered.sortedWith(
+                    compareByDescending<TargetSignal> { it.starred }
+                        .thenByDescending { it.timestamp },
+                )
+                FindSortMode.NEWEST -> filtered.sortedByDescending { it.timestamp }
+                FindSortMode.NEAREST -> {
+                    val lat = deviceLatitude
+                    val lon = deviceLongitude
+                    if (lat == null || lon == null) {
+                        filtered.sortedByDescending { it.timestamp }
+                    } else {
+                        filtered.sortedBy { signal ->
+                            val sLat = signal.latitude
+                            val sLon = signal.longitude
+                            if (sLat == null || sLon == null) {
+                                Double.MAX_VALUE
+                            } else {
+                                FieldNavigation.distanceMeters(lat, lon, sLat, sLon)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (loggedSignals.isNotEmpty()) {
+            Text("Filter finds", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                FilterChip(
+                    selected = starredOnly,
+                    onClick = { starredOnly = !starredOnly },
+                    label = { Text("Starred only") },
+                    leadingIcon = {
+                        Icon(
+                            if (starredOnly) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                    modifier = Modifier.testTag("filter_starred_only"),
+                )
+                FilterChip(
+                    selected = outcomeFilter == null,
+                    onClick = { outcomeFilter = null },
+                    label = { Text("All outcomes") },
+                )
+                VerificationOutcome.entries.forEach { outcome ->
+                    FilterChip(
+                        selected = outcomeFilter == outcome,
+                        onClick = { outcomeFilter = if (outcomeFilter == outcome) null else outcome },
+                        label = { Text(outcome.label) },
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    "Sort",
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                )
+                FindSortMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = sortMode == mode,
+                        onClick = { sortMode = mode },
+                        label = { Text(mode.label) },
+                        modifier = Modifier.testTag("sort_${mode.name}"),
+                    )
+                }
+            }
+            if (typeOptions.size > 1) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    FilterChip(
+                        selected = typeFilter == null,
+                        onClick = { typeFilter = null },
+                        label = { Text("All types") },
+                    )
+                    typeOptions.forEach { label ->
+                        FilterChip(
+                            selected = typeFilter == label,
+                            onClick = { typeFilter = if (typeFilter == label) null else label },
+                            label = { Text(label) },
+                        )
+                    }
+                }
+            }
+        }
+
         if (loggedSignals.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
@@ -331,6 +691,13 @@ fun TargetLoggerPanel(
                 )
             }
         } else {
+            if (filteredSignals.isEmpty()) {
+                Text(
+                    "No finds match the current filters.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { confirmClear = true },
@@ -354,7 +721,7 @@ fun TargetLoggerPanel(
                 modifier = Modifier.fillMaxWidth().weight(1f).testTag("logged_signals_list"),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(loggedSignals, key = { it.id }) { signal ->
+                items(filteredSignals, key = { it.id }) { signal ->
                     SignalCard(
                         signal = signal,
                         onEdit = { editingSignal = signal },
@@ -363,20 +730,85 @@ fun TargetLoggerPanel(
                             onDeleteSignal(signal)
                         },
                         onNavigate = { navigationTarget = signal },
+                        onToggleStarred = { onToggleStarred(signal) },
+                        digLogCount = excavationLogs.count { it.targetId == signal.id },
+                        onOpenDigLogs = { digLogSignal = signal },
+                        onShare = {
+                            val lat = signal.latitude
+                            val lon = signal.longitude
+                            val text = if (lat != null && lon != null) {
+                                "${signal.metalType.label}\n${String.format(Locale.US, "%.6f, %.6f", lat, lon)}\n" +
+                                    "Grid ${signal.gridX.toInt()}, ${signal.gridY.toInt()}"
+                            } else {
+                                "${signal.metalType.label}\nLocal grid ${signal.gridX.toInt()}, ${signal.gridY.toInt()}\n(no geographic coordinates)"
+                            }
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, text)
+                                putExtra(Intent.EXTRA_SUBJECT, "Find-It target")
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Share coordinates"))
+                        },
                     )
                 }
             }
         }
     }
 
+    pendingProximity?.let { pending ->
+        val nearby = pending.nearbyFind
+        val distance = pending.nearbyDistanceMeters
+        AlertDialog(
+            onDismissRequest = { pendingProximity = null },
+            title = { Text("Nearby find") },
+            text = {
+                Text(
+                    if (nearby != null && distance != null) {
+                        "Another find (${nearby.metalType.label}) is only " +
+                            "${MeasurementFormat.length(distance)} away. Log this position anyway?"
+                    } else {
+                        "Another find is nearby. Log this position anyway?"
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { attemptLog(force = true) },
+                    modifier = Modifier.testTag("proximity_log_anyway"),
+                ) {
+                    Text("Log anyway")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingProximity = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     editingSignal?.let { signal ->
         EditSignalDialog(
             signal = signal,
+            excavationLogs = excavationLogs.filter { it.targetId == signal.id },
             onDismiss = { editingSignal = null },
             onSave = {
                 onUpdateSignal(it)
                 editingSignal = null
             },
+            onSaveExcavationLog = onSaveExcavationLog,
+            onDeleteExcavationLog = onDeleteExcavationLog,
+            onStartExcavationLog = { onStartExcavationLog(signal.id) },
+        )
+    }
+
+    digLogSignal?.let { signal ->
+        ExcavationLogsDialog(
+            signal = signal,
+            logs = excavationLogs.filter { it.targetId == signal.id },
+            onSave = onSaveExcavationLog,
+            onDelete = onDeleteExcavationLog,
+            onDismiss = { digLogSignal = null },
         )
     }
 
@@ -422,6 +854,18 @@ fun TargetLoggerPanel(
                 showExport = false
                 geoJsonLauncher.launch("find-it-targets.geojson")
             },
+            onSaveShapefile = {
+                pendingBinaryBytes = buildShapefileZip(loggedSignals)
+                binarySuccessMessage = "Shapefile bundle saved"
+                showExport = false
+                shapefileLauncher.launch("find-it-targets-shp.zip")
+            },
+            onSaveKmz = {
+                pendingBinaryBytes = buildKmz(loggedSignals)
+                binarySuccessMessage = "KMZ saved"
+                showExport = false
+                kmzLauncher.launch("find-it-targets.kmz")
+            },
         )
     }
 
@@ -451,6 +895,16 @@ fun TargetLoggerPanel(
                     )
                     Text("PNG includes saved targets, survey layers, legend, scale, and source coordinates.")
                     Text("PDF includes the annotated map, metadata, target records, survey provenance, and integrity notes.")
+                    Text("QGIS bundle packs a GeoTIFF terrain raster, a shapefile of your targets, and a ready-to-open .qgs project.")
+                    Text("Portable archive moves the whole project (targets in every format, PNG, PDF, QGIS bundle) between devices as one zip.")
+                    TextButton(
+                        onClick = { buildQgisBundleExport() },
+                        modifier = Modifier.fillMaxWidth().testTag("export_qgis_bundle"),
+                    ) { Text("Save QGIS bundle (.zip)") }
+                    TextButton(
+                        onClick = { buildArchiveExport() },
+                        modifier = Modifier.fillMaxWidth().testTag("export_project_archive"),
+                    ) { Text("Save portable archive (.zip)") }
                 }
             },
             confirmButton = {
@@ -602,12 +1056,22 @@ private fun FieldNavigationCard(
 private fun formatNavigationDistance(meters: Double): String =
     "${MeasurementFormat.length(meters)} away"
 
+private enum class FindSortMode(val label: String) {
+    STARRED_FIRST("Starred first"),
+    NEWEST("Newest"),
+    NEAREST("Nearest"),
+}
+
 @Composable
 private fun SignalCard(
     signal: TargetSignal,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onNavigate: () -> Unit,
+    onToggleStarred: () -> Unit = {},
+    digLogCount: Int = 0,
+    onOpenDigLogs: () -> Unit = {},
+    onShare: () -> Unit = {},
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -624,7 +1088,18 @@ private fun SignalCard(
             )
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(signal.metalType.label, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(signal.metalType.label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
+                    if (signal.starred) {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            Icons.Default.Star,
+                            contentDescription = "Starred",
+                            tint = Color(0xFFFFC107),
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
                 val depth = signal.depthCm?.let { "$it cm" } ?: "depth unknown"
                 Text(
                     "Grid ${signal.gridX.toInt()}, ${signal.gridY.toInt()} · $depth · ${signal.signalStrength.toInt()}%",
@@ -672,6 +1147,23 @@ private fun SignalCard(
                         color = MaterialTheme.colorScheme.secondary,
                     )
                 }
+                if (digLogCount > 0) {
+                    Text(
+                        "$digLogCount dig log${if (digLogCount == 1) "" else "s"}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                }
+            }
+            IconButton(
+                onClick = onToggleStarred,
+                modifier = Modifier.size(48.dp).testTag("toggle_star_find"),
+            ) {
+                Icon(
+                    if (signal.starred) Icons.Default.Star else Icons.Default.StarBorder,
+                    contentDescription = if (signal.starred) "Unstar find" else "Star find",
+                    tint = if (signal.starred) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             IconButton(onClick = onEdit, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Edit, contentDescription = "Edit find")
@@ -683,6 +1175,12 @@ private fun SignalCard(
             ) {
                 Icon(Icons.Default.Navigation, contentDescription = "Navigate to find")
             }
+            IconButton(onClick = onOpenDigLogs, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Default.Construction, contentDescription = "Dig logs")
+            }
+            IconButton(onClick = onShare, modifier = Modifier.size(48.dp).testTag("share_find_coords")) {
+                Icon(Icons.Default.Share, contentDescription = "Share coordinates")
+            }
             IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Delete find")
             }
@@ -693,8 +1191,12 @@ private fun SignalCard(
 @Composable
 private fun EditSignalDialog(
     signal: TargetSignal,
+    excavationLogs: List<ExcavationLogEntry> = emptyList(),
     onDismiss: () -> Unit,
     onSave: (TargetSignal) -> Unit,
+    onSaveExcavationLog: (ExcavationLogEntry) -> Unit = {},
+    onDeleteExcavationLog: (ExcavationLogEntry) -> Unit = {},
+    onStartExcavationLog: () -> ExcavationLogEntry? = { null },
 ) {
     val context = LocalContext.current
     var photoUris by remember(signal.id) { mutableStateOf(signal.photoUris) }
@@ -962,6 +1464,12 @@ private fun EditSignalDialog(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
+                ExcavationLogSection(
+                    logs = excavationLogs,
+                    onStart = onStartExcavationLog,
+                    onSave = onSaveExcavationLog,
+                    onDelete = onDeleteExcavationLog,
+                )
             }
         },
         confirmButton = {
@@ -996,6 +1504,297 @@ private fun EditSignalDialog(
 }
 
 @Composable
+private fun ExcavationLogSection(
+    logs: List<ExcavationLogEntry>,
+    onStart: () -> ExcavationLogEntry?,
+    onSave: (ExcavationLogEntry) -> Unit,
+    onDelete: (ExcavationLogEntry) -> Unit,
+) {
+    var editingLog by remember { mutableStateOf<ExcavationLogEntry?>(null) }
+    var soilNotes by remember { mutableStateOf("") }
+    var findsDescription by remember { mutableStateOf("") }
+    var depthText by remember { mutableStateOf("") }
+    var findsCountText by remember { mutableStateOf("0") }
+
+    fun openEditor(entry: ExcavationLogEntry) {
+        editingLog = entry
+        soilNotes = entry.soilNotes
+        findsDescription = entry.findsDescription
+        depthText = entry.depthCentimeters?.toString().orEmpty()
+        findsCountText = entry.findsCount.toString()
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Excavation log", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "Record depth, soil, and finds for this target. Open digs survive app restarts offline.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                "Ethics: only dig where you have permission. LiDAR is not ownership or metal proof.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
+        if (logs.isEmpty()) {
+            Text(
+                "No dig logs yet for this target.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            logs.forEach { entry ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (entry.isComplete) "Completed dig" else "Open dig",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            buildString {
+                                entry.depthCentimeters?.let { append("${it} cm · ") }
+                                if (entry.findsCount > 0) append("${entry.findsCount} find(s)")
+                                else if (entry.soilNotes.isNotBlank()) append(entry.soilNotes.take(40))
+                                else append("No notes yet")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    TextButton(onClick = { openEditor(entry) }) { Text("Edit") }
+                    TextButton(onClick = { onDelete(entry) }) { Text("Delete") }
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = {
+                val started = onStart()
+                if (started != null) openEditor(started)
+            },
+            modifier = Modifier.fillMaxWidth().height(48.dp).testTag("start_excavation_log_button"),
+        ) {
+            Text("Start dig log")
+        }
+        editingLog?.let { entry ->
+            OutlinedTextField(
+                value = depthText,
+                onValueChange = { depthText = it.filter { ch -> ch.isDigit() }.take(4) },
+                label = { Text("Depth (cm)") },
+                modifier = Modifier.fillMaxWidth().testTag("excavation_depth_field"),
+            )
+            OutlinedTextField(
+                value = soilNotes,
+                onValueChange = { soilNotes = it.take(400) },
+                label = { Text("Soil notes") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = findsDescription,
+                onValueChange = { findsDescription = it.take(400) },
+                label = { Text("Finds description") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = findsCountText,
+                onValueChange = { findsCountText = it.filter { ch -> ch.isDigit() }.take(3) },
+                label = { Text("Find count") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = {
+                        val now = System.currentTimeMillis()
+                        val updated = entry.copy(
+                            depthCentimeters = depthText.toIntOrNull(),
+                            soilNotes = soilNotes.trim(),
+                            findsDescription = findsDescription.trim(),
+                            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                            updatedAtMillis = now,
+                        )
+                        onSave(updated)
+                        editingLog = null
+                    },
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("save_excavation_log_button"),
+                ) { Text("Save dig") }
+                OutlinedButton(
+                    onClick = {
+                        val now = System.currentTimeMillis()
+                        val completed = entry.copy(
+                            depthCentimeters = depthText.toIntOrNull(),
+                            soilNotes = soilNotes.trim(),
+                            findsDescription = findsDescription.trim(),
+                            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                            completedAtMillis = now,
+                            updatedAtMillis = now,
+                        )
+                        onSave(completed)
+                        editingLog = null
+                    },
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("complete_excavation_log_button"),
+                ) { Text("Complete dig") }
+            }
+            TextButton(onClick = { editingLog = null }) { Text("Close dig editor") }
+        }
+    }
+}
+
+@Composable
+private fun SurveyBoundaryCard(
+    boundaries: List<SurveyBoundary>,
+    breadcrumbTracks: List<BreadcrumbTrack>,
+    hasGpsFix: Boolean,
+    onCreateFromTrail: (BreadcrumbTrack) -> Unit,
+    onCreateAroundGps: () -> Unit,
+    onDelete: (SurveyBoundary) -> Unit,
+) {
+    val trailWithEnoughPoints = breadcrumbTracks.firstOrNull { it.points.size >= 3 }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth().testTag("survey_boundary_card"),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Survey boundary", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Keep field work inside a permitted search area. Create from a GPS trail (≥3 points) " +
+                    "or a 100 m box around your current fix.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (boundaries.isEmpty()) {
+                Text(
+                    "No boundaries on this project yet.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                boundaries.forEach { boundary ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(boundary.displayName, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "${boundary.vertices.size} vertices",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { onDelete(boundary) }) { Text("Delete") }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { trailWithEnoughPoints?.let(onCreateFromTrail) },
+                    enabled = trailWithEnoughPoints != null,
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("boundary_from_trail_button"),
+                ) { Text("From trail") }
+                OutlinedButton(
+                    onClick = onCreateAroundGps,
+                    enabled = hasGpsFix,
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("boundary_from_gps_button"),
+                ) { Text("Around GPS") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineSyncQueueCard(
+    entries: List<PendingSyncEntry>,
+    onMarkSent: (Long) -> Unit,
+    onClear: () -> Unit,
+) {
+    var confirmClear by remember { mutableStateOf(false) }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth().testTag("offline_sync_queue_card"),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Offline sync queue", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                if (entries.isEmpty()) {
+                    "Local field changes stay on-device. When a cloud endpoint is available (Phase 9), " +
+                        "queued upserts and deletes replay in order without duplicates."
+                } else {
+                    "${entries.size} change(s) waiting to sync. Oldest first; failed sends keep their attempt count."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            entries.take(5).forEach { entry ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "${entry.operation.name} · ${entry.entityType.name}",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        Text(
+                            buildString {
+                                append(entry.entityId.take(12))
+                                if (entry.attemptCount > 0) append(" · attempts ${entry.attemptCount}")
+                                entry.lastError?.let { append(" · $it") }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    TextButton(
+                        onClick = { onMarkSent(entry.id) },
+                        modifier = Modifier.testTag("sync_mark_sent_${entry.id}"),
+                    ) { Text("Sent") }
+                }
+            }
+            if (entries.size > 5) {
+                Text(
+                    "+${entries.size - 5} more queued…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (entries.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = { confirmClear = true },
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("clear_sync_queue_button"),
+                ) { Text("Clear queue") }
+            }
+        }
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Clear offline sync queue?") },
+            text = { Text("This drops ${entries.size} pending change(s) without delivering them.") },
+            confirmButton = {
+                TextButton(onClick = { confirmClear = false; onClear() }) { Text("Clear") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
 private fun ExportGisDialog(
     signals: List<TargetSignal>,
     onDismiss: () -> Unit,
@@ -1003,17 +1802,21 @@ private fun ExportGisDialog(
     onSaveGpx: () -> Unit,
     onSaveKml: () -> Unit,
     onSaveGeoJson: () -> Unit,
+    onSaveShapefile: () -> Unit,
+    onSaveKmz: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
     var format by remember { mutableStateOf(0) }
     val georeferenced = signals.count { it.latitude != null && it.longitude != null }
-    val labels = listOf("CSV", "GPX", "KML", "GeoJSON")
+    val labels = listOf("CSV", "GPX", "KML", "GeoJSON", "Shapefile", "KMZ")
     val content = remember(signals, format) {
         when (format) {
             0 -> buildCsv(signals)
             1 -> buildGpx(signals)
             2 -> buildKml(signals)
-            else -> buildGeoJson(signals)
+            3 -> buildGeoJson(signals)
+            4 -> "Binary shapefile bundle — .shp, .shx, and .dbf in one zip. Opens in QGIS and other GIS tools."
+            else -> "KMZ packages the KML export as a single compressed file for Google Earth."
         }
     }
     AlertDialog(
@@ -1045,6 +1848,7 @@ private fun ExportGisDialog(
                 )
                 OutlinedButton(
                     onClick = { clipboard.setText(AnnotatedString(content)) },
+                    enabled = format <= 3,
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                 ) {
                     Icon(Icons.Default.ContentCopy, contentDescription = null)
@@ -1059,7 +1863,9 @@ private fun ExportGisDialog(
                     0 -> onSaveCsv
                     1 -> onSaveGpx
                     2 -> onSaveKml
-                    else -> onSaveGeoJson
+                    3 -> onSaveGeoJson
+                    4 -> onSaveShapefile
+                    else -> onSaveKmz
                 },
                 enabled = format == 0 || georeferenced > 0,
             ) { Text("Save file") }
@@ -1067,3 +1873,391 @@ private fun ExportGisDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+
+/**
+ * Groups logged finds into proximity sites (see [FindSiteClusterer]) and summarizes each one:
+ * find count, dominant types, field-check outcomes, and centroid. Hidden until at least one
+ * find has real coordinates.
+ */
+@Composable
+private fun SitesCard(signals: List<TargetSignal>) {
+    val sites = remember(signals) { FindSiteClusterer.cluster(signals) }
+    if (sites.isEmpty()) return
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Detected sites", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Finds within 50 m of each other are grouped automatically. Mark outcomes on your finds to see which sites are producing.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            sites.take(8).forEach { site ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            "${site.label} — ${site.signals.size} find${if (site.signals.size == 1) "" else "s"}",
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            buildString {
+                                append(site.topTypes.take(2).joinToString(" · "))
+                                if (site.confirmedCount > 0) append(" · ${site.confirmedCount} confirmed")
+                                if (site.rejectedCount > 0) append(" · ${site.rejectedCount} rejected")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            String.format(Locale.US, "%.5f, %.5f", site.centerLatitude, site.centerLongitude),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            if (sites.size > 8) {
+                Text(
+                    "+${sites.size - 8} more site${if (sites.size - 8 == 1) "" else "s"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+
+/**
+ * The optimized walking order across all georeferenced targets, built by [TargetRouteOptimizer].
+ * Each stop shows its leg distance from the previous one; tapping a stop hands it to the
+ * compass navigation flow.
+ */
+@Composable
+private fun PlannedRouteCard(
+    route: OptimizedFieldRoute,
+    signals: List<TargetSignal>,
+    onNavigate: (TargetSignal) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val signalsById = remember(signals) { signals.associateBy { it.id.toString() } }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Planned route",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onDismiss) { Text("Clear") }
+            }
+            Text(
+                "Shortest walking order across ${route.waypoints.size} stops · " +
+                    "${MeasurementFormat.length(route.totalDistanceMeters.toFloat())} total · tap a stop to navigate to it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            var previous: FieldWaypoint? = null
+            route.waypoints.forEachIndexed { index, waypoint ->
+                val legMeters = previous?.let {
+                    FieldNavigation.distanceMeters(it.latitude, it.longitude, waypoint.latitude, waypoint.longitude)
+                }
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { signalsById[waypoint.id]?.let(onNavigate) },
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            "${index + 1}.",
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.width(30.dp),
+                        )
+                        Column {
+                            Text(waypoint.displayName, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (legMeters != null) {
+                                    "+${MeasurementFormat.length(legMeters.toFloat())} from previous stop"
+                                } else {
+                                    "First stop"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                previous = waypoint
+            }
+        }
+    }
+}
+
+@Composable
+private fun BoundariesCard(
+    boundaries: List<SurveyBoundary>,
+    terrainBounds: GeoSpatialLibrary.GeographicBounds?,
+    deviceLatitude: Double?,
+    deviceLongitude: Double?,
+    onCreateBoundary: (String, List<BoundaryVertex>) -> Unit,
+    onDeleteBoundary: (SurveyBoundary) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Survey boundaries", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Boundaries record the permitted search area for this project. They persist " +
+                    "offline and are queued for sync with the rest of your field data.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            boundaries.forEach { boundary ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(boundary.displayName, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${boundary.vertices.size} vertices",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = { onDeleteBoundary(boundary) }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete boundary")
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = {
+                        terrainBounds?.let { bounds ->
+                            onCreateBoundary(
+                                "Terrain extent",
+                                listOf(
+                                    BoundaryVertex(bounds.minLat, bounds.minLon),
+                                    BoundaryVertex(bounds.minLat, bounds.maxLon),
+                                    BoundaryVertex(bounds.maxLat, bounds.maxLon),
+                                    BoundaryVertex(bounds.maxLat, bounds.minLon),
+                                ),
+                            )
+                        }
+                    },
+                    enabled = terrainBounds != null,
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("boundary_from_terrain"),
+                ) {
+                    Text("From terrain extent")
+                }
+                OutlinedButton(
+                    onClick = {
+                        val lat = deviceLatitude
+                        val lon = deviceLongitude
+                        if (lat != null && lon != null) {
+                            onCreateBoundary("Around me (100 m)", boundarySquareAround(lat, lon, 50.0))
+                        }
+                    },
+                    enabled = deviceLatitude != null && deviceLongitude != null,
+                    modifier = Modifier.weight(1f).height(48.dp).testTag("boundary_around_me"),
+                ) {
+                    Text("Around me")
+                }
+            }
+        }
+    }
+}
+
+private fun boundarySquareAround(
+    latitude: Double,
+    longitude: Double,
+    radiusMeters: Double,
+): List<BoundaryVertex> {
+    val latDelta = radiusMeters / 111_320.0
+    val lonDelta = radiusMeters / (111_320.0 * cos(Math.toRadians(latitude)).coerceAtLeast(0.01))
+    return listOf(
+        BoundaryVertex(latitude - latDelta, longitude - lonDelta),
+        BoundaryVertex(latitude - latDelta, longitude + lonDelta),
+        BoundaryVertex(latitude + latDelta, longitude + lonDelta),
+        BoundaryVertex(latitude + latDelta, longitude - lonDelta),
+    )
+}
+
+@Composable
+private fun ExcavationLogsDialog(
+    signal: TargetSignal,
+    logs: List<ExcavationLogEntry>,
+    onSave: (ExcavationLogEntry) -> Unit,
+    onDelete: (ExcavationLogEntry) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var showForm by remember(signal.id) { mutableStateOf(false) }
+    var depthText by remember(signal.id) { mutableStateOf("") }
+    var soilNotes by remember(signal.id) { mutableStateOf("") }
+    var findsDescription by remember(signal.id) { mutableStateOf("") }
+    var findsCountText by remember(signal.id) { mutableStateOf("0") }
+    var markComplete by remember(signal.id) { mutableStateOf(true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Dig logs · ${signal.metalType.label}") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Ethics: only dig where you have permission. LiDAR is not ownership or metal proof.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+                if (logs.isEmpty() && !showForm) {
+                    Text(
+                        "No dig logs yet. Record each check or excavation so the full visit " +
+                            "history stays with this target, offline.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                logs.forEach { entry ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                formatDigLogTime(entry.startedAtMillis) +
+                                    if (entry.isComplete) " · complete" else " · open",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            val detail = buildString {
+                                entry.depthCentimeters?.let { append("Depth $it cm") }
+                                if (entry.findsCount > 0) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append("${entry.findsCount} find(s)")
+                                }
+                                if (entry.soilNotes.isNotBlank()) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append(entry.soilNotes)
+                                }
+                                if (entry.findsDescription.isNotBlank()) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append(entry.findsDescription)
+                                }
+                            }
+                            if (detail.isNotBlank()) {
+                                Text(
+                                    detail,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        IconButton(onClick = { onDelete(entry) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete dig log")
+                        }
+                    }
+                }
+                if (showForm) {
+                    OutlinedTextField(
+                        value = depthText,
+                        onValueChange = { depthText = it.filter(Char::isDigit).take(3) },
+                        label = { Text("Depth (cm)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("diglog_depth"),
+                    )
+                    OutlinedTextField(
+                        value = soilNotes,
+                        onValueChange = { soilNotes = it.take(200) },
+                        label = { Text("Soil notes") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = findsDescription,
+                        onValueChange = { findsDescription = it.take(200) },
+                        label = { Text("What came out") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = findsCountText,
+                        onValueChange = { findsCountText = it.filter(Char::isDigit).take(3) },
+                        label = { Text("Finds count") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FilterChip(
+                        selected = markComplete,
+                        onClick = { markComplete = !markComplete },
+                        label = { Text(if (markComplete) "Dig complete" else "Still open") },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (showForm) {
+                Button(
+                    onClick = {
+                        val now = System.currentTimeMillis()
+                        onSave(
+                            ExcavationLogEntry(
+                                id = UUID.randomUUID().toString(),
+                                targetId = signal.id,
+                                terrainKey = signal.terrainKey,
+                                startedAtMillis = now,
+                                completedAtMillis = if (markComplete) now else null,
+                                depthCentimeters = depthText.toIntOrNull(),
+                                soilNotes = soilNotes.trim(),
+                                findsDescription = findsDescription.trim(),
+                                findsCount = findsCountText.toIntOrNull() ?: 0,
+                                photoUris = emptyList(),
+                                voiceNoteUris = emptyList(),
+                                createdAtMillis = now,
+                                updatedAtMillis = now,
+                            ),
+                        )
+                        showForm = false
+                        depthText = ""
+                        soilNotes = ""
+                        findsDescription = ""
+                        findsCountText = "0"
+                    },
+                    modifier = Modifier.testTag("diglog_save"),
+                ) { Text("Save log") }
+            } else {
+                Button(
+                    onClick = { showForm = true },
+                    modifier = Modifier.testTag("diglog_new"),
+                ) { Text("New dig log") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { if (showForm) showForm = false else onDismiss() }) {
+                Text(if (showForm) "Back" else "Close")
+            }
+        },
+    )
+}
+
+private fun formatDigLogTime(millis: Long): String =
+    SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(millis))

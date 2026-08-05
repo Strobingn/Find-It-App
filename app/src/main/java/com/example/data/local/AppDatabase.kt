@@ -15,8 +15,13 @@ import androidx.room.migration.Migration
         OfflineBasemapRegionEntity::class,
         BreadcrumbTrackEntity::class,
         MosaicProjectEntity::class,
+        ExcavationLogEntity::class,
+        SurveyBoundaryEntity::class,
+        PendingSyncEntity::class,
+        HistoricMapEntity::class,
+        HistoricMapFeatureEntity::class,
     ],
-    version = 12,
+    version = 16,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -27,6 +32,11 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun offlineBasemapRegionDao(): OfflineBasemapRegionDao
     abstract fun breadcrumbTrackDao(): BreadcrumbTrackDao
     abstract fun mosaicProjectDao(): MosaicProjectDao
+    abstract fun excavationLogDao(): ExcavationLogDao
+    abstract fun surveyBoundaryDao(): SurveyBoundaryDao
+    abstract fun pendingSyncDao(): PendingSyncDao
+    abstract fun historicMapDao(): HistoricMapDao
+    abstract fun historicMapFeatureDao(): HistoricMapFeatureDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
@@ -169,6 +179,121 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE target_signals ADD COLUMN detectedFeatureType TEXT")
             }
         }
+        private val migration12To13 = object : Migration(12, 13) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                // Existing rows were written only after a successful mosaic build, so they are
+                // ready projects. New work records its progress before the first transfer.
+                db.execSQL(
+                    "ALTER TABLE mosaic_projects ADD COLUMN status TEXT NOT NULL DEFAULT 'READY'",
+                )
+                db.execSQL("ALTER TABLE mosaic_projects ADD COLUMN recoveryMessage TEXT")
+                db.execSQL("ALTER TABLE mosaic_projects ADD COLUMN areaSelectionDescription TEXT")
+            }
+        }
+        private val migration13To14 = object : Migration(13, 14) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS excavation_logs (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        targetId INTEGER NOT NULL,
+                        terrainKey TEXT,
+                        startedAtMillis INTEGER NOT NULL,
+                        completedAtMillis INTEGER,
+                        depthCentimeters INTEGER,
+                        soilNotes TEXT NOT NULL,
+                        findsDescription TEXT NOT NULL,
+                        findsCount INTEGER NOT NULL,
+                        photoUris TEXT NOT NULL DEFAULT '',
+                        voiceNoteUris TEXT NOT NULL DEFAULT '',
+                        createdAtMillis INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL
+                    )
+                """)
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_excavation_logs_targetId " +
+                        "ON excavation_logs (targetId)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_excavation_logs_terrainKey " +
+                        "ON excavation_logs (terrainKey)",
+                )
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS survey_boundaries (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        terrainKey TEXT NOT NULL,
+                        displayName TEXT NOT NULL,
+                        verticesText TEXT NOT NULL,
+                        createdAtMillis INTEGER NOT NULL
+                    )
+                """)
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_survey_boundaries_terrainKey " +
+                        "ON survey_boundaries (terrainKey)",
+                )
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS pending_sync (
+                        id INTEGER PRIMARY KEY NOT NULL,
+                        entityType TEXT NOT NULL,
+                        entityId TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        queuedAtMillis INTEGER NOT NULL,
+                        attemptCount INTEGER NOT NULL,
+                        lastError TEXT
+                    )
+                """)
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_pending_sync_entityType_entityId " +
+                        "ON pending_sync (entityType, entityId)",
+                )
+            }
+        }
+        private val migration14To15 = object : Migration(14, 15) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS historic_maps (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        terrainKey TEXT NOT NULL,
+                        displayName TEXT NOT NULL,
+                        imageUri TEXT NOT NULL,
+                        sourceAttribution TEXT NOT NULL,
+                        controlPointsText TEXT NOT NULL,
+                        transformText TEXT,
+                        rmseMeters REAL,
+                        maxResidualMeters REAL,
+                        confidence TEXT NOT NULL,
+                        createdAtMillis INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL
+                    )
+                """)
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_historic_maps_terrainKey " +
+                        "ON historic_maps (terrainKey)",
+                )
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS historic_map_features (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        mapId TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        pointsText TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        note TEXT NOT NULL,
+                        createdAtMillis INTEGER NOT NULL
+                    )
+                """)
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_historic_map_features_mapId " +
+                        "ON historic_map_features (mapId)",
+                )
+            }
+        }
+        private val migration15To16 = object : Migration(15, 16) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE target_signals ADD COLUMN starred INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
 
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
@@ -188,6 +313,10 @@ abstract class AppDatabase : RoomDatabase() {
                     migration9To10,
                     migration10To11,
                     migration11To12,
+                    migration12To13,
+                    migration13To14,
+                    migration14To15,
+                    migration15To16,
                 )
                 .build()
                 .also { instance = it }

@@ -140,7 +140,12 @@ class LazDownloadService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val builder = Notification.Builder(this, CHANNEL_ID)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
             .setContentTitle(task?.displayName?.takeIf { it.isNotBlank() } ?: "Downloading LiDAR tile")
             .setContentText(progressText(task, remaining))
             .setSmallIcon(android.R.drawable.stat_sys_download)
@@ -201,12 +206,7 @@ class LazDownloadService : Service() {
 
     private fun stopForegroundCompat() {
         runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
         }
     }
 
@@ -226,7 +226,11 @@ class LazDownloadService : Service() {
                 .setAction(ACTION_ENQUEUE)
                 .putExtra(EXTRA_URL, url)
                 .putExtra(EXTRA_NAME, displayName)
-            context.startForegroundService(intent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
         fun cancel(context: Context, url: String) {

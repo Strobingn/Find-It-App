@@ -23,10 +23,16 @@ fun usableSecret(value: String?): String {
 }
 
 val localProperties = Properties().apply {
-  val file = rootProject.file("local.properties")
-  if (file.isFile) file.inputStream().use(::load)
+  // Worktree builds may live under GROKV5/; also load the parent clone's local.properties.
+  listOf(
+    rootProject.file("local.properties"),
+    rootProject.rootDir.parentFile?.resolve("local.properties"),
+  ).filterNotNull().forEach { file ->
+    if (file.isFile) file.inputStream().use(::load)
+  }
 }
-val dotEnv = parseDotEnv(rootProject.file(".env"))
+val dotEnv = parseDotEnv(rootProject.file(".env")) +
+  parseDotEnv(rootProject.rootDir.parentFile?.resolve(".env") ?: File(""))
 fun projectSecret(name: String): String =
   usableSecret(System.getenv(name)).ifBlank {
     usableSecret(localProperties.getProperty(name)).ifBlank {
@@ -38,7 +44,8 @@ val openAiApiKey = projectSecret("OPENAI_API_KEY")
 val openAiModel = projectSecret("OPENAI_MODEL").ifBlank { "gpt-5.5" }
 val openAiBaseUrl = projectSecret("OPENAI_BASE_URL").ifBlank { "https://api.openai.com/v1/responses" }
 val openAiProxyToken = projectSecret("OPENAI_PROXY_TOKEN").ifBlank { projectSecret("PROXY_AUTH_TOKEN") }
-val geminiApiKey = projectSecret("GEMINI_API_KEY").ifBlank { projectSecret("GOOGLE_API_KEY") }
+// Gemini only — use GEMINI_API_KEY in local.properties / .env / CI secrets.
+val geminiApiKey = projectSecret("GEMINI_API_KEY")
 val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
 val mapsApiKey = projectSecret("MAPS_API_KEY")
 
@@ -173,5 +180,6 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   add("kapt", libs.androidx.room.compiler)
-    debugImplementation(libs.leakcanary)
+  // Studio LeakCanary registers LeakLauncherActivity as a second LAUNCHER entry, so the system
+  // resolver (and some home screens) open that instead of MainActivity. Omit it from device builds.
 }

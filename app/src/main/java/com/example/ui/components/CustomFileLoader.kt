@@ -43,7 +43,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
-import com.example.data.LazDataset
 import com.example.data.LazDatasetStore
 import com.example.data.LazDownloadManager
 import com.example.data.LazImportRepository
@@ -97,7 +96,7 @@ fun CustomFileLoader(
     var message by remember { mutableStateOf<String?>(null) }
     var isError by remember { mutableStateOf(false) }
     var groundMode by remember { mutableStateOf(GroundSurfaceMode.SOURCE_CLASSIFIED) }
-    var rasterResolution by remember { mutableStateOf(512) }
+    var rasterResolution by remember { mutableStateOf(LidarImportOptions.DEFAULT_OVERVIEW_RESOLUTION) }
     var smoothingRadius by remember { mutableStateOf(0) }
     var savedDatasets by remember { mutableStateOf(datasetStore.list()) }
     var cacheSizeBytes by remember { mutableStateOf(terrainCache.diskSizeBytes()) }
@@ -144,6 +143,20 @@ fun CustomFileLoader(
         message = "Import cancelled. Partial downloads were removed."
     }
 
+    fun openMessage(
+        displayName: String,
+        terrain: DemGenerator.TerrainLoadResult,
+        cacheLabel: String,
+        downloadedNow: Boolean,
+    ): String {
+        val size = "${terrain.grid.width}×${terrain.grid.height}"
+        return if (downloadedNow) {
+            "Saved $displayName and opened it at $size using $cacheLabel."
+        } else {
+            "Opened $displayName at $size using $cacheLabel."
+        }
+    }
+
     fun decodeStoredDataset(file: File, displayName: String, downloadedNow: Boolean = false) {
         workJob?.cancel()
         val options = importOptions()
@@ -155,36 +168,69 @@ fun CustomFileLoader(
 
         workJob = scope.launch {
             try {
+                val sourceUri = Uri.fromFile(file).toString()
+                val source = TerrainImportSource(
+                    uri = sourceUri,
+                    displayName = displayName,
+                    options = options,
+                )
+                var paintedEarly = false
                 val outcome = decodeCoordinator.decode(
                     file = file,
                     displayName = displayName,
                     options = options,
+                    onPreview = { preview ->
+                        // Hillshade can paint as soon as the elevation grid is ready.
+                        withContext(Dispatchers.Main.immediate) {
+                            TerrainPerformanceSession.publish(preview.gpuScene)
+                            if (!paintedEarly) {
+                                paintedEarly = true
+                                onCustomTerrainLoaded(preview.terrain, source)
+                                progressText = if (preview.isPreview) {
+                                    "Sparse preview visible — exact terrain decoding…"
+                                } else {
+                                    "Terrain visible — finishing GPU mesh…"
+                                }
+                            }
+                        }
+                    },
                     onStage = { stage ->
                         withContext(Dispatchers.Main.immediate) { progressText = stage }
                     },
                 )
                 TerrainPerformanceSession.publish(outcome.gpuScene)
                 cacheSizeBytes = terrainCache.diskSizeBytes()
-                val source = TerrainImportSource(
-                    uri = Uri.fromFile(file).toString(),
-                    displayName = displayName,
-                    options = options,
-                )
-                val cacheLabel = when (outcome.cacheHit) {
-                    LazTerrainCache.Hit.MEMORY -> "memory cache"
-                    LazTerrainCache.Hit.DISK -> "disk cache"
-                    LazTerrainCache.Hit.MISS -> "streamed point-cloud decode"
+                val cacheLabel = when {
+                    outcome.isPreview -> "full-res sparse preview"
+                    outcome.cacheHit == LazTerrainCache.Hit.MEMORY -> "memory cache"
+                    outcome.cacheHit == LazTerrainCache.Hit.DISK -> "disk cache"
+                    else -> "streamed point-cloud decode"
                 }
-                showResult(
-                    result = outcome.terrain,
-                    name = displayName,
-                    source = source,
-                    successMessage = if (downloadedNow) {
-                        "Saved $displayName, built LOD/GPU batches, and opened it using $cacheLabel."
-                    } else {
-                        "Opened $displayName using $cacheLabel; GPU 3D and zoom LOD are ready."
-                    },
-                )
+                if (!paintedEarly) {
+                    showResult(
+                        result = outcome.terrain,
+                        name = displayName,
+                        source = source,
+                        successMessage = openMessage(displayName, outcome.terrain, cacheLabel, downloadedNow),
+                    )
+                } else {
+                    resetWorkState()
+                    isError = false
+                    message = openMessage(displayName, outcome.terrain, cacheLabel, downloadedNow)
+                }
+                // Upgrade sparse preview → exact product without blocking first paint.
+                val exactJob = outcome.exactOutcome
+                if (exactJob != null) {
+                    scope.launch {
+                        val exact = runCatching { exactJob.await() }.getOrNull() ?: return@launch
+                        withContext(Dispatchers.Main.immediate) {
+                            TerrainPerformanceSession.publish(exact.gpuScene)
+                            onCustomTerrainLoaded(exact.terrain, source)
+                            message = "Exact terrain ready · ${exact.terrain.grid.width}×${exact.terrain.grid.height}"
+                            isError = false
+                        }
+                    }
+                }
             } catch (_: CancellationException) {
                 resetWorkState()
                 isError = false
@@ -195,11 +241,6 @@ fun CustomFileLoader(
                 message = error.localizedMessage ?: "Terrain decode failed"
             }
         }
-    }
-
-    fun renderSavedDataset(dataset: LazDataset) {
-        if (isWorking) return
-        decodeStoredDataset(dataset.file, dataset.displayName)
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -289,7 +330,11 @@ fun CustomFileLoader(
 
                 Text("Raster detail", style = MaterialTheme.typography.labelLarge)
                 ChoiceRow(
-                    options = listOf(256 to "Overview", 512 to "Balanced", 1_024 to "Fine"),
+                    options = listOf(
+                        1_024 to "Detailed",
+                        1_536 to "Ultra",
+                        2_048 to "Max refine",
+                    ),
                     selected = rasterResolution,
                     onSelected = { rasterResolution = it },
                 )
@@ -507,76 +552,12 @@ fun CustomFileLoader(
             }
         }
 
-        SavedDatasetLibrary(
-            datasets = savedDatasets,
-            enabled = !isWorking,
-            onOpen = ::renderSavedDataset,
-            onDelete = { dataset ->
-                terrainCache.remove(dataset.file)
-                if (datasetStore.delete(dataset)) {
-                    savedDatasets = datasetStore.list()
-                    TerrainPerformanceSession.clear()
-                    cacheSizeBytes = terrainCache.diskSizeBytes()
-                    message = "Deleted ${dataset.displayName}."
-                    isError = false
-                }
-            },
+        Text(
+            "Previous downloads live in the Previous LiDAR downloads card at the top of this Import tab — open, rename, or delete them there. New downloads and file copies are saved into that same folder.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag("saved_laz_dataset_list_hint"),
         )
-    }
-}
-
-@Composable
-private fun SavedDatasetLibrary(
-    datasets: List<LazDataset>,
-    enabled: Boolean,
-    onOpen: (LazDataset) -> Unit,
-    onDelete: (LazDataset) -> Unit,
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        modifier = Modifier.fillMaxWidth().testTag("saved_laz_dataset_list"),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Saved LAZ datasets", style = MaterialTheme.typography.titleMedium)
-            if (datasets.isEmpty()) {
-                Text(
-                    "Downloaded or copied LAZ/LAS files will appear here.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                datasets.forEach { dataset ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        OutlinedButton(
-                            onClick = { onOpen(dataset) },
-                            enabled = enabled,
-                            modifier = Modifier.weight(1f).height(60.dp),
-                        ) {
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalAlignment = Alignment.Start,
-                            ) {
-                                Text(dataset.displayName, maxLines = 1)
-                                Text(
-                                    "${formatBytes(dataset.sizeBytes)} · Tap to decode/render",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-                        TextButton(
-                            onClick = { onDelete(dataset) },
-                            enabled = enabled,
-                        ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete ${dataset.displayName}")
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

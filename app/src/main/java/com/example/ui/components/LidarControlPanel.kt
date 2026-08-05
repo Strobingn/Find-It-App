@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -11,12 +13,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
+import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -26,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import java.util.Locale
 import kotlin.math.roundToInt
 import com.example.geospatial.MeasurementFormat
+import com.example.geospatial.SolarPosition
 
 @Composable
 fun LidarControlPanel(
@@ -57,6 +67,8 @@ fun LidarControlPanel(
     onAnalysisSensitivityChanged: (Float) -> Unit,
     contourIntervalMeters: Float,
     onContourIntervalChanged: (Float) -> Unit,
+    /** Center latitude of the terrain extent; enables the real-sun lighting section. */
+    siteLatitude: Double? = null,
     heatmapEnabled: Boolean = false,
     onHeatmapEnabledChanged: (Boolean) -> Unit = {},
     basemapEnabled: Boolean = false,
@@ -199,6 +211,15 @@ fun LidarControlPanel(
                 onValueChange = onSunAltitudeChanged,
                 modifier = Modifier.testTag("sun_altitude_slider"),
             )
+            if (siteLatitude != null) {
+                RealSunSection(
+                    siteLatitude = siteLatitude,
+                    onApply = { azimuthDegrees, altitudeDegrees ->
+                        onSunAzimuthChanged(azimuthDegrees)
+                        onSunAltitudeChanged(altitudeDegrees)
+                    },
+                )
+            }
             LabeledSlider(
                 label = "Shadow contrast",
                 displayValue = String.format(Locale.US, "%.1f×", contrast),
@@ -401,4 +422,89 @@ private fun LabeledSlider(
         }
         Slider(value = value, onValueChange = onValueChange, valueRange = range)
     }
+}
+
+
+/**
+ * Real-sun preview: computes the actual solar position for the site's latitude at a chosen date
+ * and solar time, then applies it to the hillshade lighting on demand. Low sun raking across
+ * the terrain is what makes earthworks (cellar holes, walls, road beds) pop out.
+ */
+@Composable
+private fun RealSunSection(
+    siteLatitude: Double,
+    onApply: (Float, Float) -> Unit,
+) {
+    var dayOfYear by rememberSaveable { mutableFloatStateOf(172f) }
+    var hour by rememberSaveable { mutableFloatStateOf(9.5f) }
+    val position = SolarPosition.calculate(siteLatitude, dayOfYear.roundToInt(), hour)
+    HorizontalDivider()
+    Text("Real sun at this site", fontWeight = FontWeight.Bold)
+    Text(
+        "${SolarPosition.dateLabel(dayOfYear.roundToInt())} · ${solarHourLabel(hour)} → " +
+            "${position.azimuthDegrees.toInt()}° ${compassDirection(position.azimuthDegrees)} · " +
+            "${position.altitudeDegrees.toInt()}° high",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (position.isAboveHorizon) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.error
+        },
+    )
+    LabeledSlider(
+        label = "Date",
+        displayValue = SolarPosition.dateLabel(dayOfYear.roundToInt()),
+        value = dayOfYear,
+        range = 1f..365f,
+        onValueChange = { dayOfYear = it },
+        modifier = Modifier.testTag("solar_day_slider"),
+    )
+    LabeledSlider(
+        label = "Solar time",
+        displayValue = solarHourLabel(hour),
+        value = hour,
+        range = 4f..22f,
+        onValueChange = { hour = it },
+        modifier = Modifier.testTag("solar_hour_slider"),
+    )
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+    ) {
+        listOf(
+            Triple("Winter AM", 355f, 9.5f),
+            Triple("Winter noon", 355f, 12f),
+            Triple("Summer AM", 172f, 9.5f),
+            Triple("Equinox noon", 80f, 12f),
+        ).forEach { (label, day, presetHour) ->
+            FilterChip(
+                selected = dayOfYear == day && hour == presetHour,
+                onClick = {
+                    dayOfYear = day
+                    hour = presetHour
+                },
+                label = { Text(label) },
+            )
+        }
+    }
+    Button(
+        onClick = { onApply(position.azimuthDegrees, position.altitudeDegrees) },
+        enabled = position.altitudeDegrees >= 5f,
+        modifier = Modifier.fillMaxWidth().testTag("apply_solar_lighting_button"),
+    ) {
+        Text("Apply this sunlight")
+    }
+    if (!position.isAboveHorizon) {
+        Text(
+            "The sun is below the horizon at this date and time.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+}
+
+private fun solarHourLabel(hour: Float): String {
+    val wholeHour = hour.toInt()
+    val minutes = ((hour - wholeHour) * 60f).roundToInt()
+    return String.format(Locale.US, "%d:%02d", wholeHour, minutes)
 }

@@ -12,13 +12,21 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -45,15 +53,19 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.util.Locale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ai.TerrainVisionSession
+import com.example.analysis.TerrainViewshed
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.data.TerrainPerformanceSession
@@ -99,11 +111,15 @@ fun LidarMapCanvas(
     showSurveyCursor: Boolean = true,
     showCoordinateHud: Boolean = true,
     onViewportChanged: (NormalizedRasterBounds, Float, Float, Float) -> Unit = { _, _, _, _ -> },
+    /** Reports how far the current raster is being stretched (screen px per raster px). */
+    onViewportStretch: (NormalizedRasterBounds, Float) -> Unit = { _, _ -> },
     initialZoom: Float = 1f,
     initialPanX: Float = 0f,
     initialPanY: Float = 0f,
     viewportRestoreToken: Int = 0,
     showHeatmap: Boolean = false,
+    /** Binned HOMESITE_BINS x HOMESITE_BINS 0..1 homesite probabilities; null hides the overlay. */
+    homesiteCells: FloatArray? = null,
     basemapBitmap: Bitmap? = null,
     showBasemap: Boolean = false,
     basemapOpacity: Float = 0.6f,
@@ -116,6 +132,9 @@ fun LidarMapCanvas(
     profileStartPoint: Pair<Float, Float>? = null,
     profileEndPoint: Pair<Float, Float>? = null,
     onInspectPosition: ((Float, Float) -> Unit)? = null,
+    viewshed: TerrainViewshed? = null,
+    viewshedGridWidth: Int = 0,
+    viewshedGridHeight: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     val imageBitmap = remember(bitmap) {
@@ -130,6 +149,39 @@ fun LidarMapCanvas(
     }
     val heatmapCells = remember(loggedSignals, showHeatmap) {
         if (showHeatmap) computeDigPriorityHeatmap(loggedSignals, HEATMAP_BINS) else null
+    }
+    // Binned viewshed overlay: -1 = no grid data, 0 = analyzed but blocked, 1 = visible.
+    val viewshedBins = remember(viewshed, viewshedGridWidth, viewshedGridHeight) {
+        val shed = viewshed ?: return@remember null
+        if (viewshedGridWidth <= 0 || viewshedGridHeight <= 0) return@remember null
+        if (shed.visibility.isEmpty()) return@remember null
+        val bins = IntArray(VIEWSHED_BINS * VIEWSHED_BINS) { -1 }
+        for (binRow in 0 until VIEWSHED_BINS) {
+            val y0 = binRow * viewshedGridHeight / VIEWSHED_BINS
+            val y1 = ((binRow + 1) * viewshedGridHeight / VIEWSHED_BINS).coerceAtLeast(y0 + 1)
+            for (binCol in 0 until VIEWSHED_BINS) {
+                val x0 = binCol * viewshedGridWidth / VIEWSHED_BINS
+                val x1 = ((binCol + 1) * viewshedGridWidth / VIEWSHED_BINS).coerceAtLeast(x0 + 1)
+                var anyCell = false
+                var anyVisible = false
+                for (y in y0 until y1.coerceAtMost(viewshedGridHeight)) {
+                    val rowOffset = y * viewshedGridWidth
+                    for (x in x0 until x1.coerceAtMost(viewshedGridWidth)) {
+                        val index = rowOffset + x
+                        if (index < shed.visibility.size) {
+                            anyCell = true
+                            if (shed.visibility[index]) anyVisible = true
+                        }
+                    }
+                }
+                bins[binRow * VIEWSHED_BINS + binCol] = when {
+                    anyVisible -> 1
+                    anyCell -> 0
+                    else -> -1
+                }
+            }
+        }
+        bins
     }
     val surveyGeometries = remember(surveyFeatures, geoMetadata) {
         surveyFeatures.mapNotNull { feature ->
@@ -210,6 +262,7 @@ fun LidarMapCanvas(
                 ).sanitized()
                 TerrainVisionSession.publish(sourceBitmap, bounds, currentZoom)
                 onViewportChanged(bounds, currentZoom, currentPan.x, currentPan.y)
+                onViewportStretch(bounds, fit * currentZoom)
             }
     }
 
@@ -359,6 +412,51 @@ fun LidarMapCanvas(
                             )
                         }
                     }
+                }
+                if (homesiteCells != null) {
+                    val cellWidth = displayWidth / HOMESITE_BINS
+                    val cellHeight = displayHeight / HOMESITE_BINS
+                    for (row in 0 until HOMESITE_BINS) {
+                        for (col in 0 until HOMESITE_BINS) {
+                            val intensity = homesiteCells[row * HOMESITE_BINS + col]
+                            if (intensity <= 0.22f) continue
+                            drawRect(
+                                color = homesiteColor(intensity),
+                                topLeft = Offset(imageLeft + col * cellWidth, imageTop + row * cellHeight),
+                                size = androidx.compose.ui.geometry.Size(cellWidth, cellHeight),
+                                alpha = 0.10f + intensity * 0.45f,
+                            )
+                        }
+                    }
+                }
+                if (viewshedBins != null && viewshed != null) {
+                    val cellWidth = displayWidth / VIEWSHED_BINS
+                    val cellHeight = displayHeight / VIEWSHED_BINS
+                    for (row in 0 until VIEWSHED_BINS) {
+                        for (col in 0 until VIEWSHED_BINS) {
+                            when (viewshedBins[row * VIEWSHED_BINS + col]) {
+                                0 -> drawRect(
+                                    color = Color(0xFF303A46),
+                                    topLeft = Offset(imageLeft + col * cellWidth, imageTop + row * cellHeight),
+                                    size = androidx.compose.ui.geometry.Size(cellWidth, cellHeight),
+                                    alpha = 0.35f,
+                                )
+                                1 -> drawRect(
+                                    color = Color(0xFF2ECC71),
+                                    topLeft = Offset(imageLeft + col * cellWidth, imageTop + row * cellHeight),
+                                    size = androidx.compose.ui.geometry.Size(cellWidth, cellHeight),
+                                    alpha = 0.45f,
+                                )
+                            }
+                        }
+                    }
+                    val observer = Offset(
+                        imageLeft + (viewshed.observerXPercent.coerceIn(0f, 100f) / 100f) * displayWidth,
+                        imageTop + (viewshed.observerYPercent.coerceIn(0f, 100f) / 100f) * displayHeight,
+                    )
+                    drawCircle(color = Color.Black, radius = 12f, center = observer, alpha = 0.65f)
+                    drawCircle(color = Color(0xFF29B6F6), radius = 8f, center = observer)
+                    drawCircle(color = Color.White, radius = 8f, center = observer, style = Stroke(2f))
                 }
                 if (gridSpacing >= 1f) {
                     // gridSpacing is a real-world spacing in feet (e.g. 3 ft or 10 ft survey
@@ -570,7 +668,20 @@ fun LidarMapCanvas(
             }
 
             if (showCoordinateHud) {
-                Column(
+                val clipboard = LocalClipboardManager.current
+                var copiedFlash by remember { mutableStateOf(false) }
+                LaunchedEffect(copiedFlash) {
+                    if (copiedFlash) {
+                        kotlinx.coroutines.delay(1400)
+                        copiedFlash = false
+                    }
+                }
+                val decimalText = if (currentLat != null && currentLon != null) {
+                    String.format(Locale.US, "%.6f, %.6f", currentLat, currentLon)
+                } else {
+                    "grid ${sweepX.toInt()}, ${sweepY.toInt()}"
+                }
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomCenter)
@@ -578,34 +689,65 @@ fun LidarMapCanvas(
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xE60D0E12))
                         .border(0.5.dp, Color(0xFF2C2E35), RoundedCornerShape(8.dp))
-                        .padding(8.dp),
+                        .clickable {
+                            clipboard.setText(AnnotatedString(decimalText))
+                            copiedFlash = true
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .testTag("coordinate_hud"),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (currentLat != null && currentLon != null) {
-                        val utm = runCatching { GeoSpatialLibrary.geographicToUtm(currentLat, currentLon) }.getOrNull()
-                        Text(
-                            text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        if (utm != null) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        if (currentLat != null && currentLon != null) {
+                            val utm = runCatching {
+                                GeoSpatialLibrary.geographicToUtm(currentLat, currentLon)
+                            }.getOrNull()
                             Text(
-                                text = "UTM ${utm.zone}${utm.hemisphere}  E ${"%.1f".format(utm.easting)} m  N ${"%.1f".format(utm.northing)} m",
-                                color = Color(0xFF64B5F6),
-                                fontSize = 10.sp,
+                                text = "${GeoSpatialLibrary.formatDms(currentLat, true)}  ·  ${GeoSpatialLibrary.formatDms(currentLon, false)}",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = decimalText,
+                                color = Color(0xFFB0BEC5),
+                                fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
                             )
+                            if (utm != null) {
+                                Text(
+                                    text = "UTM ${utm.zone}${utm.hemisphere}  E ${"%.1f".format(utm.easting)} m  N ${"%.1f".format(utm.northing)} m",
+                                    color = Color(0xFF64B5F6),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                            )
                         }
-                    } else {
-                        Text(
-                            text = "Local grid ${sweepX.toInt()}, ${sweepY.toInt()} · Geographic CRS unavailable",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                        )
+                        if (copiedFlash) {
+                            Text(
+                                text = "Copied",
+                                color = Color(0xFF81C784),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
                     }
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = "Copy coordinates",
+                        tint = Color(0xFF90A4AE),
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
             if (showBasemap && basemapImageBitmap != null) {
@@ -666,10 +808,20 @@ private fun containScale(
 )
 
 private const val HEATMAP_BINS = 24
+private const val VIEWSHED_BINS = 64
+internal const val HOMESITE_BINS = 96
 private const val VIEWPORT_PUBLISH_DEBOUNCE_MS = 120L
 
 private fun heatmapColor(intensity: Float): Color = if (intensity < 0.5f) {
     lerp(Color(0xFF1565C0), Color(0xFFFFC107), intensity / 0.5f)
 } else {
     lerp(Color(0xFFFFC107), Color(0xFFE53935), (intensity - 0.5f) / 0.5f)
+}
+
+// Warm ramp (amber to brick red) so the homesite surface reads as 'occupation likelihood'
+// and stays visually distinct from the blue-to-red dig-priority heatmap.
+private fun homesiteColor(intensity: Float): Color = if (intensity < 0.55f) {
+    lerp(Color(0xFFFFE082), Color(0xFFFF8F00), (intensity - 0.22f) / 0.33f)
+} else {
+    lerp(Color(0xFFFF8F00), Color(0xFFD84315), (intensity - 0.55f) / 0.45f)
 }

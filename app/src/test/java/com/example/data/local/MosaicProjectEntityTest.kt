@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import com.example.data.mosaic.MosaicProject
+import com.example.data.mosaic.MosaicProjectState
 import com.example.data.mosaic.MosaicProjectTile
 import com.example.geospatial.GeoSpatialLibrary
 import org.junit.Assert.assertEquals
@@ -22,6 +23,9 @@ class MosaicProjectEntityTest {
             ),
             createdAtMillis = 1L,
             updatedAtMillis = 2L,
+            state = MosaicProjectState.NEEDS_ATTENTION,
+            recoveryMessage = "Download paused. Resume this project.",
+            areaSelectionDescription = "Radius: 804.672 m around 41.43, -74.04",
         )
 
         assertEquals(project, project.toEntity().toDomain())

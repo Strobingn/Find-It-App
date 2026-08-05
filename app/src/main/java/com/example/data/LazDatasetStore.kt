@@ -1,6 +1,8 @@
 package com.example.data
 
+import android.content.Context
 import java.io.File
+import java.io.IOException
 import java.util.Locale
 import org.json.JSONObject
 
@@ -94,7 +96,26 @@ class LazDatasetStore(
     private val indexFile: File get() = File(directory, SOURCE_INDEX_NAME)
 
     fun delete(dataset: LazDataset): Boolean {
-        return contains(dataset.file) && dataset.file.delete()
+        if (!contains(dataset.file) || !dataset.file.delete()) return false
+        val deletedName = dataset.file.name
+        writeIndex(readIndex().filterValues { it != deletedName })
+        return true
+    }
+
+    /** Renames a saved dataset in-place while preserving every URL that points at it. */
+    @Synchronized
+    fun rename(dataset: LazDataset, requestedName: String): LazDataset {
+        require(contains(dataset.file)) { "Dataset is not in the saved LiDAR folder" }
+        val targetName = normalizedDatasetName(requestedName, dataset.file.extension)
+        val target = File(directory, targetName)
+        if (target.canonicalFile == dataset.file.canonicalFile) return list().first { it.file.name == targetName }
+        require(!target.exists()) { "A saved dataset named $targetName already exists" }
+        if (!dataset.file.renameTo(target)) {
+            throw IOException("Could not rename the saved dataset")
+        }
+        val oldName = dataset.file.name
+        writeIndex(readIndex().mapValues { (_, name) -> if (name == oldName) target.name else name })
+        return list().first { it.file.name == target.name }
     }
 
     fun contains(file: File): Boolean {
@@ -103,8 +124,58 @@ class LazDatasetStore(
         }.getOrDefault(false)
     }
 
+    private fun normalizedDatasetName(requestedName: String, fallbackExtension: String): String {
+        val raw = requestedName.substringAfterLast('/').substringBefore('?').trim()
+        require(raw.isNotBlank()) { "Enter a name for the saved dataset" }
+        val withExtension = if (raw.substringAfterLast('.', "").isBlank()) {
+            "$raw.$fallbackExtension"
+        } else {
+            raw
+        }
+        val safe = withExtension
+            .replace(Regex("[^a-zA-Z0-9._ -]"), "_")
+            .trim('.', ' ')
+        val extension = safe.substringAfterLast('.', "").lowercase(Locale.US)
+        require(extension in setOf("laz", "las")) { "Saved datasets must keep a .laz or .las extension" }
+        require(safe.isNotBlank()) { "Enter a valid saved dataset name" }
+        return safe
+    }
+
     companion object {
+        private const val FOLDER_NAME = "lidar"
+
         /** Dot-prefixed and not a .laz/.las file, so [list] never surfaces it as a dataset. */
         private const val SOURCE_INDEX_NAME = ".sources.json"
+
+        /**
+         * Canonical durable store under [Context.getFilesDir] (not cache, not media that can
+         * unmount). Migrates any older files from the external-files `lidar` folder once.
+         */
+        fun open(context: Context): LazDatasetStore {
+            val app = context.applicationContext
+            val primary = File(app.filesDir, FOLDER_NAME)
+            primary.mkdirs()
+            val legacyExternal = app.getExternalFilesDir(null)?.let { File(it, FOLDER_NAME) }
+            if (legacyExternal != null &&
+                legacyExternal.isDirectory &&
+                runCatching { legacyExternal.canonicalPath != primary.canonicalPath }.getOrDefault(true)
+            ) {
+                migrateLegacyFolder(legacyExternal, primary)
+            }
+            return LazDatasetStore(primary)
+        }
+
+        /** One-way copy of LAZ/LAS and the source-URL index into the durable folder. */
+        private fun migrateLegacyFolder(from: File, to: File) {
+            to.mkdirs()
+            from.listFiles()?.forEach { file ->
+                if (!file.isFile) return@forEach
+                val dest = File(to, file.name)
+                if (dest.exists()) return@forEach
+                runCatching {
+                    file.copyTo(dest, overwrite = false)
+                }
+            }
+        }
     }
 }

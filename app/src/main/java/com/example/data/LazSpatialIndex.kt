@@ -7,6 +7,7 @@ import com.github.mreutegg.laszip4j.laszip.LASquadtree
 import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_CHANNEL_RETURNS_XY
 import com.github.mreutegg.laszip4j.laszip.LasIndexWriter
 import java.io.File
+import java.util.concurrent.Executors
 
 /**
  * Builds and loads the `.lax` spatial index beside a LAZ/LAS file.
@@ -46,6 +47,19 @@ internal object LazSpatialIndex {
         val index = indexFileFor(source)
         // A stale index would seek to the wrong chunks, so treat one older than the data as absent.
         return index.isFile && index.length() > 0L && index.lastModified() >= source.lastModified()
+    }
+
+    /**
+     * Builds a `.lax` beside [source] on a background thread when one is missing.
+     * Safe to call on every import: existing indexes are no-ops, and failures only cost speed.
+     */
+    fun ensureBuiltAsync(source: File) {
+        if (!source.isFile || exists(source)) return
+        indexExecutor.execute {
+            runCatching { build(source) }.onFailure { failure ->
+                System.err.println("Background LAX index for ${source.name} failed: ${failure.message}")
+            }
+        }
     }
 
     /** Loads the sidecar index, or null when there is none or it cannot be parsed. */
@@ -139,4 +153,8 @@ internal object LazSpatialIndex {
     }
 
     private const val PROGRESS_INTERVAL = 1_000_000L
+
+    private val indexExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "laz-spatial-index").apply { isDaemon = true }
+    }
 }

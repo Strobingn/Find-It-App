@@ -2,6 +2,7 @@ package com.example.data.ai
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.example.BuildConfig
 import com.google.ai.client.generativeai.GenerativeModel
 import com.google.ai.client.generativeai.type.Content
 import com.google.ai.client.generativeai.type.ImagePart
@@ -19,34 +20,49 @@ import kotlinx.coroutines.withContext
  *
  * Uses the Google AI SDK directly with an API key to avoid Firebase App Check requirements.
  * The API key is read from BuildConfig (populated via local.properties or CI secret).
+ * Prefer [com.example.ai.GeminiApiClient] for chat — this path shares the same BuildConfig key.
  */
 object GeminiRepository {
 
     private const val TAG = "GeminiRepository"
-    private const val MODEL_NAME = "gemini-2.0-flash"
-
-    /** BuildConfig field populated by Gradle from local.properties GEMINI_API_KEY / AI_API_KEY or defaults to empty. */
-    private val API_KEY: String = com.example.BuildConfig.GEMINI_API_KEY.ifBlank { com.example.BuildConfig.OPENAI_API_KEY }
+    private const val DEFAULT_MODEL = "gemini-2.0-flash"
 
     private var initialized = false
     private var isAvailable = false
     private var model: GenerativeModel? = null
+
+    private fun buildConfigApiKey(): String {
+        val cleaned = BuildConfig.GEMINI_API_KEY.trim()
+        val upper = cleaned.uppercase()
+        return cleaned.takeUnless {
+            it.length < 20 ||
+                upper.startsWith("YOUR_") ||
+                upper.startsWith("MY_") ||
+                upper.contains("PLACEHOLDER")
+        }.orEmpty()
+    }
 
     /** Initialize Gemini. Call once from Application.onCreate. */
     fun initialize() {
         if (initialized) return
         initialized = true
 
-        if (API_KEY.isBlank()) {
+        val apiKey = buildConfigApiKey()
+        if (apiKey.isBlank()) {
             isAvailable = false
-            Log.w(TAG, "AI_API_KEY not set — AI features unavailable. Add AI_API_KEY=<your-key> to local.properties")
+            Log.w(
+                TAG,
+                "GEMINI_API_KEY not set — SDK path unavailable. " +
+                    "Add GEMINI_API_KEY=… to local.properties and rebuild.",
+            )
             return
         }
 
+        val modelName = BuildConfig.GEMINI_MODEL.trim().ifBlank { DEFAULT_MODEL }
         try {
             model = GenerativeModel(
-                modelName = MODEL_NAME,
-                apiKey = API_KEY,
+                modelName = modelName,
+                apiKey = apiKey,
                 generationConfig = generationConfig {
                     temperature = 0.4f
                     topK = 32
@@ -55,7 +71,7 @@ object GeminiRepository {
                 },
             )
             isAvailable = true
-            Log.i(TAG, "Gemini initialized (model=$MODEL_NAME, available=true)")
+            Log.i(TAG, "Gemini initialized (model=$modelName, available=true)")
         } catch (e: Exception) {
             isAvailable = false
             Log.e(TAG, "Failed to initialize Gemini", e)
@@ -232,7 +248,7 @@ object GeminiRepository {
 
     private fun geminiFlow(block: suspend GeminiScope.() -> Unit): Flow<String> = flow {
         if (!isAvailable || model == null) {
-            emit("AI is not configured. Add AI_API_KEY=<your Google AI API key> to local.properties and rebuild.")
+            emit("AI is not configured. Add GEMINI_API_KEY=<your Google AI API key> to local.properties and rebuild.")
             return@flow
         }
         val scope = GeminiScope { text -> emit(text) }

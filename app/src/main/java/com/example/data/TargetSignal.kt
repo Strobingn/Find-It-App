@@ -50,6 +50,8 @@ data class TargetSignal(
      * one exact spot [datasetKey]-based feedback already re-scores.
      */
     val detectedFeatureType: String? = null,
+    /** User-flagged priority find for return trips and sorting. */
+    val starred: Boolean = false,
 ) : Serializable
 
 fun targetsForTerrain(signals: List<TargetSignal>, terrainKey: String): List<TargetSignal> =

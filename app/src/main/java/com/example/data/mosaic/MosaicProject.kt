@@ -5,6 +5,19 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
+/**
+ * The durable state of a logical collection of downloaded LiDAR source files.
+ *
+ * A project is created before its transfers begin. This keeps an interrupted area selection
+ * recoverable instead of leaving a collection of otherwise valid files with no way to resume the
+ * requested mosaic.
+ */
+enum class MosaicProjectState {
+    DOWNLOADING,
+    READY,
+    NEEDS_ATTENTION,
+}
+
 data class MosaicProjectTile(
     val displayName: String,
     val localFileName: String,
@@ -18,6 +31,10 @@ data class MosaicProject(
     val tiles: List<MosaicProjectTile>,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
+    val state: MosaicProjectState = MosaicProjectState.READY,
+    val recoveryMessage: String? = null,
+    /** Original rectangle, radius, or polygon that resolved this source-tile set, when applicable. */
+    val areaSelectionDescription: String? = null,
 )
 
 /** Versioned, line-oriented manifest that avoids treating untrusted source URLs as executable data. */

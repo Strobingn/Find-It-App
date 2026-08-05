@@ -160,14 +160,12 @@ fun ManualGeoReferenceOverlay(
                                     )
                                     val startLatLng = projection.fromScreenLocation(startPoint)
                                     val endLatLng = projection.fromScreenLocation(endPoint)
-                                    if (startLatLng != null && endLatLng != null) {
-                                        val dLat = startLatLng.latitude - endLatLng.latitude
-                                        val dLng = startLatLng.longitude - endLatLng.longitude
-                                        overlayCenter = LatLng(
-                                            overlayCenter.latitude + dLat,
-                                            overlayCenter.longitude + dLng
-                                        )
-                                    }
+                                    val dLat = startLatLng.latitude - endLatLng.latitude
+                                    val dLng = startLatLng.longitude - endLatLng.longitude
+                                    overlayCenter = LatLng(
+                                        overlayCenter.latitude + dLat,
+                                        overlayCenter.longitude + dLng
+                                    )
                                 }
                             }
                         )

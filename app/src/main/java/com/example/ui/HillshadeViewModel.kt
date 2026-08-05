@@ -8,26 +8,47 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.analysis.FeatureTypeCalibration
 import com.example.analysis.MetalDetectingTargetType
+import com.example.analysis.TerrainDerivedLayerCache
+import com.example.analysis.TerrainDerivedLayers
+import com.example.analysis.TerrainIntelligenceEngine
 import com.example.data.DemGenerator
 import com.example.data.DetectionSource
 import com.example.data.ElevationGrid
 import com.example.data.GroundSurfaceMode
 import com.example.data.basemap.OfflineBasemapRegion
 import com.example.data.basemap.OfflineBasemapStatus
+import com.example.data.AppTerrainStorage
+import com.example.data.field.BoundaryVertex
 import com.example.data.field.BreadcrumbPoint
 import com.example.data.field.BreadcrumbTrack
+import com.example.data.field.ExcavationLogEntry
+import com.example.data.field.FieldSyncQueue
+import com.example.data.field.OptimizedFieldRoute
+import com.example.data.field.PendingSyncEntry
+import com.example.data.field.SurveyBoundary
+import com.example.data.field.SyncEntityType
+import com.example.data.field.SyncOperation
 import com.example.data.LazDatasetStore
+import com.example.data.LazTerrainCache
 import com.example.data.LazTerrainDiskCache
 import com.example.data.LazTerrainMemoryCache
 import com.example.data.LazSpatialIndex
 import com.example.data.LazTerrainReader
 import com.example.data.LidarImportOptions
+import com.example.data.LogSignalResult
 import com.example.data.MetalType
 import com.example.data.NormalizedRasterBounds
+import com.example.data.TerrainDecodeCoordinator
 import com.example.data.TerrainGpuSceneBuilder
 import com.example.data.TerrainImportSource
 import com.example.data.TerrainPerformanceSession
+import com.example.data.TerrainSessionStore
+import com.example.data.TerrainQuality
+import com.example.data.TerrainQualityScorecard
 import com.example.data.TargetSignal
+import com.example.data.gridForHillshadePreview
+import com.example.data.hillshadeDebounceMs
+import com.example.data.previewMaxSideForZoom
 import com.example.data.export.ProjectExportFiles
 import com.example.data.export.ProjectExportRenderer
 import com.example.data.export.ProjectExportSnapshot
@@ -35,9 +56,18 @@ import com.example.data.targetsForTerrain
 import com.example.data.survey.SurveyLayer
 import com.example.data.local.AnalyzedDatasetEntity
 import com.example.data.local.AppDatabase
+import com.example.data.local.PendingSyncEntity
 import com.example.data.local.SettingsRepository
 import com.example.data.local.toDomain
 import com.example.data.local.toEntity
+import com.example.data.export.GeoTiffWriter
+import com.example.data.export.ProjectArchiveFile
+import com.example.data.export.ProjectArchiveWriter
+import com.example.data.export.buildCsv
+import com.example.data.export.buildGeoJson
+import com.example.data.export.buildGpx
+import com.example.data.export.buildKml
+import com.example.data.export.buildQgisBundle
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
 import com.example.geospatial.CompassHeadingTracker
@@ -92,8 +122,15 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val surveyLayerDao = AppDatabase.get(application).surveyLayerDao()
     private val offlineBasemapRegionDao = AppDatabase.get(application).offlineBasemapRegionDao()
     private val breadcrumbTrackDao = AppDatabase.get(application).breadcrumbTrackDao()
+    private val excavationLogDao = AppDatabase.get(application).excavationLogDao()
+    private val surveyBoundaryDao = AppDatabase.get(application).surveyBoundaryDao()
+    private val pendingSyncDao = AppDatabase.get(application).pendingSyncDao()
     private val refinementMemoryCache = LazTerrainMemoryCache()
-    private val refinementDiskCache = LazTerrainDiskCache(File(application.cacheDir, "decoded-terrain"))
+    private val refinementDiskCache = AppTerrainStorage.decodedTerrainCache(application)
+    private val terrainSessionStore = TerrainSessionStore(application)
+    // Shares its directory with AiTerrainViewModel so layers analyzed on the AI tab
+    // are visible here (homesite overlay) without re-running the extraction.
+    private val terrainDerivedLayerCache = TerrainDerivedLayerCache(File(application.cacheDir, "terrain-intelligence-v2"))
 
     // Guard flag to prevent saveSettings() from overwriting DB values with defaults before loading completes
     private var isSettingsLoaded = false
@@ -144,6 +181,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val contourIntervalMeters = _contourIntervalMeters.asStateFlow()
     private val _activeTerrainSummary = MutableStateFlow("Built-in demonstration terrain")
     val activeTerrainSummary = _activeTerrainSummary.asStateFlow()
+    private val _terrainQuality = MutableStateFlow<TerrainQualityScorecard?>(null)
+    val terrainQuality: StateFlow<TerrainQualityScorecard?> = _terrainQuality.asStateFlow()
     private val _canRefineTerrain = MutableStateFlow(false)
     val canRefineTerrain = _canRefineTerrain.asStateFlow()
     private val _isRefiningTerrain = MutableStateFlow(false)
@@ -167,6 +206,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private var renderJob: Job? = null
     private var siteGenerationJob: Job? = null
     private var renderGeneration = 0L
+    private var refineJob: Job? = null
+    private var refineGeneration = 0L
+    /** Identity of the last hillshade params that produced [_hillshadeBitmap]. */
+    private var lastHillshadeCacheKey: HillshadeCacheKey? = null
+    private var lastPreviewMaxSide: Int = Int.MAX_VALUE
 
     // Viewport persistence
     private val _viewportZoom = MutableStateFlow(1f)
@@ -208,10 +252,25 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private var surveyLayerJob: Job? = null
     private val _breadcrumbTracks = MutableStateFlow<List<BreadcrumbTrack>>(emptyList())
     val breadcrumbTracks: StateFlow<List<BreadcrumbTrack>> = _breadcrumbTracks.asStateFlow()
+    private val _plannedRoute = MutableStateFlow<OptimizedFieldRoute?>(null)
+    val plannedRoute: StateFlow<OptimizedFieldRoute?> = _plannedRoute.asStateFlow()
+    fun setPlannedRoute(route: OptimizedFieldRoute?) {
+        _plannedRoute.value = route
+    }
     private val _isBreadcrumbRecording = MutableStateFlow(false)
     val isBreadcrumbRecording: StateFlow<Boolean> = _isBreadcrumbRecording.asStateFlow()
     private var breadcrumbTrackJob: Job? = null
     private var recordingBreadcrumbTrack: BreadcrumbTrack? = null
+    private val _excavationLogs = MutableStateFlow<List<ExcavationLogEntry>>(emptyList())
+    val excavationLogs: StateFlow<List<ExcavationLogEntry>> = _excavationLogs.asStateFlow()
+    private var excavationLogJob: Job? = null
+    private val _surveyBoundaries = MutableStateFlow<List<SurveyBoundary>>(emptyList())
+    val surveyBoundaries: StateFlow<List<SurveyBoundary>> = _surveyBoundaries.asStateFlow()
+    private var surveyBoundaryJob: Job? = null
+    private val _pendingSyncEntries = MutableStateFlow<List<PendingSyncEntry>>(emptyList())
+    val pendingSyncEntries: StateFlow<List<PendingSyncEntry>> = _pendingSyncEntries.asStateFlow()
+    private val _pendingSyncCount = MutableStateFlow(0)
+    val pendingSyncCount: StateFlow<Int> = _pendingSyncCount.asStateFlow()
 
     private val _activeGeoMetadata = MutableStateFlow(GeoSpatialLibrary.SITES_METADATA.first())
     val activeGeoMetadata: StateFlow<GeoSpatialMetadata> = _activeGeoMetadata.asStateFlow()
@@ -248,11 +307,15 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     // Zoom threshold for auto-rendering
     private val AUTO_RENDER_ZOOM_THRESHOLD = 2.5f
     private val MAX_MARKER_GPS_AGE_MILLIS = 60_000L
+    /** Warn before logging another marker within this distance of an existing find. */
+    private val PROXIMITY_WARN_METERS = 8.0
 
     init {
         observeSurveyLayers(_activeTerrainKey.value)
         observeOfflineBasemapRegions(_activeTerrainKey.value)
         observeBreadcrumbTracks(_activeTerrainKey.value)
+        observeExcavationLogs(_activeTerrainKey.value)
+        observeSurveyBoundaries(_activeTerrainKey.value)
         // loadSettings must finish before the first scheduleRender — scheduleRender saves the
         // *current* StateFlow values back to disk, and if that runs while loadSettings' reads are
         // still in flight, it stomps the just-persisted settings with hardcoded defaults on every
@@ -276,6 +339,13 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 _analyzedDatasets.value = stored
             }
         }
+        viewModelScope.launch {
+            pendingSyncDao.observeAll().collect { stored ->
+                val entries = stored.map { it.toDomain() }
+                _pendingSyncEntries.value = entries
+                _pendingSyncCount.value = entries.size
+            }
+        }
     }
 
     /** Persists a snapshot of this dataset's targets so it can later be cross-compared with another. */
@@ -292,6 +362,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
      */
     suspend fun savedDatasetSnapshot(datasetKey: String): AnalyzedDatasetEntity? =
         analyzedDatasetDao.getByKey(datasetKey)
+
+    /**
+     * Loads the AI tab's cached derived terrain layers for the current grid, when a local
+     * analysis has already been run for this exact terrain signature. Used by the homesite
+     * probability overlay on the Terrain tab; a cache miss returns null instead of starting
+     * the expensive analysis path from a surface that only wants a cheap overlay.
+     */
+    suspend fun cachedDerivedLayers(): TerrainDerivedLayers? {
+        val grid = _elevationGrid.value
+        if (grid.width <= 2 || grid.height <= 2) return null
+        return terrainDerivedLayerCache.get(TerrainIntelligenceEngine.terrainSignature(grid)).layers
+    }
 
     /**
      * Forgets one dataset's saved targets.
@@ -354,7 +436,15 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         )
         recordingBreadcrumbTrack = track
         _isBreadcrumbRecording.value = true
-        viewModelScope.launch { breadcrumbTrackDao.upsert(track.toEntity()) }
+        viewModelScope.launch {
+            breadcrumbTrackDao.upsert(track.toEntity())
+            enqueuePendingSync(
+                entityType = SyncEntityType.BREADCRUMB_TRACK,
+                entityId = track.id,
+                operation = SyncOperation.UPSERT,
+                payload = "points=${track.points.size};terrain=${track.terrainKey}",
+            )
+        }
         if (_hasLocationPermission.value) startLocationUpdates()
     }
 
@@ -365,19 +455,215 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         val paused = track.copy(isRecording = false, updatedAtMillis = System.currentTimeMillis())
         recordingBreadcrumbTrack = null
         _isBreadcrumbRecording.value = false
-        viewModelScope.launch { breadcrumbTrackDao.upsert(paused.toEntity()) }
+        viewModelScope.launch {
+            breadcrumbTrackDao.upsert(paused.toEntity())
+            enqueuePendingSync(
+                entityType = SyncEntityType.BREADCRUMB_TRACK,
+                entityId = paused.id,
+                operation = SyncOperation.UPSERT,
+                payload = "points=${paused.points.size};terrain=${paused.terrainKey};paused=1",
+            )
+        }
         if (!_gpsEnabled.value) stopLocationUpdates()
     }
 
     fun deleteBreadcrumbTrack(track: BreadcrumbTrack) {
         if (track.id == recordingBreadcrumbTrack?.id) pauseBreadcrumbRecording()
-        viewModelScope.launch { breadcrumbTrackDao.deleteById(track.id) }
+        viewModelScope.launch {
+            breadcrumbTrackDao.deleteById(track.id)
+            enqueuePendingSync(
+                entityType = SyncEntityType.BREADCRUMB_TRACK,
+                entityId = track.id,
+                operation = SyncOperation.DELETE,
+                payload = "",
+            )
+        }
     }
 
     fun clearBreadcrumbTracks() {
         if (_isBreadcrumbRecording.value) pauseBreadcrumbRecording()
         val terrainKey = _activeTerrainKey.value
-        viewModelScope.launch { breadcrumbTrackDao.deleteByTerrainKey(terrainKey) }
+        val tracks = _breadcrumbTracks.value
+        viewModelScope.launch {
+            breadcrumbTrackDao.deleteByTerrainKey(terrainKey)
+            tracks.forEach { track ->
+                enqueuePendingSync(
+                    entityType = SyncEntityType.BREADCRUMB_TRACK,
+                    entityId = track.id,
+                    operation = SyncOperation.DELETE,
+                    payload = "",
+                )
+            }
+        }
+    }
+
+    /** Persists a dig/check log tied to a target and the active terrain project. */
+    fun saveExcavationLog(entry: ExcavationLogEntry) {
+        val scoped = entry.copy(terrainKey = entry.terrainKey ?: _activeTerrainKey.value)
+        viewModelScope.launch {
+            excavationLogDao.upsert(scoped.toEntity())
+            enqueuePendingSync(
+                entityType = SyncEntityType.EXCAVATION_LOG,
+                entityId = scoped.id,
+                operation = SyncOperation.UPSERT,
+                payload = "target=${scoped.targetId};depth=${scoped.depthCentimeters ?: ""};finds=${scoped.findsCount}",
+            )
+        }
+    }
+
+    fun deleteExcavationLog(entry: ExcavationLogEntry) {
+        viewModelScope.launch {
+            excavationLogDao.deleteById(entry.id)
+            enqueuePendingSync(
+                entityType = SyncEntityType.EXCAVATION_LOG,
+                entityId = entry.id,
+                operation = SyncOperation.DELETE,
+                payload = "",
+            )
+        }
+    }
+
+    /**
+     * Starts a new open dig log for [targetId] on the active terrain. Completing is a separate
+     * save so partial visit notes survive process restart.
+     */
+    fun startExcavationLog(targetId: Long): ExcavationLogEntry {
+        val now = System.currentTimeMillis()
+        val entry = ExcavationLogEntry(
+            id = UUID.randomUUID().toString(),
+            targetId = targetId,
+            terrainKey = _activeTerrainKey.value,
+            startedAtMillis = now,
+            completedAtMillis = null,
+            depthCentimeters = null,
+            soilNotes = "",
+            findsDescription = "",
+            findsCount = 0,
+            photoUris = emptyList(),
+            voiceNoteUris = emptyList(),
+            createdAtMillis = now,
+            updatedAtMillis = now,
+        )
+        saveExcavationLog(entry)
+        return entry
+    }
+
+    /** Saves a survey boundary polygon for the active terrain project. */
+    fun saveSurveyBoundary(boundary: SurveyBoundary) {
+        val scoped = boundary.copy(terrainKey = _activeTerrainKey.value)
+        viewModelScope.launch {
+            surveyBoundaryDao.upsert(scoped.toEntity())
+            enqueuePendingSync(
+                entityType = SyncEntityType.SURVEY_BOUNDARY,
+                entityId = scoped.id,
+                operation = SyncOperation.UPSERT,
+                payload = "name=${scoped.displayName};vertices=${scoped.vertices.size}",
+            )
+        }
+    }
+
+    fun deleteSurveyBoundary(boundary: SurveyBoundary) {
+        viewModelScope.launch {
+            surveyBoundaryDao.deleteById(boundary.id)
+            enqueuePendingSync(
+                entityType = SyncEntityType.SURVEY_BOUNDARY,
+                entityId = boundary.id,
+                operation = SyncOperation.DELETE,
+                payload = "",
+            )
+        }
+    }
+
+    /**
+     * Builds a survey boundary from a recorded GPS trail (needs ≥3 points). Used so the
+     * walked perimeter becomes the project search area without a separate drawing mode.
+     */
+    fun createSurveyBoundaryFromTrail(track: BreadcrumbTrack, displayName: String = "Search boundary"): SurveyBoundary? {
+        if (track.points.size < 3) return null
+        val now = System.currentTimeMillis()
+        val boundary = SurveyBoundary(
+            id = UUID.randomUUID().toString(),
+            terrainKey = _activeTerrainKey.value,
+            displayName = displayName.ifBlank { "Search boundary" },
+            vertices = track.points.map { BoundaryVertex(it.latitude, it.longitude) },
+            createdAtMillis = now,
+        )
+        saveSurveyBoundary(boundary)
+        return boundary
+    }
+
+    /**
+     * Builds a simple square boundary around the current device GPS fix when no trail is available.
+     * [halfSideMeters] is half the square's side length (default 50 m → 100 m box).
+     */
+    fun createSurveyBoundaryAroundGps(
+        displayName: String = "GPS search area",
+        halfSideMeters: Double = 50.0,
+    ): SurveyBoundary? {
+        val lat = _deviceLatitude.value ?: return null
+        val lon = _deviceLongitude.value ?: return null
+        val latOffset = halfSideMeters / 111_000.0
+        val lonOffset = halfSideMeters / (111_000.0 * kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.2))
+        val now = System.currentTimeMillis()
+        val boundary = SurveyBoundary(
+            id = UUID.randomUUID().toString(),
+            terrainKey = _activeTerrainKey.value,
+            displayName = displayName.ifBlank { "GPS search area" },
+            vertices = listOf(
+                BoundaryVertex(lat - latOffset, lon - lonOffset),
+                BoundaryVertex(lat - latOffset, lon + lonOffset),
+                BoundaryVertex(lat + latOffset, lon + lonOffset),
+                BoundaryVertex(lat + latOffset, lon - lonOffset),
+            ),
+            createdAtMillis = now,
+        )
+        saveSurveyBoundary(boundary)
+        return boundary
+    }
+
+    /**
+     * Offline sync queue: coalesce local field mutations for later replay. No cloud endpoint yet
+     * (Phase 9); entries stay durable and never silently drop. [markPendingSyncSent] clears a
+     * successfully delivered entry; [markPendingSyncFailed] keeps it with diagnostics.
+     */
+    private suspend fun enqueuePendingSync(
+        entityType: SyncEntityType,
+        entityId: String,
+        operation: SyncOperation,
+        payload: String,
+    ) {
+        val now = System.currentTimeMillis()
+        val existing = pendingSyncDao.all().map { it.toDomain() }
+        val queue = FieldSyncQueue(existing).enqueue(
+            entityType = entityType,
+            entityId = entityId,
+            operation = operation,
+            payload = payload,
+            queuedAtMillis = now,
+        )
+        // Persist the coalesced entity state: drop prior row for this entity, write the new one.
+        pendingSyncDao.deleteByEntity(entityType.name, entityId)
+        val latest = queue.pendingFor(entityType, entityId) ?: return
+        pendingSyncDao.upsert(latest.toEntity())
+    }
+
+    fun markPendingSyncSent(entryId: Long) {
+        viewModelScope.launch { pendingSyncDao.deleteById(entryId) }
+    }
+
+    fun markPendingSyncFailed(entryId: Long, error: String) {
+        viewModelScope.launch {
+            val existing = pendingSyncDao.all().map { it.toDomain() }
+            val updated = FieldSyncQueue(existing).markFailed(entryId, error, System.currentTimeMillis())
+            updated.entries.firstOrNull { it.id == entryId }?.let { pendingSyncDao.upsert(it.toEntity()) }
+        }
+    }
+
+    /** Clears the entire offline sync queue after the operator confirms delivery is not needed. */
+    fun clearPendingSyncQueue() {
+        viewModelScope.launch {
+            _pendingSyncEntries.value.forEach { pendingSyncDao.deleteById(it.id) }
+        }
     }
 
     private fun startLocationUpdates() {
@@ -409,7 +695,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         val updated = activeTrack.withPoint(point)
         if (updated === activeTrack) return
         recordingBreadcrumbTrack = updated
-        viewModelScope.launch { breadcrumbTrackDao.upsert(updated.toEntity()) }
+        viewModelScope.launch {
+            breadcrumbTrackDao.upsert(updated.toEntity())
+            // Throttle sync enqueue: only on every 10th point so high-rate GPS does not flood the queue.
+            if (updated.points.size % 10 == 0) {
+                enqueuePendingSync(
+                    entityType = SyncEntityType.BREADCRUMB_TRACK,
+                    entityId = updated.id,
+                    operation = SyncOperation.UPSERT,
+                    payload = "points=${updated.points.size};terrain=${updated.terrainKey}",
+                )
+            }
+        }
     }
 
     private fun stopLocationUpdates() {
@@ -523,25 +820,66 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         saveSettings()
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
-            if (!immediate) delay(80)
+            val mode = _visualizationMode.value
+            val debounceMs = hillshadeDebounceMs(mode, immediate)
+            if (debounceMs > 0L) delay(debounceMs)
+
+            val grid = _elevationGrid.value
+            val zoom = _viewportZoom.value
+            val previewMaxSide = previewMaxSideForZoom(zoom, maxOf(grid.width, grid.height))
+            val cacheKey = HillshadeCacheKey(
+                gridIdentity = System.identityHashCode(grid),
+                width = grid.width,
+                height = grid.height,
+                sunAzimuth = _sunAzimuth.value,
+                sunAltitude = _sunAltitude.value,
+                vegetationFilter = _vegetationFilter.value,
+                palette = _paletteType.value,
+                contrast = _contrast.value,
+                visualizationMode = mode,
+                overlayType = _overlayType.value,
+                overlayOpacity = _overlayOpacity.value,
+                zScale = _zScale.value,
+                featureScaleMeters = _featureScaleMeters.value,
+                analysisSensitivity = _analysisSensitivity.value,
+                contourIntervalMeters = _contourIntervalMeters.value,
+                previewMaxSide = previewMaxSide,
+            )
+            // Skip work when sliders settle on the same values and the bitmap is still valid.
+            // Keep the previous bitmap on screen (do not clear it) so upgrades/refines feel instant.
+            if (cacheKey == lastHillshadeCacheKey && _hillshadeBitmap.value != null) {
+                if (generation == renderGeneration) _isRendering.value = false
+                return@launch
+            }
+
             _isRendering.value = true
             try {
                 renderMutex.withLock {
-                    val grid = _elevationGrid.value
+                    val liveGrid = _elevationGrid.value
+                    val liveKey = cacheKey.copy(
+                        gridIdentity = System.identityHashCode(liveGrid),
+                        width = liveGrid.width,
+                        height = liveGrid.height,
+                        previewMaxSide = previewMaxSideForZoom(
+                            _viewportZoom.value,
+                            maxOf(liveGrid.width, liveGrid.height),
+                        ),
+                    )
                     val bitmap = withContext(Dispatchers.Default) {
-                        grid.renderHillshade(
-                            sunAzimuth = _sunAzimuth.value,
-                            sunAltitude = _sunAltitude.value,
-                            vegetationFilter = _vegetationFilter.value,
-                            palette = _paletteType.value,
-                            contrast = _contrast.value,
-                            visualizationMode = _visualizationMode.value,
-                            overlayType = _overlayType.value,
-                            overlayOpacity = _overlayOpacity.value,
-                            zScale = _zScale.value,
-                            featureScaleMeters = _featureScaleMeters.value,
-                            analysisSensitivity = _analysisSensitivity.value,
-                            contourIntervalMeters = _contourIntervalMeters.value,
+                        val renderGrid = gridForHillshadePreview(liveGrid, liveKey.previewMaxSide)
+                        renderGrid.renderHillshade(
+                            sunAzimuth = liveKey.sunAzimuth,
+                            sunAltitude = liveKey.sunAltitude,
+                            vegetationFilter = liveKey.vegetationFilter,
+                            palette = liveKey.palette,
+                            contrast = liveKey.contrast,
+                            visualizationMode = liveKey.visualizationMode,
+                            overlayType = liveKey.overlayType,
+                            overlayOpacity = liveKey.overlayOpacity,
+                            zScale = liveKey.zScale,
+                            featureScaleMeters = liveKey.featureScaleMeters,
+                            analysisSensitivity = liveKey.analysisSensitivity,
+                            contourIntervalMeters = liveKey.contourIntervalMeters,
                             // The render loop never suspends, so cancelling this coroutine cannot
                             // stop it. Dragging a slider would otherwise run every superseded
                             // frame to completion while holding renderMutex, making the frame the
@@ -549,7 +887,12 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                             shouldContinue = { generation == renderGeneration },
                         )
                     }
-                    if (generation == renderGeneration) _hillshadeBitmap.value = bitmap
+                    if (generation == renderGeneration) {
+                        // Swap only when the new frame is ready — prior hillshade stays visible.
+                        _hillshadeBitmap.value = bitmap
+                        lastHillshadeCacheKey = liveKey
+                        lastPreviewMaxSide = liveKey.previewMaxSide
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -578,12 +921,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 _elevationGrid.value = generatedGrid
                 _activeGeoMetadata.value = GeoSpatialLibrary.SITES_METADATA[index]
                 _activeTerrainSummary.value = "Built-in simulated terrain"
+                publishTerrainQuality()
                 updateCoordinates()
                 scheduleRender(immediate = true)
                 if (_basemapEnabled.value) refreshBasemapTiles()
             }
         } else {
             _elevationGrid.value = requireNotNull(customGrid)
+            publishTerrainQuality()
             updateCoordinates()
             scheduleRender(immediate = true)
             if (_basemapEnabled.value) refreshBasemapTiles()
@@ -604,6 +949,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _canRefineTerrain.value = source != null
         _isDetailedTerrain.value = false
         _terrainDetailMessage.value = null
+        source?.uri?.let { uriString ->
+            val uri = Uri.parse(uriString)
+            if (uri.scheme.equals("file", ignoreCase = true)) {
+                uri.path?.let { path -> LazSpatialIndex.ensureBuiltAsync(File(path)) }
+            }
+        }
+        // Durable session pointer so cold start reopens this LAZ even if the decode cache was purged.
+        source?.let(terrainSessionStore::save)
         applyCustomTerrain(result, resetViewport = true)
     }
 
@@ -613,6 +966,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         customGrid = result.grid
         _elevationGrid.value = result.grid
         _currentSiteIndex.value = 3
+        // Invalidate hillshade memo so the new grid always repaints; the previous bitmap stays
+        // visible until the new frame is ready (no blanking).
+        lastHillshadeCacheKey = null
         _activeGeoMetadata.value = result.geoMetadata ?: GeoSpatialLibrary.localGrid(
             name = "Custom imported layer",
             columns = grid.width,
@@ -620,12 +976,26 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             resolutionMeters = grid.cellSizeMeters.toDouble(),
         )
         _activeTerrainSummary.value = result.summary
+        publishTerrainQuality()
         updateCoordinates()
         scheduleRender(immediate = true)
         if (_basemapEnabled.value) refreshBasemapTiles()
         if (resetViewport) {
             _viewportResetKey.value = _viewportResetKey.value + 1
         }
+    }
+
+    /** Recompute the ground-quality scorecard from the active grid + geo metadata. */
+    private fun publishTerrainQuality() {
+        val grid = _elevationGrid.value
+        val metadata = _activeGeoMetadata.value
+        _terrainQuality.value = TerrainQuality.from(
+            grid = grid,
+            crs = metadata.crs,
+            datum = metadata.datum,
+            georeferenced = metadata.isGeoreferenced,
+            summary = _activeTerrainSummary.value,
+        )
     }
 
     /**
@@ -655,7 +1025,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refineTerrain(viewport: NormalizedRasterBounds, rasterResolution: Int = 1_024) {
         val source = terrainSource ?: return
-        if (_isRefiningTerrain.value) return
         val requestedViewport = viewport.sanitized()
         if (currentSourceBounds == NormalizedRasterBounds.Full && isEffectivelyWholeTerrain(requestedViewport)) {
             // The overview is already a raster of the entire original point cloud. Reopening a
@@ -680,6 +1049,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             ?.path
             ?.let(::File)
             ?.takeIf(File::isFile)
+        // Cancel any in-flight refine so a newer zoom/refine request wins (stale-work prevention).
+        val generation = ++refineGeneration
+        refineJob?.cancel()
         _isRefiningTerrain.value = true
         _terrainRefinementProgress.value = TerrainRefinementProgress(
             fraction = 0.03f,
@@ -687,7 +1059,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         )
         _terrainDetailMessage.value =
             "Opening ${options.rasterResolution} px source detail for this viewport…"
-        viewModelScope.launch(Dispatchers.IO) {
+        refineJob = viewModelScope.launch(Dispatchers.IO) {
             var decodedNow = false
             var loadedFromCache = false
             val result = runCatching {
@@ -774,7 +1146,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
             }.getOrNull()
+            if (generation != refineGeneration) return@launch
             withContext(Dispatchers.Main.immediate) {
+                if (generation != refineGeneration) return@withContext
                 if (result == null) {
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
@@ -802,7 +1176,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     _isRefiningTerrain.value = false
                 }
             }
-            if (decodedNow && result != null && sourceFile != null) {
+            if (decodedNow && result != null && sourceFile != null && generation == refineGeneration) {
                 // The image is already visible. Persist the result afterward so disk I/O does not
                 // extend the user-visible Refine wait.
                 runCatching { refinementDiskCache.put(sourceFile, options, result) }
@@ -837,6 +1211,76 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _sunAzimuth.value = ((value % 360f) + 360f) % 360f
         scheduleRender()
     }
+
+    /**
+     * Field lighting presets for hillshade inspection.
+     * NW (315°) and SE (135°) emphasize opposite sides of earthworks; Overhead flattens shadows.
+     */
+    fun applyLightingPreset(preset: LightingPreset) {
+        when (preset) {
+            LightingPreset.NORTHWEST -> {
+                _sunAzimuth.value = 315f
+                _sunAltitude.value = 35f
+            }
+            LightingPreset.SOUTHEAST -> {
+                _sunAzimuth.value = 135f
+                _sunAltitude.value = 35f
+            }
+            LightingPreset.OVERHEAD -> {
+                _sunAzimuth.value = 180f
+                _sunAltitude.value = 75f
+            }
+        }
+        scheduleRender(immediate = true)
+    }
+
+    /** High-contrast field night palette (palette index 2). */
+    fun setFieldNightContrast(enabled: Boolean) {
+        _paletteType.value = if (enabled) 2 else 1
+        scheduleRender(immediate = true)
+    }
+
+    fun listRecentProjects(): List<com.example.data.RecentTerrainProject> =
+        terrainSessionStore.listRecent()
+
+    fun saveViewportBookmark(name: String = "Bookmark") {
+        val prefs = getApplication<Application>().getSharedPreferences("viewport_bookmarks", 0)
+        val key = _activeTerrainKey.value
+        prefs.edit()
+            .putFloat("$key.zoom", _viewportZoom.value)
+            .putFloat("$key.panX", _viewportPanX.value)
+            .putFloat("$key.panY", _viewportPanY.value)
+            .putString("$key.name", name)
+            .apply()
+    }
+
+    fun restoreViewportBookmark(): Boolean {
+        val prefs = getApplication<Application>().getSharedPreferences("viewport_bookmarks", 0)
+        val key = _activeTerrainKey.value
+        if (!prefs.contains("$key.zoom")) return false
+        _viewportZoom.value = prefs.getFloat("$key.zoom", 1f)
+        _viewportPanX.value = prefs.getFloat("$key.panX", 0f)
+        _viewportPanY.value = prefs.getFloat("$key.panY", 0f)
+        _viewportRestoreToken.value = _viewportRestoreToken.value + 1
+        return true
+    }
+
+    /** Centers the sweep crosshair on the average grid position of georeferenced finds. */
+    fun frameFinds(): Boolean {
+        val points = _loggedSignals.value.mapNotNull { signal ->
+            if (signal.latitude != null && signal.longitude != null) {
+                signal.gridX to signal.gridY
+            } else {
+                null
+            }
+        }
+        if (points.isEmpty()) return false
+        val cx = points.map { it.first }.average().toFloat()
+        val cy = points.map { it.second }.average().toFloat()
+        setSweepPosition(cx, cy)
+        return true
+    }
+
     fun updateSunAltitude(value: Float) { _sunAltitude.value = value.coerceIn(5f, 85f); scheduleRender() }
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
     fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
@@ -865,13 +1309,19 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         updateCoordinates()
     }
 
-    // Update viewport zoom and pan. Persists (debounced) but intentionally does not trigger a
-    // hillshade re-render - re-rendering on every pinch/pan tick is what caused zoom jank before.
+    // Update viewport zoom and pan. Persists (debounced). Hillshade only re-runs when the
+    // zoom-aware preview LOD side changes — pan never invalidates the bitmap.
     fun updateViewport(zoom: Float, panX: Float, panY: Float) {
+        val grid = _elevationGrid.value
+        val previousSide = previewMaxSideForZoom(_viewportZoom.value, maxOf(grid.width, grid.height))
+        val nextSide = previewMaxSideForZoom(zoom, maxOf(grid.width, grid.height))
         _viewportZoom.value = zoom
         _viewportPanX.value = panX
         _viewportPanY.value = panY
         saveSettings()
+        if (nextSide != previousSide) {
+            scheduleRender(immediate = false)
+        }
     }
 
     private fun updateCoordinates() {
@@ -884,19 +1334,50 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _currentLon.value = coordinate?.second
     }
 
-    fun logCurrentSignal() {
+    fun logCurrentSignal(forceDespiteProximity: Boolean = false): LogSignalResult {
         val markerTime = System.currentTimeMillis()
         val hasFreshDeviceFix = _deviceLocationRecordedAtMillis.value?.let { fixTime ->
             markerTime - fixTime in 0L..MAX_MARKER_GPS_AGE_MILLIS
         } == true
+        val lat = _currentLat.value
+        val lon = _currentLon.value
+        val nearby = if (lat != null && lon != null) {
+            _loggedSignals.value
+                .mapNotNull { existing ->
+                    val eLat = existing.latitude ?: return@mapNotNull null
+                    val eLon = existing.longitude ?: return@mapNotNull null
+                    val d = com.example.data.field.FieldNavigation.distanceMeters(lat, lon, eLat, eLon)
+                    if (d <= PROXIMITY_WARN_METERS) existing to d else null
+                }
+                .minByOrNull { it.second }
+        } else {
+            null
+        }
+        if (nearby != null && !forceDespiteProximity) {
+            return LogSignalResult(
+                signal = TargetSignal(
+                    gridX = _sweepX.value,
+                    gridY = _sweepY.value,
+                    metalType = MetalType.MANUAL_MARKER,
+                    signalStrength = 0f,
+                    latitude = lat,
+                    longitude = lon,
+                    source = DetectionSource.MANUAL,
+                    timestamp = markerTime,
+                    terrainKey = _activeTerrainKey.value,
+                ),
+                nearbyFind = nearby.first,
+                nearbyDistanceMeters = nearby.second,
+            )
+        }
         val signal = TargetSignal(
             gridX = _sweepX.value,
             gridY = _sweepY.value,
             metalType = MetalType.MANUAL_MARKER,
             signalStrength = 0f,
             depthCm = null,
-            latitude = _currentLat.value,
-            longitude = _currentLon.value,
+            latitude = lat,
+            longitude = lon,
             gpsLatitude = _deviceLatitude.value.takeIf { hasFreshDeviceFix },
             gpsLongitude = _deviceLongitude.value.takeIf { hasFreshDeviceFix },
             gpsAccuracyMeters = _deviceLocationAccuracyMeters.value
@@ -905,20 +1386,73 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             timestamp = markerTime,
             terrainKey = _activeTerrainKey.value,
         )
-        viewModelScope.launch { signalDao.upsert(signal.toEntity()) }
+        viewModelScope.launch {
+            signalDao.upsert(signal.toEntity())
+            enqueuePendingSync(
+                entityType = SyncEntityType.TARGET_SIGNAL,
+                entityId = signal.id.toString(),
+                operation = SyncOperation.UPSERT,
+                payload = "terrain=${signal.terrainKey};status=${signal.status}",
+            )
+        }
+        return LogSignalResult(signal = signal)
+    }
+
+    fun toggleStarred(signal: TargetSignal) {
+        updateLoggedSignal(signal.copy(starred = !signal.starred))
+    }
+
+    /** Nearest georeferenced find to the current device GPS, if any. */
+    fun nearestFindFromDevice(): Pair<TargetSignal, Double>? {
+        val lat = _deviceLatitude.value ?: return null
+        val lon = _deviceLongitude.value ?: return null
+        return _loggedSignals.value
+            .mapNotNull { signal ->
+                val sLat = signal.latitude ?: return@mapNotNull null
+                val sLon = signal.longitude ?: return@mapNotNull null
+                signal to com.example.data.field.FieldNavigation.distanceMeters(lat, lon, sLat, sLon)
+            }
+            .minByOrNull { it.second }
     }
 
     fun updateLoggedSignal(signal: TargetSignal) {
-        viewModelScope.launch { signalDao.upsert(signal.toEntity()) }
+        viewModelScope.launch {
+            signalDao.upsert(signal.toEntity())
+            enqueuePendingSync(
+                entityType = SyncEntityType.TARGET_SIGNAL,
+                entityId = signal.id.toString(),
+                operation = SyncOperation.UPSERT,
+                payload = "terrain=${signal.terrainKey};status=${signal.status};outcome=${signal.outcome.name}",
+            )
+        }
     }
 
     fun deleteLoggedSignal(signal: TargetSignal) {
-        viewModelScope.launch { signalDao.deleteById(signal.id) }
+        viewModelScope.launch {
+            signalDao.deleteById(signal.id)
+            enqueuePendingSync(
+                entityType = SyncEntityType.TARGET_SIGNAL,
+                entityId = signal.id.toString(),
+                operation = SyncOperation.DELETE,
+                payload = "",
+            )
+        }
     }
 
     fun clearLoggedSignals() {
         val terrainKey = _activeTerrainKey.value
-        viewModelScope.launch { signalDao.deleteByTerrainKey(terrainKey) }
+        val signals = _loggedSignals.value
+        viewModelScope.launch {
+            signalDao.deleteByTerrainKey(terrainKey)
+            signals.forEach { signal ->
+                enqueuePendingSync(
+                    entityType = SyncEntityType.TARGET_SIGNAL,
+                    entityId = signal.id.toString(),
+                    operation = SyncOperation.DELETE,
+                    payload = "",
+                )
+            }
+        }
     }
 
     private fun setActiveTerrainKey(terrainKey: String) {
@@ -930,6 +1464,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         observeSurveyLayers(terrainKey)
         observeOfflineBasemapRegions(terrainKey)
         observeBreadcrumbTracks(terrainKey)
+        observeExcavationLogs(terrainKey)
+        observeSurveyBoundaries(terrainKey)
         _offlineBasemapPlan.value = null
         _offlineBasemapMessage.value = null
     }
@@ -939,6 +1475,24 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         surveyLayerJob = viewModelScope.launch {
             surveyLayerDao.observeByTerrainKey(terrainKey).collect { stored ->
                 _surveyLayers.value = stored.mapNotNull { it.toDomain() }
+            }
+        }
+    }
+
+    private fun observeExcavationLogs(terrainKey: String) {
+        excavationLogJob?.cancel()
+        excavationLogJob = viewModelScope.launch {
+            excavationLogDao.observeByTerrainKey(terrainKey).collect { stored ->
+                _excavationLogs.value = stored.map { it.toDomain() }
+            }
+        }
+    }
+
+    private fun observeSurveyBoundaries(terrainKey: String) {
+        surveyBoundaryJob?.cancel()
+        surveyBoundaryJob = viewModelScope.launch {
+            surveyBoundaryDao.observeByTerrainKey(terrainKey).collect { stored ->
+                _surveyBoundaries.value = stored.map { it.toDomain() }
             }
         }
     }
@@ -1014,6 +1568,52 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 ),
             )
         }
+    }
+
+    /**
+     * QGIS-ready bundle: GeoTIFF of the full-source bare-earth grid, the targets as a
+     * shapefile, and a .qgs that opens both. Null when the terrain has no real bounds.
+     */
+    suspend fun buildQgisBundleBytes(): ByteArray? = renderMutex.withLock {
+        withContext(Dispatchers.Default) {
+            val fullResult = overviewTerrain
+            val exportGrid = fullResult?.grid ?: _elevationGrid.value
+            val metadata = fullResult?.geoMetadata ?: _activeGeoMetadata.value
+            val bounds = metadata.bounds ?: return@withContext null
+            if (exportGrid.width < 2 || exportGrid.height < 2) return@withContext null
+            val geoTiff = GeoTiffWriter.writeElevation(
+                grid = exportGrid,
+                westLongitude = bounds.minLon,
+                northLatitude = bounds.maxLat,
+                cellWidthDegrees = (bounds.maxLon - bounds.minLon) / (exportGrid.width - 1),
+                cellHeightDegrees = (bounds.maxLat - bounds.minLat) / (exportGrid.height - 1),
+            )
+            buildQgisBundle(metadata.siteName, geoTiff, _loggedSignals.value)
+        }
+    }
+
+    /**
+     * Portable project archive: one self-describing zip (manifest + targets in every text
+     * format + annotated PNG + PDF report + QGIS bundle when bounds allow) that moves a
+     * project between devices without data loss.
+     */
+    suspend fun buildProjectArchiveBytes(): ByteArray {
+        val projectFiles = buildProjectExportFiles()
+        val signals = _loggedSignals.value
+        val entries = mutableListOf(
+            ProjectArchiveFile("targets.csv", buildCsv(signals).toByteArray()),
+            ProjectArchiveFile("targets.gpx", buildGpx(signals).toByteArray()),
+            ProjectArchiveFile("targets.kml", buildKml(signals).toByteArray()),
+            ProjectArchiveFile("targets.geojson", buildGeoJson(signals).toByteArray()),
+            ProjectArchiveFile("terrain-annotated.png", projectFiles.terrainPng),
+            ProjectArchiveFile("field-report.pdf", projectFiles.reportPdf),
+        )
+        buildQgisBundleBytes()?.let { entries.add(ProjectArchiveFile("qgis-bundle.zip", it)) }
+        return ProjectArchiveWriter.write(
+            projectName = _activeGeoMetadata.value.siteName,
+            files = entries,
+            createdAtMillis = System.currentTimeMillis(),
+        )
     }
 
     private fun observeOfflineBasemapRegions(terrainKey: String) {
@@ -1260,6 +1860,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         } else {
             _activeTerrainSummary.value = "Built-in demonstration terrain"
         }
+        publishTerrainQuality()
 
         _sweepX.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_X, 50f)
         _sweepY.value = settingsRepo.getFloat(SettingsRepository.Keys.SWEEP_Y, 50f)
@@ -1282,41 +1883,100 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Restores the most recently imported LAZ/LAS after process death, but only from an existing
-     * decoded cache. Startup never reparses a multi-hundred-megabyte point cloud unexpectedly.
+     * Restores the last opened LiDAR after process death.
+     *
+     * Order: session pointer → durable filesDir decode cache → re-decode from the saved LAZ file.
+     * Source LAZ files live under [AppTerrainStorage.lidarStore]; decode cache under
+     * [AppTerrainStorage.decodedTerrainCache] (filesDir, not purgeable cacheDir).
      */
     private suspend fun restoreLastCachedTerrain() {
         val application = getApplication<Application>()
-        val storageRoot = application.getExternalFilesDir(null) ?: application.filesDir
-        val dataset = withContext(Dispatchers.IO) {
-            LazDatasetStore(File(storageRoot, "lidar")).list().firstOrNull()
-        } ?: return
-        val diskCache = LazTerrainDiskCache(File(application.cacheDir, "decoded-terrain"))
-        val optionCandidates = listOf(512, 1_024, 320).map { resolution ->
-            LidarImportOptions(
-                groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
-                rasterResolution = resolution,
-                smoothingRadius = 0,
-            )
+        _activeTerrainSummary.value = "Restoring last LiDAR project…"
+        val session = withContext(Dispatchers.IO) { terrainSessionStore.load() }
+        val store = withContext(Dispatchers.IO) { AppTerrainStorage.lidarStore(application) }
+        val file = session?.file?.takeIf { it.isFile }
+            ?: withContext(Dispatchers.IO) { store.list().firstOrNull()?.file }
+            ?: run {
+                _activeTerrainSummary.value = "Built-in demonstration terrain"
+                return
+            }
+        val displayName = session?.displayName ?: file.name
+        val preferredOptions = session?.options ?: LidarImportOptions(
+            groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+            rasterResolution = LidarImportOptions.DEFAULT_OVERVIEW_RESOLUTION,
+            smoothingRadius = 0,
+        )
+        val optionCandidates = buildList {
+            add(preferredOptions)
+            listOf(1_024, 1_536).forEach { resolution ->
+                val candidate = preferredOptions.copy(rasterResolution = resolution)
+                if (candidate != preferredOptions) add(candidate)
+            }
         }
+        val diskCache = AppTerrainStorage.decodedTerrainCache(application)
         val cached = withContext(Dispatchers.IO) {
             optionCandidates.firstNotNullOfOrNull { options ->
-                diskCache.get(dataset.file, options)?.let { terrain -> options to terrain }
+                diskCache.get(file, options)?.let { terrain -> options to terrain }
             }
-        } ?: return
-        val (options, terrain) = cached
-        val scene = withContext(Dispatchers.Default) {
-            TerrainGpuSceneBuilder.build(terrain.grid)
         }
-        TerrainPerformanceSession.publish(scene)
-        setCustomTerrain(
-            result = terrain,
-            source = TerrainImportSource(
-                uri = Uri.fromFile(dataset.file).toString(),
-                displayName = dataset.displayName,
-                options = options,
-            ),
-        )
+        if (cached != null) {
+            val (options, terrain) = cached
+            val scene = withContext(Dispatchers.Default) {
+                TerrainGpuSceneBuilder.build(terrain.grid)
+            }
+            TerrainPerformanceSession.publish(scene)
+            setCustomTerrain(
+                result = terrain,
+                source = TerrainImportSource(
+                    uri = Uri.fromFile(file).toString(),
+                    displayName = displayName,
+                    options = options,
+                ),
+            )
+            return
+        }
+
+        // Cache miss: re-decode from the durable source LAZ so closing the app never loses the project.
+        _activeTerrainSummary.value = "Rebuilding terrain from saved LAZ…"
+        try {
+            val terrainCache = LazTerrainCache(LazTerrainMemoryCache(), diskCache)
+            val coordinator = TerrainDecodeCoordinator(terrainCache)
+            val source = TerrainImportSource(
+                uri = Uri.fromFile(file).toString(),
+                displayName = displayName,
+                options = preferredOptions,
+            )
+            val outcome = coordinator.decode(
+                file = file,
+                displayName = displayName,
+                options = preferredOptions,
+                onPreview = { preview ->
+                    withContext(Dispatchers.Main.immediate) {
+                        TerrainPerformanceSession.publish(preview.gpuScene)
+                        setCustomTerrain(result = preview.terrain, source = source)
+                    }
+                },
+                onStage = { stage ->
+                    withContext(Dispatchers.Main.immediate) {
+                        _activeTerrainSummary.value = stage
+                    }
+                },
+            )
+            TerrainPerformanceSession.publish(outcome.gpuScene)
+            setCustomTerrain(result = outcome.terrain, source = source)
+            // If a sparse/preview path still returns exactOutcome, promote to full product.
+            val exactJob = outcome.exactOutcome
+            if (exactJob != null) {
+                viewModelScope.launch {
+                    val exact = runCatching { exactJob.await() }.getOrNull() ?: return@launch
+                    TerrainPerformanceSession.publish(exact.gpuScene)
+                    setCustomTerrain(result = exact.terrain, source = source)
+                }
+            }
+        } catch (error: Throwable) {
+            _activeTerrainSummary.value =
+                "Could not restore ${displayName}: ${error.localizedMessage ?: "decode failed"}"
+        }
     }
 
     private fun saveSettings() {
@@ -1356,14 +2016,43 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         renderJob?.cancel()
+        refineJob?.cancel()
         locationJob?.cancel()
         compassHeadingJob?.cancel()
         basemapJob?.cancel()
         surveyLayerJob?.cancel()
         breadcrumbTrackJob?.cancel()
+        excavationLogJob?.cancel()
+        surveyBoundaryJob?.cancel()
         offlineBasemapRegionJob?.cancel()
         offlineBasemapDownloadJob?.cancel()
         saveSettingsJob?.cancel()
         super.onCleared()
     }
 }
+
+enum class LightingPreset {
+    NORTHWEST,
+    SOUTHEAST,
+    OVERHEAD,
+}
+
+/** Memo key for skipping redundant hillshade work when sliders settle on the same values. */
+private data class HillshadeCacheKey(
+    val gridIdentity: Int,
+    val width: Int,
+    val height: Int,
+    val sunAzimuth: Float,
+    val sunAltitude: Float,
+    val vegetationFilter: Float,
+    val palette: Int,
+    val contrast: Float,
+    val visualizationMode: Int,
+    val overlayType: Int,
+    val overlayOpacity: Float,
+    val zScale: Float,
+    val featureScaleMeters: Float,
+    val analysisSensitivity: Float,
+    val contourIntervalMeters: Float,
+    val previewMaxSide: Int,
+)

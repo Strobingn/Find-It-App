@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
@@ -24,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,16 +40,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
+import com.example.data.CopcAsset
+import com.example.data.CopcStacCatalog
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
 import com.example.data.LazTerrainCache
 import com.example.data.LazTerrainDiskCache
 import com.example.data.LazTerrainMemoryCache
+import com.example.data.LazPickerSession
+import com.example.data.LazPickerSessionStore
+import com.example.data.LidarAreaSelection
 import com.example.data.LidarImportOptions
 import com.example.data.MosaicTerrainBuilder
 import com.example.data.MosaicTerrainTile
 import com.example.data.LidarSearchRequest
+import com.example.data.NormalizedRasterBounds
 import com.example.data.NortheastLidarRegion
 import com.example.data.NysHistoricLazTileCatalog
 import com.example.data.TerrainDecodeCoordinator
@@ -56,12 +67,17 @@ import com.example.data.local.AppDatabase
 import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.data.mosaic.MosaicProject
+import com.example.data.mosaic.MosaicProjectResume
+import com.example.data.mosaic.MosaicProjectState
 import com.example.data.mosaic.MosaicProjectTile
 import java.io.File
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
@@ -83,6 +99,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 
+private enum class AreaSelectionMode { RECTANGLE, RADIUS, POLYGON }
+
 /**
  * Public LiDAR tile resolver and downloader for historic-site work.
  *
@@ -97,6 +115,7 @@ fun NysLazTilePicker(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val catalog = remember { NysHistoricLazTileCatalog() }
+    val copcCatalog = remember { CopcStacCatalog() }
     val store = remember(context) { LazDownloadQueue.store(context) }
     val diskCache = remember(context) { LazTerrainDiskCache(File(context.cacheDir, "decoded-terrain")) }
     val terrainCache = remember(diskCache) { LazTerrainCache(LazTerrainMemoryCache(), diskCache) }
@@ -109,17 +128,30 @@ fun NysLazTilePicker(
     var south by remember { mutableStateOf("") }
     var east by remember { mutableStateOf("") }
     var north by remember { mutableStateOf("") }
+    var areaSelectionMode by rememberSaveable { mutableStateOf(AreaSelectionMode.RECTANGLE) }
+    var showAreaMapPicker by remember { mutableStateOf(false) }
+    var radiusLatitude by remember { mutableStateOf("") }
+    var radiusLongitude by remember { mutableStateOf("") }
+    var radiusMiles by remember { mutableStateOf("") }
+    var polygonVertices by remember { mutableStateOf("") }
     var selectedRegion by remember { mutableStateOf<NortheastLidarRegion?>(null) }
     var mosaicProjectName by remember { mutableStateOf("") }
     var tiles by remember { mutableStateOf<List<NysHistoricLazTileCatalog.Tile>>(emptyList()) }
+    var copcAssets by remember { mutableStateOf<List<CopcAsset>>(emptyList()) }
+    var lastSearchBounds by remember {
+        mutableStateOf<com.example.geospatial.GeoSpatialLibrary.GeographicBounds?>(null)
+    }
     var savedMosaicProjects by remember { mutableStateOf<List<MosaicProject>>(emptyList()) }
     var selectedUrls by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedAreaDescription by remember { mutableStateOf<String?>(null) }
     var downloadEstimate by remember { mutableStateOf<NysHistoricLazTileCatalog.DownloadEstimate?>(null) }
     var isLookingUp by remember { mutableStateOf(false) }
     var isEstimatingDownload by remember { mutableStateOf(false) }
     var downloadJob by remember { mutableStateOf<Job?>(null) }
+    var activeCopcAssetId by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var sessionRestored by remember { mutableStateOf(false) }
     // Downloads live in LazDownloadService, so they survive leaving this screen. The picker only
     // observes them and opens a tile once its bytes have landed.
     val downloadTasks by LazDownloadQueue.tasks.collectAsStateWithLifecycle()
@@ -127,6 +159,80 @@ fun NysLazTilePicker(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { /* Declined only costs the progress notification; the transfer itself still runs. */ }
+
+    LaunchedEffect(context) {
+        val saved = LazPickerSessionStore.load(context)
+        latitude = saved.latitude
+        longitude = saved.longitude
+        west = saved.west
+        south = saved.south
+        east = saved.east
+        north = saved.north
+        areaSelectionMode = AreaSelectionMode.entries.firstOrNull {
+            it.name == saved.areaSelectionMode
+        } ?: AreaSelectionMode.RECTANGLE
+        radiusLatitude = saved.radiusLatitude
+        radiusLongitude = saved.radiusLongitude
+        radiusMiles = saved.radiusMiles
+        polygonVertices = saved.polygonVertices
+        selectedRegion = saved.selectedRegion?.let { name ->
+            NortheastLidarRegion.entries.firstOrNull { it.name == name }
+        }
+        mosaicProjectName = saved.mosaicProjectName
+        tiles = saved.tiles
+        copcAssets = saved.copcAssets
+        selectedUrls = saved.selectedUrls
+        selectedAreaDescription = saved.selectedAreaDescription
+        lastSearchBounds = saved.lastSearchBounds
+        sessionRestored = true
+    }
+
+    LaunchedEffect(
+        sessionRestored,
+        latitude,
+        longitude,
+        west,
+        south,
+        east,
+        north,
+        areaSelectionMode,
+        radiusLatitude,
+        radiusLongitude,
+        radiusMiles,
+        polygonVertices,
+        selectedRegion,
+        mosaicProjectName,
+        tiles,
+        copcAssets,
+        selectedUrls,
+        selectedAreaDescription,
+        lastSearchBounds,
+    ) {
+        if (!sessionRestored) return@LaunchedEffect
+        LazPickerSessionStore.save(
+            context,
+            LazPickerSession(
+                latitude = latitude,
+                longitude = longitude,
+                west = west,
+                south = south,
+                east = east,
+                north = north,
+                areaSelectionMode = areaSelectionMode.name,
+                radiusLatitude = radiusLatitude,
+                radiusLongitude = radiusLongitude,
+                radiusMiles = radiusMiles,
+                polygonVertices = polygonVertices,
+                selectedRegion = selectedRegion?.name,
+                mosaicProjectName = mosaicProjectName,
+                tiles = tiles,
+                copcAssets = copcAssets,
+                selectedUrls = selectedUrls,
+                selectedAreaDescription = selectedAreaDescription,
+                lastSearchBounds = lastSearchBounds,
+            ),
+        )
+    }
 
     LaunchedEffect(mosaicProjectDao) {
         mosaicProjectDao.observeAll().collect { stored ->
@@ -159,6 +265,9 @@ fun NysLazTilePicker(
         isLookingUp = true
         error = null
         downloadEstimate = null
+        selectedAreaDescription = null
+        copcAssets = emptyList()
+        lastSearchBounds = null
         status = "Finding the exact LiDAR tile…"
         scope.launch {
             try {
@@ -171,6 +280,7 @@ fun NysLazTilePicker(
                 }
             } catch (t: Throwable) {
                 tiles = emptyList()
+                copcAssets = emptyList()
                 error = t.localizedMessage ?: "Tile lookup failed."
                 status = null
             } finally {
@@ -179,35 +289,69 @@ fun NysLazTilePicker(
         }
     }
 
-    fun lookupArea() {
-        val westValue = west.trim().toDoubleOrNull()
-        val southValue = south.trim().toDoubleOrNull()
-        val eastValue = east.trim().toDoubleOrNull()
-        val northValue = north.trim().toDoubleOrNull()
-        if (westValue == null || southValue == null || eastValue == null || northValue == null ||
-            westValue !in -180.0..180.0 || eastValue !in -180.0..180.0 ||
-            southValue !in -90.0..90.0 || northValue !in -90.0..90.0 ||
-            westValue >= eastValue || southValue >= northValue
-        ) {
-            error = "Enter west < east and south < north geographic bounds."
-            return
-        }
+    fun tileBounds(tile: NysHistoricLazTileCatalog.Tile): com.example.geospatial.GeoSpatialLibrary.GeographicBounds? {
+        val minLon = tile.minLongitude ?: return null
+        val minLat = tile.minLatitude ?: return null
+        val maxLon = tile.maxLongitude ?: return null
+        val maxLat = tile.maxLatitude ?: return null
+        return com.example.geospatial.GeoSpatialLibrary.GeographicBounds(
+            minLat = minLat,
+            maxLat = maxLat,
+            minLon = minLon,
+            maxLon = maxLon,
+        ).takeIf { minLat < maxLat && minLon < maxLon }
+    }
+
+    fun lookupArea(selection: LidarAreaSelection, description: String) {
         isLookingUp = true
         error = null
         downloadEstimate = null
-        status = "Resolving every LiDAR tile intersecting this area…"
+        selectedAreaDescription = selection.projectAreaDescription()
+        status = "Resolving every LiDAR tile intersecting this $description…"
         scope.launch {
             try {
-                tiles = catalog.tilesInBounds(westValue, southValue, eastValue, northValue)
+                val bounds = selection.bounds
+                lastSearchBounds = bounds
+                val (lazResult, copcResult) = coroutineScope {
+                    val laz = async {
+                        runCatching {
+                            catalog.tilesInBounds(
+                                west = bounds.minLon,
+                                south = bounds.minLat,
+                                east = bounds.maxLon,
+                                north = bounds.maxLat,
+                            )
+                        }
+                    }
+                    val copc = async { runCatching { copcCatalog.search(bounds) } }
+                    laz.await() to copc.await()
+                }
+                val resolved = lazResult.getOrDefault(emptyList())
+                // Providers only accept envelopes. Preserve a tile with no returned footprint so
+                // the server's spatial intersection remains authoritative, but precisely filter
+                // every tile whose metadata gives us a usable geographic rectangle.
+                tiles = resolved.filter { tile -> tileBounds(tile)?.let(selection::intersects) ?: true }
+                copcAssets = copcResult.getOrDefault(emptyList()).filter { asset ->
+                    asset.bounds?.let(selection::intersects) ?: true
+                }
+                if (tiles.isEmpty() && copcAssets.isEmpty()) {
+                    lazResult.exceptionOrNull()?.let { throw it }
+                    copcResult.exceptionOrNull()?.let { throw it }
+                }
                 selectedUrls = tiles.map { it.downloadUrl }.toSet()
                 status = when {
-                    tiles.isEmpty() -> "No published LiDAR tiles intersect that area."
-                    tiles.size >= NysHistoricLazTileCatalog.MAX_NATIONAL_MAP_RESULTS ->
-                        "Found ${tiles.size} tiles — the per-search cap. Narrow the box to see the rest."
-                    else -> "Found ${tiles.size} intersecting tiles. Select files, then build one mosaic."
+                    tiles.isEmpty() && copcAssets.isEmpty() ->
+                        "No published LiDAR tiles intersect that area."
+                    resolved.size >= NysHistoricLazTileCatalog.MAX_NATIONAL_MAP_RESULTS ->
+                        "Found ${copcAssets.size} streamable COPC and ${tiles.size} downloadable LAZ files — " +
+                            "the LAZ search hit its cap. Narrow the box to see the rest."
+                    else ->
+                        "Found ${copcAssets.size} streamable COPC and ${tiles.size} downloadable LAZ files."
                 }
             } catch (t: Throwable) {
                 tiles = emptyList()
+                copcAssets = emptyList()
+                lastSearchBounds = null
                 selectedUrls = emptySet()
                 error = t.localizedMessage ?: "Area tile lookup failed."
                 status = null
@@ -217,17 +361,80 @@ fun NysLazTilePicker(
         }
     }
 
+    fun streamCopc(asset: CopcAsset) {
+        if (downloadJob?.isActive == true) return
+        val query = lastSearchBounds ?: run {
+            error = "Select an area before starting a COPC stream."
+            return
+        }
+        val assetBounds = asset.bounds ?: query
+        val clippedMinLon = maxOf(query.minLon, assetBounds.minLon)
+        val clippedMaxLon = minOf(query.maxLon, assetBounds.maxLon)
+        val clippedMinLat = maxOf(query.minLat, assetBounds.minLat)
+        val clippedMaxLat = minOf(query.maxLat, assetBounds.maxLat)
+        val width = assetBounds.maxLon - assetBounds.minLon
+        val height = assetBounds.maxLat - assetBounds.minLat
+        if (width <= 0.0 || height <= 0.0 ||
+            clippedMinLon >= clippedMaxLon || clippedMinLat >= clippedMaxLat
+        ) {
+            error = "The selected area does not overlap this COPC source."
+            return
+        }
+        val focus = NormalizedRasterBounds(
+            left = (clippedMinLon - assetBounds.minLon) / width,
+            top = (assetBounds.maxLat - clippedMaxLat) / height,
+            right = (clippedMaxLon - assetBounds.minLon) / width,
+            bottom = (assetBounds.maxLat - clippedMinLat) / height,
+        ).sanitized()
+        val options = LidarImportOptions(
+            groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+            rasterResolution = 1_024,
+            smoothingRadius = 0,
+            focusBounds = focus,
+        )
+        error = null
+        activeCopcAssetId = asset.id
+        downloadJob = scope.launch {
+            try {
+                status = "Authorizing the USGS COPC stream…"
+                val signedAsset = copcCatalog.signedAsset(asset)
+                val outcome = decodeCoordinator.decodeRemoteCopc(
+                    url = signedAsset.href,
+                    // COPC is range-streamed rather than fully downloaded. Keep the sparse range
+                    // file beside the normal LAZ datasets so it survives cache cleanup and can be
+                    // reused when the same source is opened after leaving the map.
+                    cacheDirectory = File(store.directory, "copc-range-cache"),
+                    options = options,
+                    onStage = { status = it },
+                )
+                TerrainPerformanceSession.publish(outcome.gpuScene)
+                onCustomTerrainLoaded(outcome.terrain, null)
+                status = "Streamed ${asset.title} for the selected area."
+            } catch (_: CancellationException) {
+                status = "COPC stream cancelled. Cached byte ranges remain available."
+            } catch (t: Throwable) {
+                error = t.localizedMessage ?: "COPC streaming failed."
+                status = null
+            } finally {
+                activeCopcAssetId = null
+                downloadJob = null
+            }
+        }
+    }
+
     // A box handed over from the map arrives here after the tab switch. Consuming it means
     // returning to this tab later does not silently repeat the search.
     val mapSearchBounds by LidarSearchRequest.pending.collectAsStateWithLifecycle()
-    LaunchedEffect(mapSearchBounds) {
+    LaunchedEffect(mapSearchBounds, sessionRestored) {
+        if (!sessionRestored) return@LaunchedEffect
         val bounds = LidarSearchRequest.consume() ?: return@LaunchedEffect
         selectedRegion = null
         west = formatDegrees(bounds.minLon)
         south = formatDegrees(bounds.minLat)
         east = formatDegrees(bounds.maxLon)
         north = formatDegrees(bounds.maxLat)
-        lookupArea()
+        areaSelectionMode = AreaSelectionMode.RECTANGLE
+        lookupArea(LidarAreaSelection.Rectangle(bounds), description = "rectangle")
     }
 
     fun estimateSelectedDownload() {
@@ -282,22 +489,40 @@ fun NysLazTilePicker(
                     rasterResolution = 1_024,
                     smoothingRadius = 0,
                 )
+                val source = TerrainImportSource(
+                    uri = Uri.fromFile(file).toString(),
+                    displayName = displayName,
+                    options = options,
+                )
                 val outcome = decodeCoordinator.decode(
                     file = file,
                     displayName = displayName,
                     options = options,
+                    onPreview = { preview ->
+                        scope.launch {
+                            TerrainPerformanceSession.publish(preview.gpuScene)
+                            onCustomTerrainLoaded(preview.terrain, source)
+                            status = if (preview.isPreview) {
+                                "Dense terrain decoding… (filling holes)"
+                            } else {
+                                "Terrain visible — finishing detail…"
+                            }
+                        }
+                    },
                     onStage = { stage -> scope.launch { status = stage } },
                 )
                 TerrainPerformanceSession.publish(outcome.gpuScene)
-                onCustomTerrainLoaded(
-                    outcome.terrain,
-                    TerrainImportSource(
-                        uri = Uri.fromFile(file).toString(),
-                        displayName = displayName,
-                        options = options,
-                    ),
-                )
+                onCustomTerrainLoaded(outcome.terrain, source)
                 status = "Opened $displayName using ASPRS ground class 2 with class 8 fallback."
+                val exactJob = outcome.exactOutcome
+                if (exactJob != null) {
+                    scope.launch {
+                        val exact = runCatching { exactJob.await() }.getOrNull() ?: return@launch
+                        TerrainPerformanceSession.publish(exact.gpuScene)
+                        onCustomTerrainLoaded(exact.terrain, source)
+                        status = "Exact terrain ready · $displayName"
+                    }
+                }
             } catch (_: CancellationException) {
                 status = null
             } catch (t: Throwable) {
@@ -315,19 +540,35 @@ fun NysLazTilePicker(
      * no index entry; those still fall back to the name, and the match is recorded so the
      * association is explicit from then on.
      */
-    fun reusableFile(tile: NysHistoricLazTileCatalog.Tile): File? {
-        store.fileForSource(tile.downloadUrl)?.let { return it }
-        val byName = store.list().firstOrNull { it.displayName == tile.name }?.file ?: return null
-        store.recordSource(tile.downloadUrl, byName)
+    fun reusableFile(
+        sourceUrl: String,
+        displayName: String,
+        expectedLocalFileName: String? = null,
+    ): File? {
+        store.fileForSource(sourceUrl)?.let { return it }
+        expectedLocalFileName
+            ?.let { File(store.directory, it) }
+            ?.takeIf(store::contains)
+            ?.let {
+                store.recordSource(sourceUrl, it)
+                return it
+            }
+        val byName = store.list().firstOrNull { it.displayName == displayName }?.file ?: return null
+        store.recordSource(sourceUrl, byName)
         return byName
     }
+
+    /** A project member can be reopened only from its recorded source URL or saved local file. */
+    fun storedProjectFile(tile: MosaicProjectTile): File? =
+        store.fileForSource(tile.sourceUrl)
+            ?: File(store.directory, tile.localFileName).takeIf(store::contains)
 
     fun downloadAndOpen(tile: NysHistoricLazTileCatalog.Tile) {
         error = null
         // Already on disk from an earlier background download - skip straight to decoding.
-        val existing = reusableFile(tile)
+        val existing = reusableFile(tile.downloadUrl, tile.name)
         if (existing != null) {
-            openDownloadedFile(existing, tile.name)
+            openDownloadedFile(existing, existing.name)
             return
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -377,30 +618,197 @@ fun NysLazTilePicker(
      * instead of starting over.
      */
     suspend fun awaitDownloadedFile(
-        tile: NysHistoricLazTileCatalog.Tile,
+        sourceUrl: String,
+        displayName: String,
+        expectedLocalFileName: String? = null,
         onProgress: (LazDownloadTask) -> Unit,
     ): File {
-        reusableFile(tile)?.let { return it }
-        LazDownloadService.enqueue(context, tile.downloadUrl, tile.name)
+        reusableFile(sourceUrl, displayName, expectedLocalFileName)?.let { return it }
+        LazDownloadService.enqueue(context, sourceUrl, displayName)
         val finished = LazDownloadQueue.tasks
-            .map { list -> list.firstOrNull { it.url == tile.downloadUrl } }
+            .map { list -> list.firstOrNull { it.url == sourceUrl } }
             .onEach { task -> task?.let(onProgress) }
             // A null task means something else already dismissed the entry, so fall through to
             // the disk check below rather than waiting on a record that no longer exists.
             .first { it == null || it.isFinished }
         if (finished != null && finished.state == LazDownloadState.COMPLETED) {
-            LazDownloadQueue.dismiss(tile.downloadUrl)
+            LazDownloadQueue.dismiss(sourceUrl)
             finished.filePath?.let { return File(it) }
         }
         if (finished != null && finished.state == LazDownloadState.CANCELLED) {
-            LazDownloadQueue.dismiss(tile.downloadUrl)
+            LazDownloadQueue.dismiss(sourceUrl)
             throw CancellationException("Download cancelled")
         }
-        reusableFile(tile)?.let { return it }
+        reusableFile(sourceUrl, displayName, expectedLocalFileName)?.let { return it }
         // The failed entry stays in the queue so the retry row can resume it. Dismissing here meant
         // one bad tile in a large mosaic discarded its own partial transfer along with any way to
         // resume it, forcing the whole area to be resolved and fetched again.
-        error(finished?.error ?: "Download of ${tile.name} did not complete")
+        error(finished?.error ?: "Download of $displayName did not complete")
+    }
+
+    /**
+     * Builds a project from every recorded source file, downloading only the members that are
+     * still absent. Project state is saved before the first transfer and after each completed
+     * source, so cancellation, a failed host, or a process restart can resume the same area.
+     */
+    fun startOrResumeMosaicProject(initialProject: MosaicProject) {
+        if (downloadJob?.isActive == true) return
+        error = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        downloadJob = scope.launch {
+            var project = initialProject
+            try {
+                val options = LidarImportOptions(
+                    groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+                    rasterResolution = 1_024,
+                    smoothingRadius = 0,
+                )
+                val missingBeforeStart = project.tiles.count { storedProjectFile(it) == null }
+                project = project.copy(
+                    state = MosaicProjectResume.stateWhenStarted(project, missingBeforeStart),
+                    recoveryMessage = null,
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+                withContext(NonCancellable) { mosaicProjectDao.upsert(project.toEntity()) }
+                val decodedTiles = project.tiles.mapIndexed { index, tile ->
+                    status = "${index + 1}/${project.tiles.size}: preparing ${tile.displayName}…"
+                    val file = awaitDownloadedFile(
+                        sourceUrl = tile.sourceUrl,
+                        displayName = tile.displayName,
+                        expectedLocalFileName = tile.localFileName,
+                    ) { task ->
+                        status = task.fraction?.let {
+                            "${index + 1}/${project.tiles.size}: ${tile.displayName} ${(it * 100).toInt()}%"
+                        } ?: "${index + 1}/${project.tiles.size}: ${formatBytesCompact(task.downloadedBytes)} downloaded"
+                    }
+                    project = project.copy(
+                        tiles = project.tiles.map { member ->
+                            if (member.sourceUrl == tile.sourceUrl) member.copy(localFileName = file.name) else member
+                        },
+                        state = MosaicProjectState.DOWNLOADING,
+                        recoveryMessage = null,
+                        updatedAtMillis = System.currentTimeMillis(),
+                    )
+                    mosaicProjectDao.upsert(project.toEntity())
+                    status = "${index + 1}/${project.tiles.size}: decoding ${tile.displayName}…"
+                    val outcome = decodeCoordinator.decode(file, tile.displayName, options) { stage -> status = stage }
+                    MosaicTerrainTile(tile.displayName, outcome.terrain, tile.bounds)
+                }
+                status = "Rebuilding ${project.displayName}…"
+                val mosaic = withContext(Dispatchers.Default) {
+                    MosaicTerrainBuilder.build(project.displayName, decodedTiles)
+                }
+                project = project.copy(
+                    state = MosaicProjectState.READY,
+                    recoveryMessage = null,
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+                mosaicProjectDao.upsert(project.toEntity())
+                TerrainPerformanceSession.publish(com.example.data.TerrainGpuSceneBuilder.build(mosaic.grid))
+                onCustomTerrainLoaded(mosaic, null)
+                status = "Opened ${project.displayName}. Source files remain offline for reopening."
+            } catch (_: CancellationException) {
+                val readyCount = project.tiles.count { storedProjectFile(it) != null }
+                project = project.copy(
+                    state = MosaicProjectState.NEEDS_ATTENTION,
+                    recoveryMessage = MosaicProjectResume.pausedMessage(readyCount, project.tiles.size),
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+                withContext(NonCancellable) { mosaicProjectDao.upsert(project.toEntity()) }
+                status = "Project paused. Resume ${project.displayName} when ready."
+            } catch (t: Throwable) {
+                project = project.copy(
+                    state = MosaicProjectState.NEEDS_ATTENTION,
+                    recoveryMessage = t.localizedMessage ?: "A source file could not be prepared.",
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+                mosaicProjectDao.upsert(project.toEntity())
+                error = project.recoveryMessage
+                status = null
+            } finally {
+                downloadJob = null
+            }
+        }
+    }
+
+    fun lookupRectangle() {
+        val westValue = west.trim().toDoubleOrNull()
+        val southValue = south.trim().toDoubleOrNull()
+        val eastValue = east.trim().toDoubleOrNull()
+        val northValue = north.trim().toDoubleOrNull()
+        if (westValue == null || southValue == null || eastValue == null || northValue == null ||
+            westValue !in -180.0..180.0 || eastValue !in -180.0..180.0 ||
+            southValue !in -90.0..90.0 || northValue !in -90.0..90.0 ||
+            westValue >= eastValue || southValue >= northValue
+        ) {
+            error = "Enter west < east and south < north geographic bounds."
+            return
+        }
+        lookupArea(
+            LidarAreaSelection.Rectangle(
+                com.example.geospatial.GeoSpatialLibrary.GeographicBounds(
+                    minLat = southValue,
+                    maxLat = northValue,
+                    minLon = westValue,
+                    maxLon = eastValue,
+                ),
+            ),
+            description = "rectangle",
+        )
+    }
+
+    fun lookupRadius() {
+        val latitudeValue = radiusLatitude.trim().toDoubleOrNull()
+        val longitudeValue = radiusLongitude.trim().toDoubleOrNull()
+        val milesValue = radiusMiles.trim().toDoubleOrNull()
+        if (latitudeValue == null || longitudeValue == null || milesValue == null ||
+            latitudeValue !in -90.0..90.0 || longitudeValue !in -180.0..180.0 ||
+            milesValue <= 0.0
+        ) {
+            error = "Enter a valid center coordinate and radius in miles."
+            return
+        }
+        val selection = runCatching {
+            LidarAreaSelection.Radius(
+                center = LidarAreaSelection.Point(latitudeValue, longitudeValue),
+                radiusMeters = milesValue * METERS_PER_MILE,
+            )
+        }.getOrElse {
+            error = it.message ?: "Radius must be no more than 62.1 miles."
+            return
+        }
+        lookupArea(selection, description = "radius")
+    }
+
+    fun lookupPolygon() {
+        val points = buildList {
+            polygonVertices.lineSequence().filter { it.isNotBlank() }.forEachIndexed { index, line ->
+                val values = line.trim().split(Regex("[,\\s]+")).filter(String::isNotBlank)
+                if (values.size != 2) {
+                    error = "Line ${index + 1} must be latitude, longitude."
+                    return
+                }
+                val latitudeValue = values[0].toDoubleOrNull()
+                val longitudeValue = values[1].toDoubleOrNull()
+                if (latitudeValue == null || longitudeValue == null ||
+                    latitudeValue !in -90.0..90.0 || longitudeValue !in -180.0..180.0
+                ) {
+                    error = "Line ${index + 1} has an invalid latitude or longitude."
+                    return
+                }
+                add(LidarAreaSelection.Point(latitudeValue, longitudeValue))
+            }
+        }
+        val selection = runCatching { LidarAreaSelection.Polygon(points) }.getOrElse {
+            error = it.message ?: "Enter at least three vertices that enclose an area."
+            return
+        }
+        lookupArea(selection, description = "polygon")
     }
 
     fun downloadSelectedMosaic() {
@@ -419,112 +827,32 @@ fun NysLazTilePicker(
             error = "One or more selected tiles have no geographic footprint, so they cannot form a safe mosaic."
             return
         }
-        error = null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        val now = System.currentTimeMillis()
+        val projectName = mosaicProjectName.trim().ifBlank {
+            "USGS ${selected.size}-tile project"
         }
-        downloadJob = scope.launch {
-            try {
-                val options = LidarImportOptions(
-                    groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
-                    rasterResolution = 1_024,
-                    smoothingRadius = 0,
-                )
-                val projectTiles = mutableListOf<MosaicProjectTile>()
-                val decodedTiles = selected.mapIndexed { index, tile ->
-                    status = "${index + 1}/${selected.size}: preparing ${tile.name}…"
-                    val file = awaitDownloadedFile(tile) { task ->
-                        status = task.fraction?.let {
-                            "${index + 1}/${selected.size}: ${tile.name} ${(it * 100).toInt()}%"
-                        } ?: "${index + 1}/${selected.size}: ${formatBytesCompact(task.downloadedBytes)} downloaded"
-                    }
-                    status = "${index + 1}/${selected.size}: decoding ${tile.name}…"
-                    val outcome = decodeCoordinator.decode(file, tile.name, options) { stage -> status = stage }
-                    val bounds = com.example.geospatial.GeoSpatialLibrary.GeographicBounds(
+        val project = MosaicProject(
+            id = UUID.randomUUID().toString(),
+            displayName = projectName,
+            tiles = selected.map { tile ->
+                MosaicProjectTile(
+                    displayName = tile.name,
+                    localFileName = reusableFile(tile.downloadUrl, tile.name)?.name ?: tile.name,
+                    sourceUrl = tile.downloadUrl,
+                    bounds = com.example.geospatial.GeoSpatialLibrary.GeographicBounds(
                         minLat = requireNotNull(tile.minLatitude),
                         maxLat = requireNotNull(tile.maxLatitude),
                         minLon = requireNotNull(tile.minLongitude),
                         maxLon = requireNotNull(tile.maxLongitude),
-                    )
-                    projectTiles += MosaicProjectTile(
-                        displayName = tile.name,
-                        localFileName = file.name,
-                        sourceUrl = tile.downloadUrl,
-                        bounds = bounds,
-                    )
-                    MosaicTerrainTile(
-                        displayName = tile.name,
-                        terrain = outcome.terrain,
-                        bounds = bounds,
-                    )
-                }
-                status = "Mosaicking ${decodedTiles.size} source tiles without filling gaps…"
-                val projectName = mosaicProjectName.trim().ifBlank {
-                    "USGS ${decodedTiles.size}-tile project"
-                }
-                val mosaic = withContext(Dispatchers.Default) {
-                    MosaicTerrainBuilder.build(projectName, decodedTiles)
-                }
-                val now = System.currentTimeMillis()
-                mosaicProjectDao.upsert(
-                    MosaicProject(
-                        id = UUID.randomUUID().toString(),
-                        displayName = projectName,
-                        tiles = projectTiles,
-                        createdAtMillis = now,
-                        updatedAtMillis = now,
-                    ).toEntity(),
+                    ),
                 )
-                TerrainPerformanceSession.publish(com.example.data.TerrainGpuSceneBuilder.build(mosaic.grid))
-                onCustomTerrainLoaded(mosaic, null)
-                status = "Saved and opened ${decodedTiles.size}-tile georeferenced mosaic. Source files remain offline."
-            } catch (_: CancellationException) {
-                status = "Mosaic download cancelled. Completed source files remain available for retry."
-            } catch (t: Throwable) {
-                error = t.localizedMessage ?: "Mosaic download or decode failed."
-                status = null
-            } finally {
-                downloadJob = null
-            }
-        }
-    }
-
-    fun openMosaicProject(project: MosaicProject) {
-        if (downloadJob?.isActive == true) return
-        downloadJob = scope.launch {
-            try {
-                val options = LidarImportOptions(
-                    groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
-                    rasterResolution = 1_024,
-                    smoothingRadius = 0,
-                )
-                val decodedTiles = project.tiles.mapIndexed { index, tile ->
-                    val file = File(store.directory, tile.localFileName)
-                    require(store.contains(file)) { "Source file is unavailable: ${tile.localFileName}" }
-                    status = "Reopening ${index + 1}/${project.tiles.size}: ${tile.displayName}…"
-                    val outcome = decodeCoordinator.decode(file, tile.displayName, options) { stage -> status = stage }
-                    MosaicTerrainTile(tile.displayName, outcome.terrain, tile.bounds)
-                }
-                status = "Rebuilding ${project.displayName}…"
-                val mosaic = withContext(Dispatchers.Default) {
-                    MosaicTerrainBuilder.build(project.displayName, decodedTiles)
-                }
-                mosaicProjectDao.upsert(project.copy(updatedAtMillis = System.currentTimeMillis()).toEntity())
-                TerrainPerformanceSession.publish(com.example.data.TerrainGpuSceneBuilder.build(mosaic.grid))
-                onCustomTerrainLoaded(mosaic, null)
-                status = "Reopened ${project.displayName}."
-            } catch (_: CancellationException) {
-                status = "Project reopening cancelled."
-            } catch (t: Throwable) {
-                error = t.localizedMessage ?: "Could not reopen mosaic project."
-                status = null
-            } finally {
-                downloadJob = null
-            }
-        }
+            },
+            createdAtMillis = now,
+            updatedAtMillis = now,
+            state = MosaicProjectState.DOWNLOADING,
+            areaSelectionDescription = selectedAreaDescription,
+        )
+        startOrResumeMosaicProject(project)
     }
 
     Card(
@@ -552,12 +880,12 @@ fun NysLazTilePicker(
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                "Area workflow: enter a geographic box to resolve every intersecting official tile, choose the files, then open one georeferenced terrain mosaic.",
+                "Area workflow: select a rectangle, radius, or polygon to resolve every intersecting official tile, choose the files, then open one georeferenced terrain mosaic.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                "Jump to a state, then narrow the box to the area you care about — a whole state returns far more tiles than you want to download. Or pan the Map tab to an area and use its search button to bring the visible bounds straight here.",
+                "Jump to a state, then narrow the search area — a whole state returns far more tiles than you want to download. The Map tab can send its visible rectangle straight here.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -614,52 +942,222 @@ fun NysLazTilePicker(
                 Text("Find exact LAZ tile")
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = west,
-                    onValueChange = { west = it.take(17); error = null },
-                    label = { Text("West lon") },
-                    placeholder = { Text("-74.05") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = east,
-                    onValueChange = { east = it.take(17); error = null },
-                    label = { Text("East lon") },
-                    placeholder = { Text("-74.03") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = south,
-                    onValueChange = { south = it.take(16); error = null },
-                    label = { Text("South lat") },
-                    placeholder = { Text("41.42") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedTextField(
-                    value = north,
-                    onValueChange = { north = it.take(16); error = null },
-                    label = { Text("North lat") },
-                    placeholder = { Text("41.44") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            Text("Area search", style = MaterialTheme.typography.titleMedium)
             OutlinedButton(
-                onClick = ::lookupArea,
+                onClick = { showAreaMapPicker = true },
                 enabled = !isLookingUp && downloadJob?.isActive != true,
-                modifier = Modifier.fillMaxWidth().height(52.dp).testTag("find_nys_laz_area"),
+                modifier = Modifier.fillMaxWidth().height(52.dp).testTag("pick_lidar_area_on_map"),
             ) {
-                Icon(Icons.Default.LocationOn, contentDescription = null)
+                Icon(Icons.Default.Map, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Find tiles in area")
+                Text("Pick area on map")
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            ) {
+                AreaSelectionMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = areaSelectionMode == mode,
+                        onClick = { areaSelectionMode = mode; error = null },
+                        label = {
+                            Text(
+                                when (mode) {
+                                    AreaSelectionMode.RECTANGLE -> "Rectangle"
+                                    AreaSelectionMode.RADIUS -> "Radius"
+                                    AreaSelectionMode.POLYGON -> "Polygon"
+                                },
+                            )
+                        },
+                    )
+                }
+            }
+            when (areaSelectionMode) {
+                AreaSelectionMode.RECTANGLE -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = west,
+                            onValueChange = { west = it.take(17); error = null },
+                            label = { Text("West lon") },
+                            placeholder = { Text("-74.05") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = east,
+                            onValueChange = { east = it.take(17); error = null },
+                            label = { Text("East lon") },
+                            placeholder = { Text("-74.03") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = south,
+                            onValueChange = { south = it.take(16); error = null },
+                            label = { Text("South lat") },
+                            placeholder = { Text("41.42") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = north,
+                            onValueChange = { north = it.take(16); error = null },
+                            label = { Text("North lat") },
+                            placeholder = { Text("41.44") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = ::lookupRectangle,
+                        enabled = !isLookingUp && downloadJob?.isActive != true,
+                        modifier = Modifier.fillMaxWidth().height(52.dp).testTag("find_nys_laz_area"),
+                    ) {
+                        Icon(Icons.Default.LocationOn, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Find tiles in rectangle")
+                    }
+                }
+                AreaSelectionMode.RADIUS -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = radiusLatitude,
+                            onValueChange = { radiusLatitude = it.take(16); error = null },
+                            label = { Text("Center latitude") },
+                            placeholder = { Text("41.43") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f).testTag("lidar_radius_latitude"),
+                        )
+                        OutlinedTextField(
+                            value = radiusLongitude,
+                            onValueChange = { radiusLongitude = it.take(17); error = null },
+                            label = { Text("Center longitude") },
+                            placeholder = { Text("-74.04") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f).testTag("lidar_radius_longitude"),
+                        )
+                    }
+                    OutlinedTextField(
+                        value = radiusMiles,
+                        onValueChange = { radiusMiles = it.take(8); error = null },
+                        label = { Text("Radius (miles, max 62.1)") },
+                        placeholder = { Text("0.5") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("lidar_radius_miles"),
+                    )
+                    OutlinedButton(
+                        onClick = ::lookupRadius,
+                        enabled = !isLookingUp && downloadJob?.isActive != true,
+                        modifier = Modifier.fillMaxWidth().height(52.dp).testTag("find_nys_laz_radius"),
+                    ) {
+                        Icon(Icons.Default.LocationOn, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Find tiles in radius")
+                    }
+                }
+                AreaSelectionMode.POLYGON -> {
+                    OutlinedTextField(
+                        value = polygonVertices,
+                        onValueChange = { polygonVertices = it.take(2_000); error = null },
+                        label = { Text("Polygon vertices: latitude, longitude per line") },
+                        placeholder = { Text("41.4200, -74.0500\n41.4200, -74.0300\n41.4400, -74.0400") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth().testTag("lidar_polygon_vertices"),
+                    )
+                    Text(
+                        "Use three or more points around the area. Tiles are checked against the polygon, not just its enclosing box.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(
+                        onClick = ::lookupPolygon,
+                        enabled = !isLookingUp && downloadJob?.isActive != true,
+                        modifier = Modifier.fillMaxWidth().height(52.dp).testTag("find_nys_laz_polygon"),
+                    ) {
+                        Icon(Icons.Default.LocationOn, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Find tiles in polygon")
+                    }
+                }
             }
 
+            if (showAreaMapPicker) {
+                Dialog(
+                    onDismissRequest = { showAreaMapPicker = false },
+                    properties = DialogProperties(usePlatformDefaultWidth = false),
+                ) {
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        LidarAreaPickerMapScreen(
+                            onAreaSelected = { bounds ->
+                                showAreaMapPicker = false
+                                selectedRegion = null
+                                west = formatDegrees(bounds.minLon)
+                                south = formatDegrees(bounds.minLat)
+                                east = formatDegrees(bounds.maxLon)
+                                north = formatDegrees(bounds.maxLat)
+                                areaSelectionMode = AreaSelectionMode.RECTANGLE
+                                lookupArea(LidarAreaSelection.Rectangle(bounds), description = "map box")
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
+
+            if ((tiles.isNotEmpty() || copcAssets.isNotEmpty()) &&
+                !selectedAreaDescription.isNullOrBlank()
+            ) {
+                Text(
+                    "Current tile result: $selectedAreaDescription",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                )
+            }
+            if (copcAssets.isNotEmpty()) {
+                Text("Fast COPC streaming", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Streams the byte ranges needed for the selected area. Downloadable LAZ files remain available below for offline use.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                copcAssets.forEachIndexed { index, asset ->
+                    Button(
+                        onClick = { streamCopc(asset) },
+                        enabled = downloadJob?.isActive != true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(64.dp)
+                            .testTag("stream_copc_asset_$index"),
+                    ) {
+                        Icon(Icons.Default.CloudDownload, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                            Text("Stream ${asset.title}", maxLines = 1)
+                            Text(
+                                "COPC range access · no full-file download",
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                            )
+                        }
+                        if (activeCopcAssetId == asset.id) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.width(22.dp).height(22.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
+                    }
+                }
+                if (activeCopcAssetId != null) {
+                    OutlinedButton(
+                        onClick = { downloadJob?.cancel() },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                    ) { Text("Cancel COPC stream") }
+                }
+            }
             tiles.forEach { tile ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Checkbox(
@@ -735,17 +1233,36 @@ fun NysLazTilePicker(
             if (savedMosaicProjects.isNotEmpty()) {
                 Text("Saved multi-tile projects", style = MaterialTheme.typography.titleMedium)
                 savedMosaicProjects.forEach { project ->
+                    val availableSourceCount = project.tiles.count { storedProjectFile(it) != null }
+                    val canResume = MosaicProjectResume.canResume(project, availableSourceCount)
                     OutlinedButton(
-                        onClick = { openMosaicProject(project) },
+                        onClick = { startOrResumeMosaicProject(project) },
                         enabled = downloadJob?.isActive != true,
-                        modifier = Modifier.fillMaxWidth().height(60.dp),
+                        modifier = Modifier.fillMaxWidth().height(
+                            if (project.areaSelectionDescription.isNullOrBlank()) 76.dp else 96.dp,
+                        ),
                     ) {
                         Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                             Text(project.displayName, maxLines = 1)
                             Text(
-                                "${project.tiles.size} source tile${if (project.tiles.size == 1) "" else "s"} · tap to reopen",
+                                "${availableSourceCount}/${project.tiles.size} source tile${if (project.tiles.size == 1) "" else "s"} ready · " +
+                                    if (canResume) "tap to resume" else "tap to reopen",
                                 style = MaterialTheme.typography.bodySmall,
                             )
+                            if (canResume && !project.recoveryMessage.isNullOrBlank()) {
+                                Text(
+                                    project.recoveryMessage,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                )
+                            }
+                            if (!project.areaSelectionDescription.isNullOrBlank()) {
+                                Text(
+                                    project.areaSelectionDescription,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                )
+                            }
                         }
                     }
                     TextButton(
@@ -850,6 +1367,8 @@ private fun formatBytesCompact(bytes: Long): String {
     val mib = bytes / (1024.0 * 1024.0)
     return String.format(Locale.US, "%.1f MiB", mib)
 }
+
+private const val METERS_PER_MILE = 1_609.344
 
 /** Six decimals is roughly 0.1 m of longitude, finer than any tile footprint. */
 private fun formatDegrees(value: Double): String = String.format(Locale.US, "%.6f", value)

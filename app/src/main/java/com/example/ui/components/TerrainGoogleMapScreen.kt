@@ -6,14 +6,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Point
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,22 +22,25 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EditLocationAlt
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MyLocation
@@ -46,6 +48,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -70,16 +74,12 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -94,7 +94,20 @@ import com.example.BuildConfig
 import com.example.data.ElevationGrid
 import com.example.data.HistoricMapOverlay
 import com.example.data.HistoricMapOverlayRepository
+import com.example.data.historicmap.GeoReferenceConfidence
+import com.example.data.historicmap.GeoReferenceTransform
+import com.example.data.historicmap.GeoReferencedMap
+import com.example.data.historicmap.GeoReferencer
+import com.example.data.historicmap.HistoricMapAgreementScorer
+import com.example.data.historicmap.HistoricMapControlPoint
+import com.example.data.historicmap.HistoricMapGeoreference
+import com.example.data.historicmap.MapFeatureAgreement
 import com.example.data.field.BreadcrumbTrack
+import com.example.data.field.FieldWaypoint
+import com.example.data.field.SweepCoverageGrid
+import com.example.data.field.SweepCoverageTracker
+import com.example.data.local.AppDatabase
+import com.example.data.local.toEntity
 import com.example.data.survey.SurveyFeature
 import com.example.data.survey.SurveyGeometryType
 import com.example.geospatial.GeoSpatialLibrary
@@ -113,19 +126,12 @@ import com.google.android.gms.maps.model.PolygonOptions
 import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
 import java.io.File
+import java.util.Locale
 import java.security.MessageDigest
-import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** A drag shorter than this in either axis is a stray tap, not a search box. */
-private const val MIN_SEARCH_BOX_PIXELS = 24f
-
-private val SearchBoxFill = Color(0x3329B6F6)
-private val SearchBoxStroke = Color(0xFF29B6F6)
 
 @Composable
 fun TerrainGoogleMapScreen(
@@ -137,6 +143,9 @@ fun TerrainGoogleMapScreen(
     breadcrumbTracks: List<BreadcrumbTrack> = emptyList(),
     /** Supplied when the host can act on a search box; omitting it hides the search control. */
     onFindLidarTiles: ((GeoSpatialLibrary.GeographicBounds) -> Unit)? = null,
+    routeWaypoints: List<FieldWaypoint> = emptyList(),
+    routeTotalMeters: Float = 0f,
+    onClearRoute: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -174,6 +183,129 @@ fun TerrainGoogleMapScreen(
     var activeHistoricMapId by rememberSaveable { mutableStateOf<String?>(null) }
     var historicPanelExpanded by rememberSaveable { mutableStateOf(false) }
     var historicMapMessage by remember { mutableStateOf<String?>(null) }
+    var controlPointMode by rememberSaveable { mutableStateOf(false) }
+    var pendingImageXFraction by rememberSaveable { mutableFloatStateOf(0.5f) }
+    var pendingImageYFraction by rememberSaveable { mutableFloatStateOf(0.5f) }
+    var swipeBlend by rememberSaveable { mutableFloatStateOf(1f) }
+    var showSideBySide by rememberSaveable { mutableStateOf(false) }
+    var controlPointMarkers by remember { mutableStateOf<List<Marker>>(emptyList()) }
+    val historicMapDao = remember(context) { AppDatabase.get(context).historicMapDao() }
+
+    // Live terrain-agreement feedback for the map being aligned: a relief-contrast evidence
+    // layer is built once per terrain grid, then the active map's ink is scored against it.
+    val reliefEvidence by produceState<HistoricMapAgreementScorer.EvidenceGrid?>(null, grid) {
+        value = withContext(Dispatchers.Default) {
+            runCatching { HistoricMapAgreementScorer.buildReliefEvidence(grid) }.getOrNull()
+        }
+    }
+    // Search coverage: ground swept so far, derived from GPS breadcrumb tracks and rendered
+    // as a translucent layer under the terrain overlay.
+    var showCoverage by rememberSaveable(terrainKey) { mutableStateOf(false) }
+    var sweepWidthMeters by rememberSaveable(terrainKey) {
+        mutableFloatStateOf(SweepCoverageTracker.DEFAULT_SWEEP_WIDTH_METERS)
+    }
+    var coverageOverlay by remember { mutableStateOf<GroundOverlay?>(null) }
+    var routePolyline by remember { mutableStateOf<Polyline?>(null) }
+    val sweepCoverage by produceState<SweepCoverageGrid?>(
+        null,
+        showCoverage,
+        breadcrumbTracks,
+        metadata.bounds,
+        sweepWidthMeters,
+    ) {
+        val bounds = metadata.bounds
+        if (!showCoverage || bounds == null || breadcrumbTracks.isEmpty()) {
+            value = null
+            return@produceState
+        }
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                SweepCoverageTracker.build(
+                    tracks = breadcrumbTracks,
+                    sweepWidthMeters = sweepWidthMeters,
+                    minLatitude = bounds.minLat,
+                    maxLatitude = bounds.maxLat,
+                    minLongitude = bounds.minLon,
+                    maxLongitude = bounds.maxLon,
+                )
+            }.getOrNull()
+        }
+    }
+    LaunchedEffect(googleMap, sweepCoverage) {
+        coverageOverlay?.remove()
+        coverageOverlay = null
+        val map = googleMap ?: return@LaunchedEffect
+        val coverage = sweepCoverage ?: return@LaunchedEffect
+        val bitmap = withContext(Dispatchers.Default) { renderSweepCoverageBitmap(coverage) }
+        coverageOverlay = map.addGroundOverlay(
+            GroundOverlayOptions()
+                .image(BitmapDescriptorFactory.fromBitmap(bitmap))
+                .positionFromBounds(
+                    LatLngBounds(
+                        LatLng(coverage.minLatitude, coverage.minLongitude),
+                        LatLng(coverage.maxLatitude, coverage.maxLongitude),
+                    ),
+                )
+                .transparency(0.2f)
+                .zIndex(2f),
+        )
+    }
+    LaunchedEffect(googleMap, routeWaypoints) {
+        routePolyline?.remove()
+        routePolyline = null
+        val map = googleMap ?: return@LaunchedEffect
+        if (routeWaypoints.size < 2) return@LaunchedEffect
+        routePolyline = map.addPolyline(
+            PolylineOptions()
+                .addAll(routeWaypoints.map { LatLng(it.latitude, it.longitude) })
+                .color(0xFFFFB300.toInt())
+                .width(7f)
+                .zIndex(5f),
+        )
+    }
+
+    val activeHistoricMap = historicMaps.firstOrNull { it.id == activeHistoricMapId }
+    val activeHistoricBitmap = activeHistoricMap?.let { historicBitmaps[it.id] }
+    val historicAgreement by produceState<MapFeatureAgreement?>(
+        null,
+        reliefEvidence,
+        activeHistoricMap,
+        activeHistoricBitmap,
+        metadata.bounds,
+    ) {
+        val evidence = reliefEvidence
+        val record = activeHistoricMap
+        val bounds = metadata.bounds
+        val bitmap = activeHistoricBitmap?.takeIf { !it.isRecycled }
+        if (evidence == null || record == null || bounds == null || bitmap == null) {
+            value = null
+            return@produceState
+        }
+        // Debounce slider drags: every alignment change restarts this effect, and only the
+        // configuration that stays put briefly gets scored.
+        kotlinx.coroutines.delay(250)
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                val pixels = IntArray(bitmap.width * bitmap.height)
+                bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                HistoricMapAgreementScorer.scoreOverlay(
+                    pixels = pixels,
+                    imageWidth = bitmap.width,
+                    imageHeight = bitmap.height,
+                    centerLatitude = record.latitude,
+                    centerLongitude = record.longitude,
+                    widthMeters = record.widthMeters,
+                    heightMeters = record.heightMeters,
+                    bearingDegrees = record.bearingDegrees,
+                    gridMinLatitude = bounds.minLat,
+                    gridMaxLatitude = bounds.maxLat,
+                    gridMinLongitude = bounds.minLon,
+                    gridMaxLongitude = bounds.maxLon,
+                    evidence = evidence,
+                )
+            }.getOrNull()
+        }
+    }
 
     fun refreshHistoricMaps() {
         historicMaps = historicMapRepository.list()
@@ -222,6 +354,92 @@ fun TerrainGoogleMapScreen(
         refreshHistoricMaps()
     }
 
+    fun persistGeoReferencedMap(overlay: HistoricMapOverlay) {
+        val now = System.currentTimeMillis()
+        val domain = GeoReferencedMap(
+            id = overlay.id,
+            terrainKey = terrainKey,
+            displayName = overlay.displayName,
+            imageUri = overlay.file.absolutePath,
+            sourceAttribution = overlay.sourceAttribution.ifBlank { "Imported historic map" },
+            controlPoints = overlay.controlPoints,
+            transform = overlay.transformStorage?.let { GeoReferenceTransform.fromStorage(it) },
+            rmseMeters = overlay.rmseMeters,
+            maxResidualMeters = overlay.maxResidualMeters,
+            confidence = overlay.confidence,
+            createdAtMillis = now,
+            updatedAtMillis = now,
+        )
+        scope.launch(Dispatchers.IO) {
+            historicMapDao.upsert(domain.toEntity())
+        }
+    }
+
+    fun applyControlPointFit(record: HistoricMapOverlay) {
+        val bitmap = historicBitmaps[record.id]?.takeIf { !it.isRecycled }
+        if (bitmap == null) {
+            historicMapMessage = "Wait for the map image to load before fitting."
+            return
+        }
+        if (record.controlPoints.size < 2) {
+            historicMapMessage = "Add at least two control points (map tap + image crosshair)."
+            return
+        }
+        val fit = GeoReferencer.fit(record.controlPoints)
+        if (fit.transform == null) {
+            historicMapMessage = fit.note
+            return
+        }
+        val placement = HistoricMapGeoreference.placementFromFit(fit, bitmap.width, bitmap.height)
+        if (placement == null) {
+            historicMapMessage = "Fit produced an unusable placement — spread control points."
+            return
+        }
+        val naturalHeight = record.baseWidthMeters / record.aspectRatio.coerceAtLeast(0.01f)
+        val updated = record.copy(
+            latitude = placement.centerLatitude,
+            longitude = placement.centerLongitude,
+            widthScale = (placement.widthMeters / record.baseWidthMeters).coerceIn(0.05f, 20f),
+            heightScale = (placement.heightMeters / naturalHeight.coerceAtLeast(1f)).coerceIn(0.05f, 20f),
+            bearingDegrees = placement.bearingDegrees.coerceIn(-180f, 180f),
+            confidence = fit.confidence,
+            rmseMeters = fit.rmseMeters,
+            maxResidualMeters = fit.maxResidualMeters,
+            transformStorage = fit.transform.toStorage(),
+        )
+        updateHistoricMap(updated)
+        persistGeoReferencedMap(updated)
+        historicMapMessage = buildString {
+            append(fit.confidence.label)
+            fit.rmseMeters?.let { append(" · RMSE ${"%.1f".format(Locale.US, it)} m") }
+            append(" · ${fit.note}")
+        }
+    }
+
+    fun addControlPointAt(latLng: LatLng) {
+        val active = historicMaps.firstOrNull { it.id == activeHistoricMapId } ?: return
+        val bitmap = historicBitmaps[active.id]?.takeIf { !it.isRecycled } ?: run {
+            historicMapMessage = "Wait for the map image to load."
+            return
+        }
+        val point = HistoricMapControlPoint(
+            imageX = pendingImageXFraction.coerceIn(0f, 1f) * (bitmap.width - 1).coerceAtLeast(1),
+            imageY = pendingImageYFraction.coerceIn(0f, 1f) * (bitmap.height - 1).coerceAtLeast(1),
+            latitude = latLng.latitude,
+            longitude = latLng.longitude,
+        )
+        val updated = active.copy(
+            controlPoints = active.controlPoints + point,
+            confidence = GeoReferenceConfidence.INSUFFICIENT_POINTS,
+            rmseMeters = null,
+            maxResidualMeters = null,
+            transformStorage = null,
+        )
+        updateHistoricMap(updated)
+        historicMapMessage = "Control point ${updated.controlPoints.size} added. " +
+            if (updated.controlPoints.size >= 2) "Fit when ready." else "Add another point."
+    }
+
     fun updateAlignment(updated: TerrainMapAlignment) {
         alignment = updated
         alignmentStore.save(terrainKey, updated)
@@ -251,7 +469,10 @@ fun TerrainGoogleMapScreen(
             overlay?.remove()
             surveyMapObjects.forEach(::removeMapObject)
             breadcrumbPolylines.forEach { it.remove() }
+            coverageOverlay?.remove()
+            routePolyline?.remove()
             historicOverlayObjects.values.forEach { it.remove() }
+            controlPointMarkers.forEach { it.remove() }
             googleMap = null
         }
     }
@@ -272,7 +493,7 @@ fun TerrainGoogleMapScreen(
         }
     }
 
-    LaunchedEffect(googleMap, historicMaps, historicBitmaps.toMap()) {
+    LaunchedEffect(googleMap, historicMaps, historicBitmaps.toMap(), swipeBlend, activeHistoricMapId) {
         val map = googleMap ?: return@LaunchedEffect
         // Rebuild wholesale rather than diffing. Anything left on the map but absent from the
         // replacement tracking map below becomes unreachable - onDispose only removes what it
@@ -283,17 +504,51 @@ fun TerrainGoogleMapScreen(
         historicMaps.forEach { record ->
             if (!record.visible) return@forEach
             val bitmap = historicBitmaps[record.id]?.takeIf { !it.isRecycled } ?: return@forEach
+            // Swipe blend multiplies only the active map so compare mode leaves others alone.
+            val opacityScale = if (record.id == activeHistoricMapId) swipeBlend.coerceIn(0f, 1f) else 1f
+            val effectiveOpacity = (record.opacity * opacityScale).coerceIn(0f, 1f)
             val added = map.addGroundOverlay(
                 GroundOverlayOptions()
                     .image(BitmapDescriptorFactory.fromBitmap(bitmap))
                     .position(LatLng(record.latitude, record.longitude), record.widthMeters, record.heightMeters)
                     .bearing(record.bearingDegrees)
-                    .transparency(1f - record.opacity.coerceIn(0.1f, 1f))
+                    .transparency(1f - effectiveOpacity)
                     .zIndex(3f),
             ) ?: return@forEach
             updated[record.id] = added
         }
         historicOverlayObjects = updated
+    }
+
+    // Keep the map-click handler on current control-point state (mapAsync captures once).
+    LaunchedEffect(googleMap, controlPointMode, activeHistoricMapId, pendingImageXFraction, pendingImageYFraction, historicMaps) {
+        val map = googleMap ?: return@LaunchedEffect
+        if (controlPointMode && activeHistoricMapId != null) {
+            map.setOnMapClickListener { latLng -> addControlPointAt(latLng) }
+        } else {
+            map.setOnMapClickListener(null)
+        }
+    }
+
+    LaunchedEffect(googleMap, activeHistoricMap?.controlPoints, controlPointMode) {
+        val map = googleMap ?: return@LaunchedEffect
+        controlPointMarkers.forEach { it.remove() }
+        val points = activeHistoricMap?.controlPoints.orEmpty()
+        if (!controlPointMode && points.isEmpty()) {
+            controlPointMarkers = emptyList()
+            return@LaunchedEffect
+        }
+        controlPointMarkers = points.mapIndexedNotNull { index, point ->
+            map.addMarker(
+                MarkerOptions()
+                    .position(LatLng(point.latitude, point.longitude))
+                    .title("CP ${index + 1}")
+                    .snippet(
+                        "Image ${point.imageX.toInt()}, ${point.imageY.toInt()}",
+                    )
+                    .zIndex(8f),
+            )
+        }
     }
 
     LaunchedEffect(googleMap, terrainBitmap, alignment, naturalSize, opacity, terrainKey) {
@@ -378,56 +633,8 @@ fun TerrainGoogleMapScreen(
         }
     }
 
-    // Drawing a search box has to sit above the map rather than inside it: the map consumes drags
-    // for panning, so the rectangle is captured by a transparent overlay that covers exactly the
-    // same area, letting screen coordinates map straight through the map's own projection.
-    var drawingSearchBox by remember { mutableStateOf(false) }
-    var boxStart by remember { mutableStateOf<Offset?>(null) }
-    var boxEnd by remember { mutableStateOf<Offset?>(null) }
-
-    fun clearSearchBox() {
-        boxStart = null
-        boxEnd = null
-    }
-
     Box(modifier.fillMaxSize()) {
         AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
-
-        if (drawingSearchBox) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("lidar_search_box_canvas")
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = { start ->
-                                boxStart = start
-                                boxEnd = start
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
-                                boxEnd = change.position
-                            },
-                        )
-                    },
-            ) {
-                val start = boxStart
-                val end = boxEnd
-                if (start != null && end != null) {
-                    Canvas(Modifier.fillMaxSize()) {
-                        val topLeft = Offset(minOf(start.x, end.x), minOf(start.y, end.y))
-                        val size = Size(abs(end.x - start.x), abs(end.y - start.y))
-                        drawRect(color = SearchBoxFill, topLeft = topLeft, size = size)
-                        drawRect(
-                            color = SearchBoxStroke,
-                            topLeft = topLeft,
-                            size = size,
-                            style = Stroke(width = 3f),
-                        )
-                    }
-                }
-            }
-        }
 
         OverlayHeader(
             mapType = mapType,
@@ -443,72 +650,68 @@ fun TerrainGoogleMapScreen(
             modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(0.96f),
         )
 
-        // The drawing prompt owns the bottom of the screen while a box is being drawn, and
-        // opacity/alignment controls are not what the user is reaching for mid-drag.
-        if (!drawingSearchBox) {
-            OverlayControls(
-                opacity = opacity,
-                onOpacityChanged = { opacity = it },
-                alignmentMode = alignmentMode,
-                onAlignmentModeChanged = { alignmentMode = it },
-                alignment = alignment,
-                canPlace = terrainBitmap != null,
-                onPlaceAtCenter = {
+        OverlayControls(
+            opacity = opacity,
+            onOpacityChanged = { opacity = it },
+            alignmentMode = alignmentMode,
+            onAlignmentModeChanged = { alignmentMode = it },
+            alignment = alignment,
+            canPlace = terrainBitmap != null,
+            onPlaceAtCenter = {
+                updateAlignment(
+                    (alignment ?: TerrainMapAlignment(cameraCenter)).copy(center = cameraCenter),
+                )
+            },
+            onWidthScaleChanged = { value ->
+                alignment?.let { updateAlignment(it.copy(widthScale = value)) }
+            },
+            onHeightScaleChanged = { value ->
+                alignment?.let { updateAlignment(it.copy(heightScale = value)) }
+            },
+            onBearingChanged = { value ->
+                alignment?.let { updateAlignment(it.copy(bearingDegrees = value)) }
+            },
+            onNudge = { eastFraction, northFraction ->
+                alignment?.let {
                     updateAlignment(
-                        (alignment ?: TerrainMapAlignment(cameraCenter)).copy(center = cameraCenter),
-                    )
-                },
-                onWidthScaleChanged = { value ->
-                    alignment?.let { updateAlignment(it.copy(widthScale = value)) }
-                },
-                onHeightScaleChanged = { value ->
-                    alignment?.let { updateAlignment(it.copy(heightScale = value)) }
-                },
-                onBearingChanged = { value ->
-                    alignment?.let { updateAlignment(it.copy(bearingDegrees = value)) }
-                },
-                onNudge = { eastFraction, northFraction ->
-                    alignment?.let {
-                        updateAlignment(
-                            it.copy(
-                                center = nudgeCenter(
-                                    center = it.center,
-                                    eastMeters = naturalSize.widthMeters * it.widthScale * eastFraction,
-                                    northMeters = naturalSize.heightMeters * it.heightScale * northFraction,
-                                ),
+                        it.copy(
+                            center = nudgeCenter(
+                                center = it.center,
+                                eastMeters = naturalSize.widthMeters * it.widthScale * eastFraction,
+                                northMeters = naturalSize.heightMeters * it.heightScale * northFraction,
                             ),
-                        )
-                    }
-                },
-                onEditBounds = { editBounds = true },
-                canShowSurvey = surveyPoints.isNotEmpty(),
-                onShowSurvey = {
-                    val map = googleMap ?: return@OverlayControls
-                    val first = surveyPoints.firstOrNull() ?: return@OverlayControls
-                    mapView.post {
-                        if (surveyPoints.size == 1) {
-                            map.animateCamera(CameraUpdateFactory.newLatLngZoom(first, 17f))
-                        } else {
-                            val bounds = LatLngBounds.builder().apply {
-                                surveyPoints.forEach(::include)
-                            }.build()
-                            runCatching {
-                                map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 88))
-                            }.onFailure {
-                                map.moveCamera(CameraUpdateFactory.newLatLngZoom(first, 16f))
-                            }
+                        ),
+                    )
+                }
+            },
+            onEditBounds = { editBounds = true },
+            canShowSurvey = surveyPoints.isNotEmpty(),
+            onShowSurvey = {
+                val map = googleMap ?: return@OverlayControls
+                val first = surveyPoints.firstOrNull() ?: return@OverlayControls
+                mapView.post {
+                    if (surveyPoints.size == 1) {
+                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(first, 17f))
+                    } else {
+                        val bounds = LatLngBounds.builder().apply {
+                            surveyPoints.forEach(::include)
+                        }.build()
+                        runCatching {
+                            map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 88))
+                        }.onFailure {
+                            map.moveCamera(CameraUpdateFactory.newLatLngZoom(first, 16f))
                         }
                     }
-                },
-                canReset = hasSavedAlignment,
-                onReset = {
-                    alignmentStore.clear(terrainKey)
-                    alignment = defaultAlignment
-                    hasSavedAlignment = false
-                },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
-            )
-        }
+                }
+            },
+            canReset = hasSavedAlignment,
+            onReset = {
+                alignmentStore.clear(terrainKey)
+                alignment = defaultAlignment
+                hasSavedAlignment = false
+            },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
+        )
 
         if (alignmentMode) {
             Surface(
@@ -530,11 +733,17 @@ fun TerrainGoogleMapScreen(
                 historicMaps = historicMaps,
                 activeId = activeHistoricMapId,
                 message = historicMapMessage,
+                agreement = historicAgreement,
+                controlPointMode = controlPointMode,
+                pendingImageXFraction = pendingImageXFraction,
+                pendingImageYFraction = pendingImageYFraction,
+                swipeBlend = swipeBlend,
                 onImport = { historicMapPicker.launch(arrayOf("image/*")) },
                 onSelect = { activeHistoricMapId = it },
                 onToggleVisible = { record -> updateHistoricMap(record.copy(visible = !record.visible)) },
                 onDelete = { record ->
                     historicMapRepository.delete(record)
+                    scope.launch(Dispatchers.IO) { historicMapDao.deleteById(record.id) }
                     refreshHistoricMaps()
                     if (activeHistoricMapId == record.id) activeHistoricMapId = null
                 },
@@ -554,8 +763,51 @@ fun TerrainGoogleMapScreen(
                     val center = googleMap?.cameraPosition?.target ?: cameraCenter
                     updateHistoricMap(record.copy(latitude = center.latitude, longitude = center.longitude))
                 },
-                onClose = { historicPanelExpanded = false },
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 92.dp, end = 12.dp).width(264.dp),
+                onControlPointModeChanged = { controlPointMode = it },
+                onPendingImageXChanged = { pendingImageXFraction = it },
+                onPendingImageYChanged = { pendingImageYFraction = it },
+                onSwipeBlendChanged = { swipeBlend = it },
+                onFitControlPoints = { applyControlPointFit(it) },
+                onClearControlPoints = { record ->
+                    updateHistoricMap(
+                        record.copy(
+                            controlPoints = emptyList(),
+                            confidence = GeoReferenceConfidence.INSUFFICIENT_POINTS,
+                            rmseMeters = null,
+                            maxResidualMeters = null,
+                            transformStorage = null,
+                        ),
+                    )
+                },
+                onRemoveLastControlPoint = { record ->
+                    if (record.controlPoints.isEmpty()) return@HistoricMapPanel
+                    updateHistoricMap(
+                        record.copy(
+                            controlPoints = record.controlPoints.dropLast(1),
+                            confidence = GeoReferenceConfidence.INSUFFICIENT_POINTS,
+                            rmseMeters = null,
+                            maxResidualMeters = null,
+                            transformStorage = null,
+                        ),
+                    )
+                },
+                onOpenSideBySide = { showSideBySide = true },
+                onClose = {
+                    historicPanelExpanded = false
+                    controlPointMode = false
+                },
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 92.dp, end = 12.dp).width(280.dp),
+            )
+        }
+
+        if (showSideBySide) {
+            HistoricMapSideBySideDialog(
+                terrainBitmap = terrainBitmap,
+                historicBitmap = activeHistoricMap?.let { historicBitmaps[it.id] },
+                historicName = activeHistoricMap?.displayName ?: "Historic map",
+                confidence = activeHistoricMap?.confidence,
+                rmseMeters = activeHistoricMap?.rmseMeters,
+                onDismiss = { showSideBySide = false },
             )
         }
 
@@ -566,26 +818,77 @@ fun TerrainGoogleMapScreen(
             val findTiles = onFindLidarTiles
             if (findTiles != null) {
                 SmallFloatingActionButton(
-                    onClick = {
-                        drawingSearchBox = !drawingSearchBox
-                        clearSearchBox()
-                    },
-                    modifier = Modifier.testTag("draw_lidar_search_box"),
-                ) {
-                    Icon(
-                        if (drawingSearchBox) Icons.Default.Close else Icons.Default.Crop,
-                        contentDescription = if (drawingSearchBox) {
-                            "Cancel drawing a search box"
-                        } else {
-                            "Draw a search box for LiDAR tiles"
-                        },
-                    )
-                }
-                SmallFloatingActionButton(
                     onClick = { visibleSearchBounds(googleMap)?.let(findTiles) },
                     modifier = Modifier.testTag("find_lidar_tiles_in_view"),
                 ) {
                     Icon(Icons.Default.Search, contentDescription = "Find LiDAR tiles in this view")
+                }
+            }
+            SmallFloatingActionButton(onClick = { showCoverage = !showCoverage }) {
+                Icon(
+                    Icons.Default.GridOn,
+                    contentDescription = if (showCoverage) "Hide search coverage" else "Show search coverage",
+                    tint = if (showCoverage) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                )
+            }
+            if (showCoverage) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                    ),
+                    modifier = Modifier.widthIn(max = 240.dp),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Search coverage",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        sweepCoverage?.let { coverage ->
+                            Text(
+                                "Swept ${(coverage.coverageRatio * 100f).toInt()}% · " + sweptAreaText(coverage),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        } ?: Text(
+                            "Record a GPS trail to build the coverage layer.",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        Text("Sweep width", style = MaterialTheme.typography.labelSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(1f, 2f, 3f, 4f).forEach { width ->
+                                FilterChip(
+                                    selected = sweepWidthMeters == width,
+                                    onClick = { sweepWidthMeters = width },
+                                    label = { Text("${width.toInt()} m") },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            if (routeWaypoints.size >= 2) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                    ),
+                    modifier = Modifier.widthIn(max = 240.dp),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "Route active",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "${routeWaypoints.size} stops · ${routeDistanceText(routeTotalMeters)} total",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        TextButton(onClick = onClearRoute) { Text("Clear") }
+                    }
                 }
             }
             if (!historicPanelExpanded) {
@@ -593,19 +896,6 @@ fun TerrainGoogleMapScreen(
                     Icon(Icons.Default.History, contentDescription = "Historic maps")
                 }
             }
-        }
-
-        if (drawingSearchBox) {
-            SearchBoxPrompt(
-                bounds = drawnSearchBounds(googleMap, boxStart, boxEnd),
-                onClear = ::clearSearchBox,
-                onConfirm = { bounds ->
-                    drawingSearchBox = false
-                    clearSearchBox()
-                    onFindLidarTiles?.invoke(bounds)
-                },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(0.96f),
-            )
         }
     }
 
@@ -856,6 +1146,11 @@ private fun HistoricMapPanel(
     historicMaps: List<HistoricMapOverlay>,
     activeId: String?,
     message: String?,
+    agreement: MapFeatureAgreement?,
+    controlPointMode: Boolean,
+    pendingImageXFraction: Float,
+    pendingImageYFraction: Float,
+    swipeBlend: Float,
     onImport: () -> Unit,
     onSelect: (String) -> Unit,
     onToggleVisible: (HistoricMapOverlay) -> Unit,
@@ -866,6 +1161,14 @@ private fun HistoricMapPanel(
     onOpacityChanged: (HistoricMapOverlay, Float) -> Unit,
     onNudge: (HistoricMapOverlay, Float, Float) -> Unit,
     onCenterHere: (HistoricMapOverlay) -> Unit,
+    onControlPointModeChanged: (Boolean) -> Unit,
+    onPendingImageXChanged: (Float) -> Unit,
+    onPendingImageYChanged: (Float) -> Unit,
+    onSwipeBlendChanged: (Float) -> Unit,
+    onFitControlPoints: (HistoricMapOverlay) -> Unit,
+    onClearControlPoints: (HistoricMapOverlay) -> Unit,
+    onRemoveLastControlPoint: (HistoricMapOverlay) -> Unit,
+    onOpenSideBySide: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -878,7 +1181,7 @@ private fun HistoricMapPanel(
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f)),
         shape = RoundedCornerShape(18.dp),
-        modifier = modifier.heightIn(max = 340.dp),
+        modifier = modifier.heightIn(max = 440.dp).testTag("historic_map_panel"),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp).verticalScroll(rememberScrollState()),
@@ -895,7 +1198,15 @@ private fun HistoricMapPanel(
                 TextButton(onClick = onClose, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Close") }
             }
             message?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    it,
+                    color = if (it.contains("Good") || it.contains("Fair") || it.contains("added")) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
             if (listExpanded) {
                 OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
@@ -905,7 +1216,8 @@ private fun HistoricMapPanel(
                 }
                 if (historicMaps.isEmpty()) {
                     Text(
-                        "Import a scanned plat, survey, or old topographic map, then align its footprint over the terrain.",
+                        "Import a scanned plat, survey, or old topographic map, then align with " +
+                            "manual controls or control-point georeferencing.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -926,6 +1238,26 @@ private fun HistoricMapPanel(
                     active.displayName,
                     style = MaterialTheme.typography.labelLarge,
                     maxLines = 1,
+                )
+                // Georeference confidence is always visible when a fit exists so low-confidence
+                // alignments stay labeled (Phase 6 exit criterion).
+                Text(
+                    buildString {
+                        append(active.confidence.label)
+                        active.rmseMeters?.let { append(" · RMSE ${"%.1f".format(Locale.US, it)} m") }
+                        if (active.controlPoints.isNotEmpty()) {
+                            append(" · ${active.controlPoints.size} CP")
+                        }
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = when (active.confidence) {
+                        GeoReferenceConfidence.GOOD -> MaterialTheme.colorScheme.primary
+                        GeoReferenceConfidence.FAIR -> MaterialTheme.colorScheme.onSurface
+                        GeoReferenceConfidence.LOW_CONFIDENCE,
+                        GeoReferenceConfidence.INSUFFICIENT_POINTS,
+                        -> MaterialTheme.colorScheme.error
+                    },
+                    modifier = Modifier.testTag("historic_georef_confidence"),
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -973,6 +1305,19 @@ private fun HistoricMapPanel(
                         enabled = true,
                     )
                 }
+                AlignmentSlider(
+                    label = "Swipe blend",
+                    valueLabel = "${(swipeBlend * 100).toInt()}%",
+                    value = swipeBlend,
+                    onValueChange = onSwipeBlendChanged,
+                    range = 0f..1f,
+                    enabled = true,
+                )
+                Text(
+                    "Swipe 0% = terrain only · 100% = full historic overlay (active map).",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -992,10 +1337,180 @@ private fun HistoricMapPanel(
                         onClick = { onCenterHere(active) },
                         contentPadding = PaddingValues(horizontal = 12.dp),
                     ) { Text("Center here") }
+                    OutlinedButton(
+                        onClick = onOpenSideBySide,
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                        modifier = Modifier.testTag("historic_side_by_side_button"),
+                    ) {
+                        Icon(Icons.Default.Compare, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Side-by-side")
+                    }
+                }
+                HorizontalDivider()
+                Text("Control-point georeference", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "Set the image crosshair, then tap the matching real-world location on the map. " +
+                        "Two points fit (low confidence); three+ produce a least-squares affine with RMSE.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (controlPointMode) {
+                    Button(
+                        onClick = { onControlPointModeChanged(false) },
+                        modifier = Modifier.fillMaxWidth().testTag("control_point_mode_toggle"),
+                    ) {
+                        Icon(Icons.Default.AddLocationAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Tap map to add · ${active.controlPoints.size} points")
+                    }
+                    AlignmentSlider(
+                        label = "Image X",
+                        valueLabel = "${(pendingImageXFraction * 100).toInt()}%",
+                        value = pendingImageXFraction,
+                        onValueChange = onPendingImageXChanged,
+                        range = 0f..1f,
+                        enabled = true,
+                    )
+                    AlignmentSlider(
+                        label = "Image Y",
+                        valueLabel = "${(pendingImageYFraction * 100).toInt()}%",
+                        value = pendingImageYFraction,
+                        onValueChange = onPendingImageYChanged,
+                        range = 0f..1f,
+                        enabled = true,
+                    )
+                } else {
+                    OutlinedButton(
+                        onClick = { onControlPointModeChanged(true) },
+                        modifier = Modifier.fillMaxWidth().testTag("control_point_mode_toggle"),
+                    ) {
+                        Icon(Icons.Default.AddLocationAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Add control points (${active.controlPoints.size})")
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { onFitControlPoints(active) },
+                        enabled = active.controlPoints.size >= 2,
+                        modifier = Modifier.weight(1f).testTag("fit_control_points_button"),
+                    ) { Text("Fit") }
+                    OutlinedButton(
+                        onClick = { onRemoveLastControlPoint(active) },
+                        enabled = active.controlPoints.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Undo CP") }
+                    OutlinedButton(
+                        onClick = { onClearControlPoints(active) },
+                        enabled = active.controlPoints.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Clear") }
+                }
+                if (agreement != null) {
+                    HorizontalDivider()
+                    Text(
+                        "Terrain agreement: ${(agreement.score * 100f).toInt()}%",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = when {
+                            agreement.score >= 0.66f -> MaterialTheme.colorScheme.primary
+                            agreement.score >= 0.4f -> MaterialTheme.colorScheme.onSurface
+                            else -> MaterialTheme.colorScheme.error
+                        },
+                    )
+                    Text(
+                        agreement.note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(
+                        "Terrain agreement appears once this map overlaps georeferenced terrain detail. " +
+                            "Higher percentages mean the map's drawn features sit on real terrain evidence.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
     }
+}
+
+@Composable
+private fun HistoricMapSideBySideDialog(
+    terrainBitmap: Bitmap?,
+    historicBitmap: Bitmap?,
+    historicName: String,
+    confidence: GeoReferenceConfidence?,
+    rmseMeters: Double?,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Side-by-side alignment") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    buildString {
+                        append("Compare terrain hillshade with “$historicName”.")
+                        confidence?.let { append(" ${it.label}.") }
+                        rmseMeters?.let { append(" RMSE ${"%.1f".format(Locale.US, it)} m.") }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(180.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Terrain", style = MaterialTheme.typography.labelMedium)
+                        if (terrainBitmap != null && !terrainBitmap.isRecycled) {
+                            Image(
+                                bitmap = terrainBitmap.asImageBitmap(),
+                                contentDescription = "Terrain hillshade",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("No terrain") }
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Historic", style = MaterialTheme.typography.labelMedium)
+                        if (historicBitmap != null && !historicBitmap.isRecycled) {
+                            Image(
+                                bitmap = historicBitmap.asImageBitmap(),
+                                contentDescription = "Historic map",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentAlignment = Alignment.Center,
+                            ) { Text("No historic") }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 @Composable
@@ -1134,89 +1649,6 @@ private fun GeoSpatialLibrary.GeographicBounds.toLatLngBounds(): LatLngBounds =
  * one, which would read as an inverted box downstream. No LiDAR source this app queries spans that
  * line, so such a view is reported as unsearchable rather than silently mangled.
  */
-/**
- * Converts a rectangle drawn in overlay pixels into geographic bounds.
- *
- * The overlay covers exactly the same area as the map view, so screen coordinates pass straight
- * through the map's projection. A stray tap produces a degenerate rectangle covering no ground,
- * which is rejected rather than turned into an empty search.
- */
-private fun drawnSearchBounds(
-    map: GoogleMap?,
-    start: Offset?,
-    end: Offset?,
-): GeoSpatialLibrary.GeographicBounds? {
-    if (start == null || end == null) return null
-    if (abs(end.x - start.x) < MIN_SEARCH_BOX_PIXELS || abs(end.y - start.y) < MIN_SEARCH_BOX_PIXELS) return null
-    val projection = map?.projection ?: return null
-    val first = projection.fromScreenLocation(Point(start.x.roundToInt(), start.y.roundToInt()))
-    val second = projection.fromScreenLocation(Point(end.x.roundToInt(), end.y.roundToInt()))
-    return searchBoundsFromCorners(first, second)
-}
-
-/**
- * Normalizes two opposite corners into geographic bounds.
- *
- * A box can be drawn in any direction, so neither corner is reliably the north-west one. A box
- * spanning the antimeridian would produce a west greater than its east, which reads downstream as
- * an inverted box; no LiDAR source this app queries crosses that line, so it is rejected rather
- * than silently mangled.
- */
-internal fun searchBoundsFromCorners(
-    first: LatLng,
-    second: LatLng,
-): GeoSpatialLibrary.GeographicBounds? {
-    val west = minOf(first.longitude, second.longitude)
-    val east = maxOf(first.longitude, second.longitude)
-    val south = minOf(first.latitude, second.latitude)
-    val north = maxOf(first.latitude, second.latitude)
-    if (west >= east || south >= north) return null
-    if (!west.isFinite() || !east.isFinite() || !south.isFinite() || !north.isFinite()) return null
-    return GeoSpatialLibrary.GeographicBounds(
-        minLat = south,
-        maxLat = north,
-        minLon = west,
-        maxLon = east,
-    )
-}
-
-@Composable
-private fun SearchBoxPrompt(
-    bounds: GeoSpatialLibrary.GeographicBounds?,
-    onClear: () -> Unit,
-    onConfirm: (GeoSpatialLibrary.GeographicBounds) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(tonalElevation = 3.dp, shape = RoundedCornerShape(10.dp), modifier = modifier) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = if (bounds == null) {
-                    "Drag across the map to draw a search box."
-                } else {
-                    "Box ready · %.4f, %.4f to %.4f, %.4f".format(
-                        bounds.minLat,
-                        bounds.minLon,
-                        bounds.maxLat,
-                        bounds.maxLon,
-                    )
-                },
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f),
-            )
-            if (bounds != null) {
-                TextButton(onClick = onClear) { Text("Redraw") }
-                Button(
-                    onClick = { onConfirm(bounds) },
-                    modifier = Modifier.testTag("confirm_lidar_search_box"),
-                ) { Text("Find tiles") }
-            }
-        }
-    }
-}
-
 private fun visibleSearchBounds(map: GoogleMap?): GeoSpatialLibrary.GeographicBounds? {
     val bounds = map?.projection?.visibleRegion?.latLngBounds ?: return null
     if (bounds.southwest.longitude > bounds.northeast.longitude) return null
@@ -1422,3 +1854,34 @@ private fun decodeSampledBitmap(file: File, maxDimension: Int): Bitmap? {
     val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
     return BitmapFactory.decodeFile(file.absolutePath, options)
 }
+
+
+/** Translucent green for swept cells; transparent elsewhere. Rendered north-up. */
+private fun renderSweepCoverageBitmap(coverage: SweepCoverageGrid): Bitmap {
+    val sweptColor = 0x5934C759.toInt()
+    val pixels = IntArray(coverage.width * coverage.height)
+    for (row in 0 until coverage.height) {
+        // Coverage row 0 is the southern edge; bitmap row 0 is north.
+        val sourceRow = coverage.height - 1 - row
+        for (column in 0 until coverage.width) {
+            if (coverage.covered[sourceRow * coverage.width + column]) {
+                pixels[row * coverage.width + column] = sweptColor
+            }
+        }
+    }
+    return Bitmap.createBitmap(pixels, coverage.width, coverage.height, Bitmap.Config.ARGB_8888)
+}
+
+private fun sweptAreaText(coverage: SweepCoverageGrid): String =
+    if (coverage.coveredAreaSquareMeters >= 10_000f) {
+        String.format(Locale.US, "%.1f ha", coverage.coveredAreaSquareMeters / 10_000f)
+    } else {
+        "${coverage.coveredAreaSquareMeters.toInt()} m²"
+    }
+
+private fun routeDistanceText(totalMeters: Float): String =
+    if (totalMeters >= 1000f) {
+        String.format(Locale.US, "%.2f km", totalMeters / 1000f)
+    } else {
+        "${totalMeters.toInt()} m"
+    }

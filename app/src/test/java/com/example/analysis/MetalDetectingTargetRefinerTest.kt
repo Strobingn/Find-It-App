@@ -31,6 +31,36 @@ class MetalDetectingTargetRefinerTest {
 
     @Test
     fun historicProfileFindsStructuredOccupationAndTravelFeatures() {
+        val targets = MetalDetectingTargetRefiner.refine(structuredHistoricResult())
+
+        assertFalse("Structured historic terrain should produce ranked targets", targets.isEmpty())
+        assertTrue("All target scores must be finite and normalized", targets.all { it.score.isFinite() && it.score in 0f..1f })
+        assertTrue("All target coordinates must remain inside the raster", targets.all { it.xPercent in 0f..100f && it.yPercent in 0f..100f })
+        assertTrue("Targets must be returned in descending score order", targets.zipWithNext().all { (a, b) -> a.score >= b.score })
+    }
+
+    @Test
+    fun rankedTargetsCarryStructuredLayerEvidence() {
+        val targets = MetalDetectingTargetRefiner.refine(structuredHistoricResult())
+
+        assertFalse(targets.isEmpty())
+        targets.forEach { target ->
+            assertEquals("Every target reports all nine analysis layers", 9, target.layerEvidence.size)
+            target.layerEvidence.forEach { layer ->
+                assertTrue("Measurement is a percentage", layer.measurement.endsWith("%"))
+            }
+        }
+        // Canopy roughness is inverted: heavy canopy argues against confidence. Keep
+        // clear of rounding edges and pin the mapping at both ends of the scale.
+        targets.forEach { target ->
+            val canopy = target.layerEvidence.first { it.layer == "Canopy roughness" }
+            val roughness = canopy.measurement.removeSuffix("%").toInt()
+            if (roughness <= 30) assertEquals(LayerVerdict.SUPPORTS, canopy.verdict)
+            if (roughness >= 70) assertEquals(LayerVerdict.DISAGREES, canopy.verdict)
+        }
+    }
+
+    private fun structuredHistoricResult(): TerrainIntelligenceResult {
         val width = 64
         val height = 64
         val size = width * height
@@ -142,12 +172,7 @@ class MetalDetectingTargetRefinerTest {
             cacheHit = TerrainDerivedLayerCache.Hit.MISS,
         )
 
-        val targets = MetalDetectingTargetRefiner.refine(result)
-
-        assertFalse("Structured historic terrain should produce ranked targets", targets.isEmpty())
-        assertTrue("All target scores must be finite and normalized", targets.all { it.score.isFinite() && it.score in 0f..1f })
-        assertTrue("All target coordinates must remain inside the raster", targets.all { it.xPercent in 0f..100f && it.yPercent in 0f..100f })
-        assertTrue("Targets must be returned in descending score order", targets.zipWithNext().all { (a, b) -> a.score >= b.score })
+        return result
     }
 
     @Test

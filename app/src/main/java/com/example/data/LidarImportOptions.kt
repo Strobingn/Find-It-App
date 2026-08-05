@@ -59,7 +59,7 @@ enum class GroundSurfaceMode {
 data class LidarImportOptions(
     val groundMode: GroundSurfaceMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
     /** Maximum raster dimension. The shorter side preserves the source footprint aspect ratio. */
-    val rasterResolution: Int = 320,
+    val rasterResolution: Int = DEFAULT_OVERVIEW_RESOLUTION,
     /** Optional post-raster smoothing; zero preserves the smallest earthworks. */
     val smoothingRadius: Int = 0,
     /** Optional normalized viewport to re-rasterize from the original point cloud. */
@@ -68,9 +68,7 @@ data class LidarImportOptions(
     fun sanitized(): LidarImportOptions {
         val sanitizedFocus = focusBounds?.sanitized()
         val maxResolution = if (sanitizedFocus == null) {
-            // Full LAZ tiles are overview products. A 1,024-cell full-footprint decode makes a phone
-            // process millions of returns before displaying anything, while exposing no extra local
-            // detail at normal zoom. Higher resolutions remain available for cropped Refine requests.
+            // First paint is a full detailed overview — never a 256 px stub.
             MAX_OVERVIEW_RESOLUTION
         } else {
             MAX_REFINED_RESOLUTION
@@ -84,7 +82,9 @@ data class LidarImportOptions(
 
     companion object {
         internal const val MIN_RASTER_RESOLUTION = 128
-        internal const val MAX_OVERVIEW_RESOLUTION = 512
-        internal const val MAX_REFINED_RESOLUTION = 1_024
+        /** Default full-footprint open: detailed hillshade on first paint. */
+        internal const val DEFAULT_OVERVIEW_RESOLUTION = 1_024
+        internal const val MAX_OVERVIEW_RESOLUTION = 1_536
+        internal const val MAX_REFINED_RESOLUTION = 2_048
     }
 }

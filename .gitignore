@@ -1,5 +1,6 @@
 *.iml
 .gradle
+.gradle-codex/
 .kotlin
 /local.properties
 /.idea/caches
@@ -16,6 +17,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+app/google-services.json
 .env
 debug.keystore
 trace_processor

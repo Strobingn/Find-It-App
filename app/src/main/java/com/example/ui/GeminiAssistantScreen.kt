@@ -24,7 +24,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -49,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -56,6 +57,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ai.AiTargetClassifier
+import com.example.ai.FieldAiCopilot
+import com.example.ai.FieldAiFeature
+import com.example.ai.FieldAiSessionPack
 import com.example.ai.GeminiApiClient
 import com.example.ai.GeminiConversationTurn
 import com.example.ai.GeminiTerrainImageEncoder
@@ -72,8 +77,17 @@ import com.example.analysis.TerrainIntelligenceRenderer
 import com.example.analysis.TerrainIntelligenceResult
 import com.example.analysis.VerifiedFeedback
 import com.example.analysis.VerifiedFeedbackPoint
+import com.example.analysis.ml.CandidateFeatures
+import com.example.analysis.ml.FeatureContribution
+import com.example.analysis.ml.ModelRegistry
+import com.example.analysis.ml.RankerModelStore
+import com.example.analysis.ml.RankerTrainer
+import com.example.analysis.ml.RankerTrainingExample
 import com.example.data.AppMemoryBudget
 import com.example.data.ElevationGrid
+import com.example.data.ai.AnomalyClusterer
+import com.example.data.ai.AnomalyClassification
+import com.example.data.ai.TerrainSessionContext
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
@@ -135,6 +149,12 @@ internal fun parseCloudMapTargets(
 private fun removeCloudMapTargetTags(response: String): String =
     response.replace(cloudMapTargetPattern, "").replace(Regex("\n{3,}"), "\n\n").trim()
 
+data class RankedCandidate(
+    val candidate: TerrainFeatureCandidate,
+    val probability: Float,
+    val contributions: List<FeatureContribution>,
+)
+
 data class AiTerrainState(
     val messages: List<AiMessage> = emptyList(),
     val isSending: Boolean = false,
@@ -156,8 +176,35 @@ data class AiTerrainState(
     val localLayerBitmap: Bitmap? = null,
     val cloudMapTargets: List<CloudMapTarget> = emptyList(),
     val cloudTerrainKey: String? = null,
+    val isClassifyingTargets: Boolean = false,
+    val classifiedTargets: List<AnomalyClassification> = emptyList(),
+    val classificationError: String? = null,
     /** Field-verified points for the current dataset, derived from logged finds - see [VerifiedFeedback]. */
     val verifiedFeedback: List<VerifiedFeedbackPoint> = emptyList(),
+    /** Active explainable-ranker version, when one has been trained and activated. */
+    val rankerVersion: String? = null,
+    /** Candidates re-ordered by the active ranker; null when no model is active. */
+    val rankedCandidates: List<RankedCandidate>? = null,
+    val rankerMessage: String? = null,
+    val isTrainingRanker: Boolean = false,
+    /** Hillshade azimuth from LIGHTING_ADVISOR; consumed by the terrain UI then cleared. */
+    val pendingLightingAzimuth: Float? = null,
+    /** Hillshade altitude from LIGHTING_ADVISOR; consumed by the terrain UI then cleared. */
+    val pendingLightingAltitude: Float? = null,
+    /** Viz mode index from VIZ_MODE= tag; consumed by the terrain UI then cleared. */
+    val pendingVizMode: Int? = null,
+    /** Signal ids from NAV_TARGET id= tags; consumed by navigation UI then cleared. */
+    val pendingNavTargetIds: List<Long> = emptyList(),
+    /** Suggested metal type from voice/photo structured assist; user confirms before write. */
+    val pendingMetalType: String? = null,
+    /** Suggested verification outcome from voice/photo structured assist. */
+    val pendingOutcome: String? = null,
+    /** Suggested find status from voice/photo structured assist. */
+    val pendingStatus: String? = null,
+    /** Cleaned notes suggestion from voice/photo structured assist. */
+    val pendingStructuredNotes: String? = null,
+    /** Title of the last Field AI feature that completed successfully. */
+    val lastFieldFeature: String? = null,
 )
 
 class AiTerrainViewModel(application: Application) : AndroidViewModel(application) {
@@ -166,6 +213,8 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     private val localEngine = TerrainIntelligenceEngine(
         TerrainDerivedLayerCache(File(application.cacheDir, "terrain-intelligence-v2")),
     )
+    private val rankerStore = RankerModelStore(appContext)
+    private var modelRegistry: ModelRegistry = rankerStore.load()
     private val ids = AtomicLong(1L)
     private var localAnalysisJob: Job? = null
     private val _state = MutableStateFlow(
@@ -177,6 +226,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     text = "OpenAI is the primary cloud analyst, Gemini is the automatic fallback, and local terrain intelligence runs without either provider.",
                 ),
             ),
+            rankerVersion = modelRegistry.activeVersion,
         ).withProviderStatus(),
     )
     val state: StateFlow<AiTerrainState> = _state.asStateFlow()
@@ -203,6 +253,155 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     fun clearGeminiKey() {
         GeminiApiClient.clearDeviceApiKey(appContext)
         _state.value = _state.value.withProviderStatus().copy(cloudError = null)
+    }
+
+    /** Scores and re-orders candidates with the active ranker; null when no model is active. */
+    private fun rank(result: TerrainIntelligenceResult): List<RankedCandidate>? {
+        val model = modelRegistry.activeModel ?: return null
+        return result.candidates.map { candidate ->
+            val vector = CandidateFeatures.extract(candidate, result.layers)
+            RankedCandidate(
+                candidate = candidate,
+                probability = model.probability(vector.values),
+                contributions = model.contributions(vector.values).take(3),
+            )
+        }.sortedByDescending { it.probability }
+    }
+
+    /**
+     * Trains a new explainable ranker from this dataset's field-verified outcomes: every confirmed
+     * or rejected check within matching distance of a candidate becomes one labeled example, the
+     * trained model is activated through the registry, and the registry is persisted so the same
+     * ranking survives restarts.
+     */
+    fun trainRankerFromFeedback() {
+        val result = _state.value.localResult
+        if (_state.value.isTrainingRanker) return
+        if (result == null || result.candidates.isEmpty()) {
+            _state.value = _state.value.copy(
+                rankerMessage = "Run local analysis first — training needs its candidates.",
+            )
+            return
+        }
+        val examples = _state.value.verifiedFeedback.mapNotNull { point ->
+            val nearest = result.candidates.minByOrNull { candidate ->
+                val dx = candidate.xPercent - point.xPercent
+                val dy = candidate.yPercent - point.yPercent
+                dx * dx + dy * dy
+            } ?: return@mapNotNull null
+            val dx = nearest.xPercent - point.xPercent
+            val dy = nearest.yPercent - point.yPercent
+            if (dx * dx + dy * dy > VerifiedFeedback.MATCH_DISTANCE_SQUARED) return@mapNotNull null
+            RankerTrainingExample(
+                features = CandidateFeatures.extract(nearest, result.layers).values,
+                productive = point.confirmed,
+            )
+        }
+        val confirmed = examples.count { it.productive }
+        val rejected = examples.size - confirmed
+        if (confirmed == 0 || rejected == 0) {
+            _state.value = _state.value.copy(
+                rankerMessage = "Need at least one confirmed and one rejected field check near a " +
+                    "candidate — matched $confirmed confirmed and $rejected rejected.",
+            )
+            return
+        }
+        _state.value = _state.value.copy(isTrainingRanker = true, rankerMessage = null)
+        viewModelScope.launch {
+            val training = withContext(Dispatchers.Default) {
+                RankerTrainer.train(
+                    examples = examples,
+                    modelVersion = "field-checks-${System.currentTimeMillis()}",
+                    featureNames = CandidateFeatures.FEATURE_NAMES,
+                )
+            }
+            modelRegistry = modelRegistry.activate(training.ranker)
+            rankerStore.save(modelRegistry)
+            _state.value = _state.value.copy(
+                isTrainingRanker = false,
+                rankerVersion = training.ranker.modelVersion,
+                rankedCandidates = rank(result),
+                rankerMessage = "Trained on ${examples.size} field checks " +
+                    "($confirmed confirmed, $rejected rejected) · accuracy " +
+                    String.format(Locale.US, "%.0f%%", training.accuracy * 100f),
+            )
+        }
+    }
+
+    /** Deactivates the trained ranker and drops all retained versions from the device. */
+    fun clearRanker() {
+        modelRegistry = ModelRegistry()
+        rankerStore.clear()
+        _state.value = _state.value.copy(
+            rankerVersion = null,
+            rankedCandidates = null,
+            rankerMessage = "Ranker cleared — rule-based detector order is shown.",
+        )
+    }
+
+    /** Clusters disturbance cells and asks the selected cloud provider for typed target labels. */
+    fun classifyTargets(grid: ElevationGrid, terrainSummary: String, hillshadeBitmap: Bitmap?) {
+        if (_state.value.isClassifyingTargets || grid.width <= 2 || grid.height <= 2) return
+        val provider = _state.value.providerPreference ?: TerrainAiGateway.preferredProvider(appContext)
+        if (provider == null) {
+            _state.value = _state.value.copy(classificationError = "Configure OpenAI or Gemini under AI settings first.")
+            return
+        }
+        _state.value = _state.value.copy(
+            isClassifyingTargets = true,
+            classifiedTargets = emptyList(),
+            classificationError = null,
+            cloudStage = "Clustering disturbance candidates…",
+        )
+        viewModelScope.launch {
+            try {
+                val regions = withContext(Dispatchers.Default) {
+                    AnomalyClusterer.findAnomalyRegions(grid, hillshadeBitmap)
+                }
+                if (regions.isEmpty()) {
+                    _state.value = _state.value.copy(
+                        isClassifyingTargets = false,
+                        cloudStage = "No disturbance clusters cleared the screening threshold",
+                    )
+                    return@launch
+                }
+                val context = TerrainSessionContext(
+                    gridWidth = grid.width,
+                    gridHeight = grid.height,
+                    cellSizeMeters = grid.cellSizeMeters,
+                    visualizationMode = 5,
+                    sunAzimuth = 315f,
+                    sunAltitude = 35f,
+                    vegetationFilter = 1f,
+                    contrast = 1f,
+                    zScale = 1f,
+                    terrainSummary = terrainSummary,
+                    hasCoordinates = false,
+                    signalCount = 0,
+                    signalSummary = "",
+                )
+                val classifications = AiTargetClassifier.classify(
+                    gateway = gateway,
+                    regions = regions,
+                    context = context,
+                    requestedProvider = provider,
+                    onStage = { stage -> _state.value = _state.value.copy(cloudStage = stage) },
+                )
+                _state.value = _state.value.copy(
+                    isClassifyingTargets = false,
+                    classifiedTargets = classifications,
+                    cloudStage = "Classified ${classifications.size} disturbance candidates",
+                ).withProviderStatus()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    isClassifyingTargets = false,
+                    classificationError = error.localizedMessage ?: "Target classification failed",
+                    cloudStage = "Target classification stopped",
+                ).withProviderStatus()
+            }
+        }
     }
 
     fun selectCloudProvider(provider: TerrainAiProvider?) {
@@ -253,6 +452,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     localLayerBitmap = bitmap,
                     localError = null,
                     verifiedFeedback = verifiedPoints,
+                    rankedCandidates = rank(result),
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -293,6 +493,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     _state.value = _state.value.copy(
                         isLocalRestoring = false,
                         localStage = "Source detail ready · tap Analyze to update derived layers",
+                        rankedCandidates = null,
                     )
                     return@launch
                 }
@@ -302,6 +503,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.value = _state.value.copy(
                     isLocalRestoring = false,
                     localStage = "Saved analysis restored · ${result.candidates.size} candidates",
+                    rankedCandidates = rank(result),
                     localResult = result,
                     localLayerBitmap = bitmap,
                     localError = null,
@@ -429,6 +631,232 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                         _state.value.cloudMapTargets
                     },
                     cloudTerrainKey = if (cloudTargets.isNotEmpty()) terrainKey else _state.value.cloudTerrainKey,
+                ).withProviderStatus()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    isSending = false,
+                    cloudError = error.localizedMessage ?: "Cloud AI request failed",
+                    cloudStage = "Cloud AI request stopped",
+                ).withProviderStatus()
+            }
+        }
+    }
+
+    fun clearPendingLighting() {
+        _state.value = _state.value.copy(
+            pendingLightingAzimuth = null,
+            pendingLightingAltitude = null,
+        )
+    }
+
+    /** Clears pack-3 structured action tags (viz, nav, metal, outcome, status, notes). Does not clear lighting. */
+    fun clearPendingStructuredActions() {
+        _state.value = _state.value.copy(
+            pendingVizMode = null,
+            pendingNavTargetIds = emptyList(),
+            pendingMetalType = null,
+            pendingOutcome = null,
+            pendingStatus = null,
+            pendingStructuredNotes = null,
+        )
+    }
+
+    /**
+     * Posts an offline (no network) assist result into the conversation.
+     * Optional [mapTargets] replace [AiTerrainState.cloudMapTargets] when non-empty.
+     * Parses `NAV_TARGET id=` lines into [AiTerrainState.pendingNavTargetIds].
+     */
+    fun postOfflineAssist(
+        title: String,
+        body: String,
+        mapTargets: List<CloudMapTarget> = emptyList(),
+        terrainKey: String? = null,
+    ) {
+        val userMessage = AiMessage(
+            id = ids.getAndIncrement(),
+            role = AiMessageRole.USER,
+            text = title,
+        )
+        val modelMessage = AiMessage(
+            id = ids.getAndIncrement(),
+            role = AiMessageRole.MODEL,
+            text = body,
+            provider = null,
+        )
+        val navTargetIds = FieldAiCopilot.parseNavTargetIds(body)
+        _state.value = _state.value.copy(
+            messages = _state.value.messages + userMessage + modelMessage,
+            cloudError = null,
+            cloudStage = "Offline assist ready",
+            cloudMapTargets = if (mapTargets.isNotEmpty()) mapTargets else _state.value.cloudMapTargets,
+            cloudTerrainKey = if (mapTargets.isNotEmpty()) {
+                terrainKey ?: _state.value.cloudTerrainKey
+            } else {
+                _state.value.cloudTerrainKey
+            },
+            pendingNavTargetIds = if (navTargetIds.isNotEmpty()) {
+                navTargetIds
+            } else {
+                _state.value.pendingNavTargetIds
+            },
+            lastFieldFeature = title,
+        ).withProviderStatus()
+    }
+
+    /**
+     * Runs one of the twenty Field AI specialist features through [TerrainAiGateway]
+     * (OpenAI primary / Gemini fallback). Structured tags are stored on state for UI apply:
+     * lighting ([AiTerrainState.pendingLightingAzimuth] / [AiTerrainState.pendingLightingAltitude]),
+     * viz mode ([AiTerrainState.pendingVizMode]), nav targets ([AiTerrainState.pendingNavTargetIds]),
+     * and voice/photo find fields (metal / outcome / status / notes).
+     */
+    fun runFieldAiFeature(
+        feature: FieldAiFeature,
+        pack: FieldAiSessionPack,
+        viewport: TerrainVisionSnapshot,
+        attachViewportImage: Boolean,
+        terrainKey: String? = null,
+    ) {
+        if (_state.value.isSending) return
+        val preference = _state.value.providerPreference
+        if (TerrainAiGateway.preferredProvider(appContext) == null) {
+            _state.value = _state.value.copy(
+                cloudError = "Add an OpenAI key for the primary provider or a Gemini key for fallback. Offline analysis still works without a key.",
+            )
+            return
+        }
+
+        val wantsImage = attachViewportImage && feature.prefersViewportImage
+        val canAttachImage = wantsImage &&
+            viewport.bitmap?.let { !it.isRecycled && it.width > 0 && it.height > 0 } == true
+        val imageFallbackNote = if (wantsImage && !canAttachImage) {
+            " (viewport image unavailable — text-only)"
+        } else {
+            ""
+        }
+
+        val userPrompt = FieldAiCopilot.buildUserPrompt(feature, pack)
+        val displayText = buildString {
+            append(feature.title)
+            append('\n')
+            append(userPrompt.take(4000))
+        }
+        val userMessage = AiMessage(
+            id = ids.getAndIncrement(),
+            role = AiMessageRole.USER,
+            text = displayText,
+            usedViewportImage = canAttachImage,
+        )
+        val withUser = _state.value.messages + userMessage
+        _state.value = _state.value.copy(
+            messages = withUser,
+            isSending = true,
+            cloudError = null,
+            cloudStage = if (canAttachImage) {
+                "Preparing ${feature.title} with viewport image…"
+            } else {
+                "Running ${feature.title}$imageFallbackNote…"
+            },
+        )
+
+        viewModelScope.launch {
+            try {
+                val image = if (canAttachImage) {
+                    withContext(Dispatchers.Default) { GeminiTerrainImageEncoder.encode(viewport) }
+                } else {
+                    null
+                }
+                // Prefer text-only when encode fails rather than hard-failing the feature.
+                val usedImage = image != null
+                val systemContext = buildString {
+                    append(pack.terrainContext)
+                    append("\n\n")
+                    append(FieldAiCopilot.buildSystemAddendum(feature))
+                }
+                val answer = gateway.generate(
+                    conversation = withUser.map {
+                        GeminiConversationTurn(
+                            role = if (it.role == AiMessageRole.MODEL) "model" else "user",
+                            text = it.text,
+                        )
+                    },
+                    systemContext = systemContext,
+                    image = image,
+                    requestedProvider = preference,
+                    onProviderStage = { stage ->
+                        _state.value = _state.value.copy(cloudStage = stage)
+                    },
+                )
+                val cloudTargets = if (usedImage) {
+                    parseCloudMapTargets(answer.text, viewport.bounds)
+                } else {
+                    emptyList()
+                }
+                val fallbackNote = answer.fallbackReason?.let {
+                    "\n\nFallback used because OpenAI returned: $it"
+                }.orEmpty()
+                val lighting = if (feature == FieldAiFeature.LIGHTING_ADVISOR) {
+                    FieldAiCopilot.parseLightingRecommendation(answer.text)
+                } else {
+                    null
+                }
+                // Pack-3 structured tags (parsers land with FieldAiCopilot / merge).
+                val navTargetIds = FieldAiCopilot.parseNavTargetIds(answer.text)
+                val vizMode = FieldAiCopilot.parseVizMode(answer.text)
+                val structuredFind = feature == FieldAiFeature.VOICE_STRUCTURED_FIND ||
+                    feature == FieldAiFeature.PHOTO_CATALOG_ASSIST
+                val metalType = if (structuredFind) {
+                    FieldAiCopilot.parseMetalTypeSuggestion(answer.text)
+                } else {
+                    null
+                }
+                val outcome = if (structuredFind) {
+                    FieldAiCopilot.parseOutcomeSuggestion(answer.text)
+                } else {
+                    null
+                }
+                val status = if (structuredFind) {
+                    FieldAiCopilot.parseStatusSuggestion(answer.text)
+                } else {
+                    null
+                }
+                val structuredNotes = if (structuredFind) {
+                    FieldAiCopilot.parseNotesSuggestion(answer.text)
+                } else {
+                    null
+                }
+                _state.value = _state.value.copy(
+                    messages = _state.value.messages + AiMessage(
+                        id = ids.getAndIncrement(),
+                        role = AiMessageRole.MODEL,
+                        text = removeCloudMapTargetTags(answer.text) + fallbackNote,
+                        provider = answer.provider,
+                        usedViewportImage = usedImage,
+                    ),
+                    isSending = false,
+                    cloudError = null,
+                    cloudStage = "Completed ${feature.title} with ${answer.provider.label}",
+                    cloudMapTargets = if (cloudTargets.isNotEmpty()) {
+                        cloudTargets
+                    } else {
+                        _state.value.cloudMapTargets
+                    },
+                    cloudTerrainKey = if (cloudTargets.isNotEmpty()) terrainKey else _state.value.cloudTerrainKey,
+                    pendingLightingAzimuth = lighting?.azimuth ?: _state.value.pendingLightingAzimuth,
+                    pendingLightingAltitude = lighting?.altitude ?: _state.value.pendingLightingAltitude,
+                    pendingVizMode = vizMode ?: _state.value.pendingVizMode,
+                    pendingNavTargetIds = if (navTargetIds.isNotEmpty()) {
+                        navTargetIds
+                    } else {
+                        _state.value.pendingNavTargetIds
+                    },
+                    pendingMetalType = metalType ?: _state.value.pendingMetalType,
+                    pendingOutcome = outcome ?: _state.value.pendingOutcome,
+                    pendingStatus = status ?: _state.value.pendingStatus,
+                    pendingStructuredNotes = structuredNotes ?: _state.value.pendingStructuredNotes,
+                    lastFieldFeature = feature.title,
                 ).withProviderStatus()
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -651,7 +1079,19 @@ fun GeminiAssistantScreen(
                 }
             }
             item {
-                LocalCandidateSummary(result.candidates, result.recommendation)
+                RankerCard(
+                    state = state,
+                    onTrain = assistantViewModel::trainRankerFromFeedback,
+                    onClear = assistantViewModel::clearRanker,
+                )
+            }
+            item {
+                LocalCandidateSummary(
+                    candidates = result.candidates,
+                    recommendation = result.recommendation,
+                    ranked = state.rankedCandidates,
+                    rankerVersion = state.rankerVersion,
+                )
             }
         }
 
@@ -768,7 +1208,7 @@ fun GeminiAssistantScreen(
                     enabled = draft.isNotBlank() && !state.isSending && state.activeProvider != null,
                     modifier = Modifier.height(56.dp),
                 ) {
-                    Icon(Icons.Default.Send, contentDescription = null)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text("Send")
                 }
@@ -820,13 +1260,25 @@ private fun ProviderKeyEditor(
                     Text("Save OpenAI")
                 }
             }
+            Text(
+                if (state.geminiConfigured && !state.hasDeviceGeminiKey) {
+                    "Gemini is configured from the build (local.properties GEMINI_API_KEY). " +
+                        "Optional: save a device key here to override without rebuilding."
+                } else if (state.hasDeviceGeminiKey) {
+                    "Gemini device key is saved encrypted on this phone."
+                } else {
+                    "Add GEMINI_API_KEY to local.properties and rebuild, or paste a key below and Save."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             OutlinedTextField(
                 value = geminiKeyDraft,
                 onValueChange = onGeminiKeyChanged,
-                label = { Text("Gemini fallback key") },
+                label = { Text("Gemini API key (optional device override)") },
                 visualTransformation = PasswordVisualTransformation(),
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_field"),
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -834,10 +1286,63 @@ private fun ProviderKeyEditor(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (state.hasDeviceGeminiKey) {
-                    TextButton(onClick = onRemoveGemini) { Text("Remove Gemini key") }
+                    TextButton(onClick = onRemoveGemini) { Text("Remove device key") }
                 }
-                OutlinedButton(onClick = onSaveGemini, enabled = geminiKeyDraft.length >= 20) {
+                OutlinedButton(
+                    onClick = onSaveGemini,
+                    enabled = geminiKeyDraft.length >= 20,
+                    modifier = Modifier.testTag("save_gemini_api_key"),
+                ) {
                     Text("Save Gemini")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RankerCard(
+    state: AiTerrainState,
+    onTrain: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val confirmed = state.verifiedFeedback.count { it.confirmed }
+    val rejected = state.verifiedFeedback.size - confirmed
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Field-check ranker", fontWeight = FontWeight.Bold)
+            Text(
+                if (state.rankerVersion != null) {
+                    "Active model ${state.rankerVersion} — candidates are re-ordered by calibrated " +
+                        "field-check probability, with the evidence behind every score."
+                } else {
+                    "No trained model. Mark logged finds as confirmed or false positive in the " +
+                        "Targets panel, then train here to re-rank candidates by what actually panned out."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            state.rankerMessage?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onTrain,
+                    enabled = !state.isTrainingRanker && confirmed > 0 && rejected > 0,
+                ) {
+                    Text(
+                        if (state.isTrainingRanker) {
+                            "Training…"
+                        } else {
+                            "Train from $confirmed confirmed · $rejected rejected"
+                        },
+                    )
+                }
+                if (state.rankerVersion != null) {
+                    TextButton(onClick = onClear) { Text("Clear model") }
                 }
             }
         }
@@ -848,6 +1353,8 @@ private fun ProviderKeyEditor(
 private fun LocalCandidateSummary(
     candidates: List<TerrainFeatureCandidate>,
     recommendation: String,
+    ranked: List<RankedCandidate>?,
+    rankerVersion: String?,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
@@ -856,7 +1363,18 @@ private fun LocalCandidateSummary(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Local detector results", fontWeight = FontWeight.Bold)
             Text(recommendation, style = MaterialTheme.typography.bodySmall)
-            candidates.take(12).forEachIndexed { index, candidate ->
+            if (ranked != null && rankerVersion != null) {
+                Text(
+                    "Ordered by field-check model $rankerVersion",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            val display: List<RankedCandidate> = ranked ?: candidates.map {
+                RankedCandidate(it, probability = -1f, contributions = emptyList())
+            }
+            display.take(12).forEachIndexed { index, entry ->
+                val candidate = entry.candidate
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceContainer,
@@ -864,7 +1382,12 @@ private fun LocalCandidateSummary(
                 ) {
                     Column(Modifier.padding(10.dp)) {
                         Text(
-                            "${index + 1}. ${candidate.type.label} · ${(candidate.score * 100f).toInt()}%",
+                            buildString {
+                                append("${index + 1}. ${candidate.type.label} · ${(candidate.score * 100f).toInt()}%")
+                                if (entry.probability >= 0f) {
+                                    append(" → field-check ${(entry.probability * 100f).toInt()}%")
+                                }
+                            },
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
@@ -872,7 +1395,9 @@ private fun LocalCandidateSummary(
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Text(
-                            candidate.evidence.joinToString(" · "),
+                            (candidate.evidence + entry.contributions.map { contribution ->
+                                "${if (contribution.contribution >= 0f) "+" else "−"} ${contribution.featureName}"
+                            }).joinToString(" · "),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

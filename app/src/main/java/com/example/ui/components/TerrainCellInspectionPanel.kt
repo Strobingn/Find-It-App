@@ -5,24 +5,31 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,38 +38,46 @@ import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.MeasurementFormat
 import java.util.Locale
 
+/**
+ * Compact cell-metrics card. Viewshed is intentionally not embedded here — it has its own
+ * [ViewshedCard] so the terrain canvas stays readable.
+ */
 @Composable
 fun TerrainCellInspectionPanel(
     inspection: TerrainCellInspection,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    isComputingViewshed: Boolean = false,
+    canComputeViewshed: Boolean = true,
+    onComputeViewshed: () -> Unit = {},
 ) {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
         ),
-        shape = RoundedCornerShape(18.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
-        modifier = modifier.widthIn(max = 420.dp),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        modifier = modifier
+            .widthIn(max = 300.dp)
+            .testTag("terrain_cell_inspection_panel"),
     ) {
         Column(
             modifier = Modifier
-                .heightIn(max = 470.dp)
+                .heightIn(max = 300.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("Exact terrain cell", fontWeight = FontWeight.Bold)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Exact terrain cell", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "Column ${inspection.column}, row ${inspection.row}",
-                        style = MaterialTheme.typography.bodySmall,
+                        "Col ${inspection.column}, row ${inspection.row}",
+                        style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = onDismiss) {
+                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Default.Close, contentDescription = "Close cell inspection")
                 }
             }
@@ -73,7 +88,7 @@ fun TerrainCellInspectionPanel(
                 } else {
                     MaterialTheme.colorScheme.error
                 },
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
             )
             HorizontalDivider()
             if (inspection.valid) {
@@ -87,28 +102,17 @@ fun TerrainCellInspectionPanel(
                         "${decimal(it, "°")} ${compassDirection(it)}"
                     } ?: "Flat",
                 )
-                InspectionValue("Curvature", MeasurementFormat.perFoot(inspection.curvaturePerMeter))
                 InspectionValue("Local relief", MeasurementFormat.signedLength(inspection.localReliefMeters))
-                InspectionValue("Ruggedness", MeasurementFormat.length(inspection.ruggednessMeters))
                 InspectionValue("Depression depth", MeasurementFormat.length(inspection.depressionDepthMeters))
-                InspectionValue("Positive openness", decimal(inspection.positiveOpennessDegrees, "°"))
-                InspectionValue("Negative openness", decimal(inspection.negativeOpennessDegrees, "°"))
-                InspectionValue("Linearity response", MeasurementFormat.perFoot(inspection.linearityResponse))
             } else {
                 Text(
-                    "This raster location contains no valid source measurement. Select a nearby " +
-                        "valid cell to inspect terrain values.",
+                    "No valid source measurement at this cell.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             HorizontalDivider()
-            InspectionValue("Cell resolution", "${MeasurementFormat.resolution(inspection.cellSizeMeters)} square")
-            InspectionValue(
-                "Neighborhood",
-                "${MeasurementFormat.length(inspection.neighborhoodRadiusMeters)} · " +
-                    "${inspection.validNeighborhoodCells} valid cells",
-            )
+            InspectionValue("Resolution", MeasurementFormat.resolution(inspection.cellSizeMeters))
             val latitude = inspection.latitude
             val longitude = inspection.longitude
             if (latitude != null && longitude != null) {
@@ -118,8 +122,32 @@ fun TerrainCellInspectionPanel(
                         GeoSpatialLibrary.formatDms(longitude, false),
                 )
             } else {
-                InspectionValue("Coordinate", "Local grid · geographic CRS unavailable")
+                InspectionValue("Coordinate", "Local grid")
             }
+            // Compact action only — results + map overlay live on ViewshedCard / canvas.
+            OutlinedButton(
+                onClick = onComputeViewshed,
+                enabled = inspection.valid && canComputeViewshed && !isComputingViewshed,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .testTag("compute_viewshed_button"),
+            ) {
+                if (isComputingViewshed) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Computing…")
+                } else {
+                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Viewshed from here")
+                }
+            }
+            Text(
+                "Result draws on the map; status opens in a small card.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

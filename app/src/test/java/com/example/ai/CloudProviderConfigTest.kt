@@ -16,4 +16,10 @@ class CloudProviderConfigTest {
     fun geminiDefaultUsesStableMultimodalModel() {
         assertEquals("gemini-3.5-flash", GeminiApiClient.configuredModel())
     }
+
+    @Test
+    fun geminiApiKeyBuildConfigFieldExists() {
+        // Presence of the field is the contract: empty is fine in CI without secrets.
+        assertEquals(BuildConfig.GEMINI_API_KEY, BuildConfig.GEMINI_API_KEY)
+    }
 }

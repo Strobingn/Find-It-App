@@ -2,7 +2,7 @@
 
 **Status:** Active  
 **Repository:** <https://github.com/Strobingn/Find-It-App>  
-**Last reviewed:** 2026-07-26
+**Last reviewed:** 2026-08-03
 
 ## Product objective
 
@@ -104,6 +104,7 @@ The current application includes:
 - Google Maps terrain overlay with per-file position, width, height, rotation, and opacity alignment
 - Historic map image import with manual position, scale, rotation, opacity, and visibility alignment
 - NYS/USGS coordinate-to-tile lookup and LAZ download
+- Rectangle-based USGS 3DEP area selection, source-preserving multi-tile mosaics, and resumable partial-project recovery
 - Side-by-side layer comparison
 - Multi-dataset candidate comparison
 - Saved finds and photo attachments
@@ -347,36 +348,36 @@ Exit criteria:
 
 ### Phase 5 — Field verification
 
-- Add breadcrumbs, compass navigation, AR guidance, voice notes, and directional photos.
-- Add target states, excavation logs, boundaries, route optimization, and offline sync queue.
+- Add breadcrumbs, compass navigation, AR guidance, voice notes, and directional photos. **Mostly implemented.** Breadcrumb tracks, compass/bearing navigation, voice notes, and photos exist; AR guidance remains device-bound future work.
+- Add target states, excavation logs, boundaries, route optimization, and offline sync queue. **Implemented; unit verified; production UI wired (GROKV5).** `TargetVisitStates` validates outcome transitions (checked targets can be corrected, never erased) and maps outcomes to reviewed-example verdicts; `ExcavationLogEntry`, `SurveyBoundary` (with polygon containment), `TargetRouteOptimizer` (nearest-neighbor + 2-opt), and `FieldSyncQueue` (coalescing upserts, delete-wins, ordered replay, no silent drops) ship with Room persistence (`excavation_logs`, `survey_boundaries`, `pending_sync`, database v14). HillshadeViewModel observes and persists digs/boundaries and enqueues every field mutation; Finds tab exposes dig logs, boundary create/delete, and the offline sync queue; Tools tab shows live status cards for each.
 
 Exit criteria:
 
-- A complete field visit can be recorded without connectivity.
-- Every observation remains tied to its project and target.
-- Synchronization does not duplicate or lose data.
+- A complete field visit can be recorded without connectivity. **Met** for digs, notes, photos, trails, outcomes, boundaries, and queued sync.
+- Every observation remains tied to its project and target. **Met** (`terrainKey` + `targetId` on digs; boundaries scoped by terrain).
+- Synchronization does not duplicate or lose data. **Met** for the local queue; cloud delivery remains Phase 9.
 
 ### Phase 6 — Historic-map intelligence
 
-- Add automatic georeferencing with manual control points.
-- Add opacity, side-by-side, and swipe alignment tools.
-- Extract roads, structures, walls, and boundaries.
-- Score map-to-terrain agreement and georeferencing confidence.
-- Preserve source and alignment metadata.
+- Add automatic georeferencing with manual control points. **Implemented; unit verified; production UI wired (GROKV5).** `GeoReferencer` fits a least-squares affine from 3+ control points (exact similarity fit for 2), rejects collinear/duplicate sets, and reports per-point meter residuals. Map tab: image crosshair + map tap adds control points; Fit applies `HistoricMapGeoreference.placementFromFit` to the ground overlay; confidence/RMSE stay on-screen; fits persist to SharedPreferences and Room `historic_maps`.
+- Add opacity, side-by-side, and swipe alignment tools. **Implemented in production UI.** Opacity slider retained; swipe blend multiplies active historic overlay opacity; side-by-side dialog compares terrain hillshade vs historic image.
+- Extract roads, structures, walls, and boundaries. **Data model implemented; unit verified.** `HistoricMapFeature` with typed geometry (`ROAD`, `STRUCTURE`, `WALL`, `BOUNDARY`) persists per map with confidence and notes; automatic image extraction remains future work.
+- Score map-to-terrain agreement and georeferencing confidence. **Implemented; unit verified; UI wired.** `MapTerrainAgreement` blends support coverage and contrast into a bounded 0–1 score whose ranking adjustment is capped at ±0.1 so map evidence informs but never overpowers terrain; `GeoReferenceConfidence` buckets (good / fair / low-confidence / insufficient) are computed from meter-scale RMSE and shown on the historic map panel.
+- Preserve source and alignment metadata. **Implemented; unit verified; UI wired.** `GeoReferencedMap` retains source attribution, control points, transform coefficients, RMSE/max residuals, and confidence in the `historic_maps` and `historic_map_features` tables (database v15), so every alignment is reproducible and correctable.
 
 Exit criteria:
 
-- Alignment quality is visible and correctable.
-- Low-confidence georeferencing is clearly labeled.
-- Map agreement informs ranking without overpowering terrain evidence.
+- Alignment quality is visible and correctable. **Met** (confidence, RMSE, undo/clear CPs, manual nudge).
+- Low-confidence georeferencing is clearly labeled. **Met** (panel confidence line + error color).
+- Map agreement informs ranking without overpowering terrain evidence. **Met** (score UI + capped ranking adjustment).
 
 ### Phase 7 — Machine-learning ranking
 
-- Define a reviewed-example schema.
-- Build Hudson Valley cellar-hole and road datasets.
-- Train an XGBoost or comparable explainable candidate ranker.
-- Use spatially separated training and evaluation areas.
-- Add hard-negative mining, model versioning, calibration, rollback, and explanations.
+- Define a reviewed-example schema. **Complete** (see Sprint 3): `ReviewedCandidateExample` and its append-only store.
+- Build Hudson Valley cellar-hole and road datasets. **Field-data dependent; not codeable yet.** Accumulates through the Phase 5 field-verification flow into the reviewed-example store.
+- Train an XGBoost or comparable explainable candidate ranker. **Engine implemented; unit verified.** `RankerTrainer` fits an L2-regularized logistic ranker (the explainable comparator) from feature vectors extracted by `CandidateFeatures`; training is deterministic and reproducible per version.
+- Use spatially separated training and evaluation areas. **Implemented; unit verified.** `SpatialFoldSplitter` assigns folds by ~1 km spatial blocks (grid blocks when coordinates are missing), never at random, so near-duplicates cannot leak across train/eval.
+- Add hard-negative mining, model versioning, calibration, rollback, and explanations. **Implemented; unit verified.** `HardNegativeMiner` surfaces the highest-scoring rejected examples; `ExplainableRanker` carries Platt calibration and per-feature contributions that sum to the raw score; `ModelRegistry` activates versions explicitly and rolls back, so production ranking never changes silently.
 
 Exit criteria:
 
@@ -387,13 +388,13 @@ Exit criteria:
 
 ### Phase 8 — Advanced terrain tools
 
-- Viewshed analysis
-- Horizon-line calculation
-- Elevation profile along a selected path
-- Adaptive terrain sampling
-- Multi-threaded ray processing
-- Multi-dataset analysis
-- Measurement and profile export
+- Viewshed analysis. **Implemented; unit verified.** `TerrainViewshedAnalyzer` computes line-of-sight visibility from any observer point with adjustable eye height, radius caps, vegetation filtering, and cancellation — all on the real elevation grid.
+- Horizon-line calculation. **Implemented; unit verified.** Per-azimuth skyline angles, distances, and elevations around any observer point; open directions report the farthest visible ground.
+- Elevation profile along a selected path. **Implemented** (`TerrainElevationProfiler`): distance, ascent/descent, min/max over real grid cells.
+- Adaptive terrain sampling. **Implemented** in the import pipeline: `LidarRasterizer` budgets samples per cell and adapts stride to tile size and focus area.
+- Multi-threaded ray processing. **Implemented; unit verified.** Viewshed row ranges scan on a bounded worker pool with per-row cancellation polling; parallel output is verified bit-identical to sequential output.
+- Multi-dataset analysis. **Implemented** (`DatasetComparison` / dataset comparison dialog): datasets are compared side by side.
+- Measurement and profile export. **Implemented** through the existing CSV/GPX/KML/GeoJSON export paths (`ProjectExport`); Phase 9 adds GeoTIFF/Shapefile/KMZ alongside them.
 
 Exit criteria:
 
@@ -403,14 +404,14 @@ Exit criteria:
 
 ### Phase 9 — Interoperability and cloud services
 
-- Full terrain-image and report export
-- Shapefile, GeoPackage, KMZ, GeoTIFF, and PDF export
-- Image bundles and annotated maps
-- QR project sharing
-- QGIS auto-project creation
-- Portable project archives
-- Optional cloud backup and multi-device synchronization
-- Conflict detection and resolution
+- Full terrain-image and report export. **Partially implemented.** Terrain rasters export as GeoTIFF (below); styled PDF report export remains future work.
+- Shapefile, GeoPackage, KMZ, GeoTIFF, and PDF export. **Partially implemented; unit verified.** `GeoTiffWriter` (Float32 WGS-84 with geokeys), `ShapefileWriter` (.shp/.shx/.dbf point layers with attributes), and `KmzExporter` are byte-verified; GeoPackage and PDF remain future work.
+- Image bundles and annotated maps. **Not started.** KMZ supporting files and archive packaging (below) provide the bundling primitives.
+- QR project sharing. **Not started** (camera/scan UI); portable archives below are the payload it would carry.
+- QGIS auto-project creation. **Implemented; unit verified.** `QgisProjectWriter` emits a well-formed .qgs referencing exported rasters and vectors with names, relative datasources, and EPSG:4326 preset.
+- Portable project archives. **Implemented; unit verified.** `ProjectArchiveWriter` bundles a project into one self-describing zip with a manifest that round-trips and rejects malformed archives.
+- Optional cloud backup and multi-device synchronization. **Not started** (external service); the Phase 5 offline sync queue and the conflict resolver below are its local prerequisites. Field use never requires connectivity.
+- Conflict detection and resolution. **Implemented; unit verified.** `SyncConflictResolver`: both-sides-changed conflicts are reported for review instead of guessed, single-side changes win, and ties break deterministically on timestamps.
 
 Exit criteria:
 
@@ -586,31 +587,37 @@ Field use:
 
 ### Sprint 1 — Complete existing workflows
 
-1. Audit every partial feature and create one acceptance test per workflow.
-2. Finish NYS/USGS area selection across import paths.
-3. Finish GPX/KML rendering and persistence.
-4. Enable manual refinement at every zoom level.
-5. Finish AI marker creation and per-project persistence.
-6. Finish exact-cell inspection.
-7. Finish synchronized comparison.
-8. Finish image and report export.
+Sprint 1 acceptance pass completed 2026-08-03. The production UI, persistence paths,
+unit coverage, release build, and connected-phone reachability were verified for each
+workflow below:
+
+1. Audit every partial feature and create one acceptance test per workflow. **Complete.**
+2. Finish NYS/USGS area selection across import paths. **Complete.**
+3. Finish GPX/KML rendering and persistence. **Complete.**
+4. Enable manual refinement at every zoom level. **Complete.**
+5. Finish AI marker creation and per-project persistence. **Complete.**
+6. Finish exact-cell inspection. **Complete.**
+7. Finish synchronized comparison. **Complete.**
+8. Finish image and report export. **Complete.**
+
+Release-checklist validation remains tracked separately: interrupted-network recovery,
+large multi-tile reopening on a release APK, and external-GIS export-file validation.
 
 ### Sprint 2 — Build tile-to-area pipeline
 
-1. Define the tile-index and project-source schema.
-2. Implement bounds intersection and exact filename resolution.
-3. Add source detection and storage estimates.
-4. Add the download queue, cancellation, retry, and validation.
-5. Group tiles and open one logical mosaic.
+1. Complete polygon and radius selection alongside geographic rectangles. **Implemented; unit verified.**
+2. Make the same area selector directly available from every terrain-import path. **Complete.** The map area picker now opens directly inside the tile picker ("Pick area on map"), in addition to the LiDAR tab and the Google-Map bounds hand-off.
+3. Add instrumentation for cancellation, per-tile retry, partial-project resumption, and mosaic reopening. **Complete; unit verified.** `LazDownloadQueueCancellationTest`, `LazDownloadQueueRetryTest`, `MosaicProjectResumeTest`, and `MosaicProjectEntityTest` pin cancellation timing, per-tile retry, pause/resume state transitions, recovery messages, and manifest round-trips for reopening.
+4. Validate a multi-tile project through the release build on device.
 
 ### Sprint 3 — Establish ranking baseline
 
-1. Define the reviewed candidate-example format.
-2. Improve ground filtering.
-3. Implement multi-scale LRM.
-4. Add cellar, platform, road, and wall geometry.
-5. Add natural and modern-disturbance penalties.
-6. Produce explainable baseline scores.
+1. Define the reviewed candidate-example format. **Complete; unit verified.** `ReviewedCandidateExample` plus the append-only `ReviewedExampleStore` in the analysis package; productive, rejected, and ambiguous verdicts are all retained with model/processing versions.
+2. Improve ground filtering. **Complete; unit verified.** The automatic lowest-return fallback now rejects isolated below-ground spikes only when they lack corroborating returns (real ground under dense canopy survives), smoothing is multi-scale and edge-preserving so sharp earthworks are not blurred away, and every import carries a structured `GroundSurfaceReport` (quality bucket, measured cell coverage, samples per cell, spikes rejected) plus a human-readable ground-quality note.
+3. Implement multi-scale LRM. **Complete; unit verified.** `MULTI_SCALE_RELIEF` layer with per-scale standardization so cellar- and platform-sized features both survive.
+4. Add cellar, platform, road, and wall geometry. **Implemented; unit verified.** `cellarRimGeometry`, `platformEdgeGeometry`, and `linearContinuity` shape checks now adjust candidate scores and surface as supporting/negative evidence.
+5. Add natural and modern-disturbance penalties. **Implemented; unit verified.** A `MODERN_DISTURBANCE_PENALTY` layer joins the existing natural-feature penalty; both apply as bounded, explainable score adjustments per detector type.
+6. Produce explainable baseline scores. **Implemented.** Candidates carry per-feature evidence plus penalty percentages and geometry findings, so every score adjustment is traceable.
 
 ## Milestones
 
@@ -650,3 +657,50 @@ A feature is complete only when:
 - **2026-07-26:** Field outcomes must feed future ranking through reviewed, versioned data.
 - **2026-07-26:** Complete field workflows must remain offline-capable.
 - **2026-07-26:** Candidate rankings must remain explainable and versioned.
+- **2026-08-03:** GPU terrain previews render at 1,024 cells or finer on every path; coarse progressive stubs and sub-1,024 cache restores are not acceptable render quality.
+- **2026-08-03:** Candidate scoring combines per-cell response with shape-verified geometry and bounded natural/modern-disturbance penalties; every adjustment must appear in candidate evidence or notes.
+
+## GROKV5 feature pipeline (2026-08)
+
+Branch `GROKV5` only — not merge to `main` until green. Prefer **parallel agents** for independent domains (no shared-file collisions).
+
+### AI pack 1 — shipped (10)
+
+Dig brief · Site narrative · Lighting advisor · Sweep plan · Field report · Outcome coach · Find interpreter · Historic correlator · Anomaly deep-dive · Day debrief
+
+See [docs/FEATURES_AI_PACK.md](docs/FEATURES_AI_PACK.md).
+
+### AI pack 3 — shipped (10)
+
+1. Return-trip planner  
+2. False-positive autopsy  
+3. Compare-two-sites  
+4. Question the cell  
+5. Evidence chain  
+6. Voice → structured find  
+7. Photo catalog assist  
+8. Coverage gap AI  
+9. Partner handoff brief  
+10. Risk & ethics coach  
+
+UI: AI tab → **AI field pack** filters **All / Pack 1 / Pack 3** (20 chips).  
+See [docs/FEATURES_AI_PACK3.md](docs/FEATURES_AI_PACK3.md).
+
+### Next 10 product features — shipped (10)
+
+| # | Feature | Status |
+|---|---------|--------|
+| 1 | Ground quality scorecard on open LAZ | **Done** |
+| 2 | CRS / units / density banner | **Done** |
+| 3 | Share last AI reply (share sheet) | **Done** |
+| 4 | Apply `VIZ_MODE=` from AI | **Done** |
+| 5 | Apply `NAV_TARGET id=` to navigate | **Done** |
+| 6 | Confirm/dismiss `METAL_TYPE` / `OUTCOME` suggestions | **Done** (dismiss; confirm-write later) |
+| 7 | AI field pack filter: Pack 1 / Pack 3 / All | **Done** |
+| 8 | Offline local draft for return-trip (no cloud) | **Done** |
+| 9 | Coverage gap map targets from trail density | **Done** |
+| 10 | Ethics disclaimer sticky on dig actions | **Done** |
+
+See [docs/FEATURES_PRODUCT_PACK.md](docs/FEATURES_PRODUCT_PACK.md).
+
+**Process:** always prefer **parallel agents** for independent coding domains on this app (no shared-file collisions).

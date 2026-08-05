@@ -3,6 +3,10 @@ package com.example.data
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import com.example.data.historicmap.GeoReferenceConfidence
+import com.example.data.historicmap.HistoricMapControlPoint
+import com.example.data.historicmap.controlPointsFromStorage
+import com.example.data.historicmap.controlPointsToStorage
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
@@ -12,11 +16,11 @@ private val SUPPORTED_HISTORIC_MAP_EXTENSIONS = setOf("jpg", "jpeg", "png", "tif
 private const val MAX_HISTORIC_MAP_IMPORT_BYTES = 200L * 1024L * 1024L
 
 /**
- * A user-imported historic map image (a scanned survey, plat, or old topographic sheet) manually
- * aligned over the live terrain map. There is no embedded geo-reference, so placement is entirely
- * user-driven: [latitude]/[longitude] mark the image center, and [widthScale]/[heightScale] scale
- * the image's natural footprint ([baseWidthMeters] at [aspectRatio]) the same way the rendered LAZ
- * terrain overlay is aligned in [com.example.ui.components.TerrainGoogleMapScreen].
+ * A user-imported historic map image (a scanned survey, plat, or old topographic sheet) aligned
+ * over the live terrain map. Placement is user-driven: either manual center/scale/rotation, or a
+ * [GeoReferencer] fit from [controlPoints]. [latitude]/[longitude] mark the image center, and
+ * [widthScale]/[heightScale] scale the image's natural footprint ([baseWidthMeters] at
+ * [aspectRatio]).
  */
 data class HistoricMapOverlay(
     val id: String,
@@ -31,9 +35,19 @@ data class HistoricMapOverlay(
     val bearingDegrees: Float = 0f,
     val opacity: Float = 0.65f,
     val visible: Boolean = true,
+    val controlPoints: List<HistoricMapControlPoint> = emptyList(),
+    val confidence: GeoReferenceConfidence = GeoReferenceConfidence.INSUFFICIENT_POINTS,
+    val rmseMeters: Double? = null,
+    val maxResidualMeters: Double? = null,
+    val transformStorage: String? = null,
+    val sourceAttribution: String = "",
 ) {
     val widthMeters: Float get() = (baseWidthMeters * widthScale).coerceAtLeast(1f)
     val heightMeters: Float get() = (baseWidthMeters / aspectRatio.coerceAtLeast(0.01f) * heightScale).coerceAtLeast(1f)
+
+    val hasReliableGeoreference: Boolean
+        get() = confidence == GeoReferenceConfidence.GOOD ||
+            confidence == GeoReferenceConfidence.FAIR
 }
 
 /**
@@ -149,6 +163,12 @@ class HistoricMapOverlayRepository(
             .putFloat(key(overlay.id, "bearing"), overlay.bearingDegrees)
             .putFloat(key(overlay.id, "opacity"), overlay.opacity)
             .putBoolean(key(overlay.id, "visible"), overlay.visible)
+            .putString(key(overlay.id, "controlPoints"), controlPointsToStorage(overlay.controlPoints))
+            .putString(key(overlay.id, "confidence"), overlay.confidence.name)
+            .putString(key(overlay.id, "rmse"), overlay.rmseMeters?.toString())
+            .putString(key(overlay.id, "maxResidual"), overlay.maxResidualMeters?.toString())
+            .putString(key(overlay.id, "transform"), overlay.transformStorage)
+            .putString(key(overlay.id, "attribution"), overlay.sourceAttribution)
             .apply()
     }
 
@@ -159,6 +179,7 @@ class HistoricMapOverlayRepository(
         val latitude = preferences.getString(key(id, "lat"), null)?.toDoubleOrNull() ?: return null
         val longitude = preferences.getString(key(id, "lon"), null)?.toDoubleOrNull() ?: return null
         if (latitude !in -90.0..90.0 || longitude !in -180.0..180.0) return null
+        val confidenceName = preferences.getString(key(id, "confidence"), null)
         return HistoricMapOverlay(
             id = id,
             file = file,
@@ -167,11 +188,21 @@ class HistoricMapOverlayRepository(
             longitude = longitude,
             baseWidthMeters = preferences.getFloat(key(id, "baseWidth"), 200f).coerceAtLeast(1f),
             aspectRatio = preferences.getFloat(key(id, "aspect"), 1f).coerceAtLeast(0.01f),
-            widthScale = preferences.getFloat(key(id, "widthScale"), 1f).coerceIn(0.2f, 5f),
-            heightScale = preferences.getFloat(key(id, "heightScale"), 1f).coerceIn(0.2f, 5f),
+            // Wider range than the manual sliders so control-point fits survive reload.
+            widthScale = preferences.getFloat(key(id, "widthScale"), 1f).coerceIn(0.05f, 20f),
+            heightScale = preferences.getFloat(key(id, "heightScale"), 1f).coerceIn(0.05f, 20f),
             bearingDegrees = preferences.getFloat(key(id, "bearing"), 0f).coerceIn(-180f, 180f),
             opacity = preferences.getFloat(key(id, "opacity"), 0.65f).coerceIn(0.1f, 1f),
             visible = preferences.getBoolean(key(id, "visible"), true),
+            controlPoints = controlPointsFromStorage(
+                preferences.getString(key(id, "controlPoints"), "").orEmpty(),
+            ),
+            confidence = GeoReferenceConfidence.entries.firstOrNull { it.name == confidenceName }
+                ?: GeoReferenceConfidence.INSUFFICIENT_POINTS,
+            rmseMeters = preferences.getString(key(id, "rmse"), null)?.toDoubleOrNull(),
+            maxResidualMeters = preferences.getString(key(id, "maxResidual"), null)?.toDoubleOrNull(),
+            transformStorage = preferences.getString(key(id, "transform"), null),
+            sourceAttribution = preferences.getString(key(id, "attribution"), "").orEmpty(),
         )
     }
 
@@ -199,6 +230,7 @@ class HistoricMapOverlayRepository(
         val FIELDS = listOf(
             "file", "name", "lat", "lon", "baseWidth", "aspect",
             "widthScale", "heightScale", "bearing", "opacity", "visible",
+            "controlPoints", "confidence", "rmse", "maxResidual", "transform", "attribution",
         )
     }
 }

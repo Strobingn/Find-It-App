@@ -29,6 +29,26 @@ data class MetalDetectingTarget(
     val cautionReasons: List<String> = emptyList(),
     /** True when a user-verified field outcome nearby actually influenced this candidate's score. */
     val verifiedNearby: Boolean = false,
+    /** Structured per-layer agreement for the evidence panel; empty for legacy callers. */
+    val layerEvidence: List<TargetLayerEvidence> = emptyList(),
+)
+
+/** Per-layer agreement verdict for the multi-layer evidence panel. */
+enum class LayerVerdict(val label: String) {
+    SUPPORTS("supports"),
+    MIXED("mixed"),
+    DISAGREES("disagrees"),
+}
+
+/**
+ * One measured layer's say about a candidate: what was measured, how strongly, and whether it
+ * argues for or against the target. Computed from the same prefix-sum tables as the score, so
+ * the panel can never disagree with the ranking.
+ */
+data class TargetLayerEvidence(
+    val layer: String,
+    val verdict: LayerVerdict,
+    val measurement: String,
 )
 
 /**
@@ -81,6 +101,12 @@ private class RefinerContext(
 object MetalDetectingTargetRefiner {
     private const val MAX_PER_TYPE = 12
     private const val MAX_TOTAL = 48
+    /** Small, capped demotion for detector cautions; field rejection remains stronger. */
+    internal const val CAUTION_PENALTY_EACH = 0.06f
+    internal const val CAUTION_PENALTY_CAP = 0.18f
+
+    internal fun cautionPenalty(count: Int): Float =
+        (count.coerceAtLeast(0) * CAUTION_PENALTY_EACH).coerceAtMost(CAUTION_PENALTY_CAP)
 
     /**
      * Per-caution demotion, and the most any number of them can remove.
@@ -348,9 +374,44 @@ object MetalDetectingTargetRefiner {
                 score = adjusted,
                 radiusMeters = radiusMeters,
                 evidence = explainCandidate(type, x, y, index, ctx),
+                layerEvidence = measureLayers(x, y, index, ctx),
                 cautionReasons = cautions,
                 verifiedNearby = feedbackMatched,
             )
+        }
+    }
+
+    private fun layerVerdict(value: Float): LayerVerdict = when {
+        value >= 0.6f -> LayerVerdict.SUPPORTS
+        value >= 0.35f -> LayerVerdict.MIXED
+        else -> LayerVerdict.DISAGREES
+    }
+
+    /**
+     * Samples every analysis layer at the candidate cell so the UI can show which layers agree
+     * or disagree, not just the winning evidence strings. Roughness is inverted: heavy canopy
+     * texture argues against confidence, so high roughness reads as a disagreeing layer.
+     */
+    private fun measureLayers(x: Int, y: Int, i: Int, ctx: RefinerContext): List<TargetLayerEvidence> {
+        fun pct(value: Float) = "${(value.coerceIn(0f, 1f) * 100f).roundToInt()}%"
+        val measurements = listOf(
+            Triple("Hillshade multi-light", ctx.hillCompare[i], false),
+            Triple("Slope edge rim", ctx.edgeRect.ringMean(x, y, ctx.edgeInner, ctx.edgeOuter), false),
+            Triple("Local relief depression", ctx.depressionRect.ringMean(x, y, 0, ctx.innerRadius), false),
+            Triple("Raised rim relief", ctx.raisedRect.ringMean(x, y, ctx.edgeInner, ctx.edgeOuter), false),
+            Triple("Curvature concavity", ctx.concaveRect.ringMean(x, y, 0, ctx.innerRadius), false),
+            Triple("Flat bench", ctx.flatRect.ringMean(x, y, 0, ctx.innerRadius), false),
+            Triple("Surface smoothness", ctx.smoothRect.ringMean(x, y, 0, ctx.innerRadius), false),
+            Triple(
+                "Linear continuity",
+                directionalContinuity(ctx.linearityRect, ctx.linearityDiag, x, y, ctx.corridorHalfLength, ctx.corridorHalfWidth),
+                false,
+            ),
+            Triple("Canopy roughness", ctx.ruggedRect.ringMean(x, y, 0, ctx.innerRadius), true),
+        )
+        return measurements.map { (layer, value, inverted) ->
+            val effective = if (inverted) 1f - value.coerceIn(0f, 1f) else value
+            TargetLayerEvidence(layer = layer, verdict = layerVerdict(effective), measurement = pct(value))
         }
     }
 

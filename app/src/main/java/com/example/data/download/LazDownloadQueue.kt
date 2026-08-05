@@ -46,11 +46,11 @@ object LazDownloadQueue {
     /** Cancellation requests, read by the running transfer between buffer writes. */
     private val cancelled = mutableSetOf<String>()
 
-    /** The single storage location shared by the service and the UI. */
-    fun store(context: Context): LazDatasetStore {
-        val base = context.getExternalFilesDir(null) ?: context.filesDir
-        return LazDatasetStore(File(base, "lidar"))
-    }
+    /**
+     * The single durable storage location shared by the service and the UI
+     * ([Context.getFilesDir]/lidar, with one-time migration from the older external path).
+     */
+    fun store(context: Context): LazDatasetStore = LazDatasetStore.open(context)
 
     fun taskFor(url: String): LazDownloadTask? = _tasks.value.firstOrNull { it.url == url }
 

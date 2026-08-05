@@ -65,8 +65,11 @@ class TerrainPhase2PerformanceTest {
     }
 
     @Test
-    fun firstOpenGpuPreviewIsExplicitlyBounded() {
-        assertEquals(256, TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION)
+    fun firstOpenGpuPreviewKeepsFullDetail() {
+        // Detail is a product requirement: the GPU scene must never be what makes a render look
+        // coarse. The finest level keeps the full source resolution up to 1,024 cells, and the
+        // LOD pyramid still supplies cheap coarse levels for zoomed-out rendering.
+        assertEquals(1_024, TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION)
         assertEquals(128, TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE)
         val scene = TerrainGpuSceneBuilder.build(
             source = sampleGrid(1_024, 768),
@@ -74,8 +77,11 @@ class TerrainPhase2PerformanceTest {
             tileSize = TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE,
         )
 
-        assertTrue(scene.levels.first().gridWidth <= 256)
-        assertTrue(scene.levels.first().gridHeight <= 256)
+        assertEquals(1_024, scene.levels.first().gridWidth)
+        assertEquals(768, scene.levels.first().gridHeight)
+        assertTrue(scene.levels.size >= 2)
+        // Batches stay inside the unsigned-short index limit even at full detail.
+        assertTrue(scene.levels.flatMap { it.batches }.all { batch -> batch.vertexCount <= 65_535 })
     }
 
     @Test

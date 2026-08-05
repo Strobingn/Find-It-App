@@ -1,7 +1,9 @@
 package com.example.data
 
+import java.util.concurrent.Executors
 import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -11,6 +13,35 @@ internal enum class LidarPointWork {
     COVERAGE,
     ELEVATION,
 }
+
+/** Confidence bucket for the produced ground surface, reported with every import. */
+enum class GroundSurfaceQuality {
+    /** Vendor/classified ground with dense per-cell coverage. */
+    CLASSIFIED_DENSE,
+
+    /** Classified ground was usable but thin; gap-filled areas are less trustworthy. */
+    CLASSIFIED_SPARSE,
+
+    /** Automatic lowest-return estimate with healthy sampling and spike rejection. */
+    ESTIMATED_ROBUST,
+
+    /** Automatic estimate from sparse returns; treat subtle relief with caution. */
+    ESTIMATED_FRAGILE,
+
+    /** Highest-return surface model; no ground separation was attempted. */
+    SURFACE_MODEL,
+}
+
+/** Structured ground-filtering outcome attached to every raster build. */
+data class GroundSurfaceReport(
+    val quality: GroundSurfaceQuality,
+    /** Fraction of raster cells with measured ground before gap filling. */
+    val groundCellFraction: Float,
+    /** Average sampled ground returns per populated cell. */
+    val groundSamplesPerCell: Float,
+    /** Isolated below-ground returns removed from the automatic estimate. */
+    val lowSpikesRejected: Int,
+)
 
 /** Memory-bounded point-cloud binning shared by the LAS and LAZ readers. */
 internal class LidarRasterizer(
@@ -23,6 +54,9 @@ internal class LidarRasterizer(
     maxBinnedPoints: Double = MAX_BINNED_POINTS,
 ) {
     private val options = options.sanitized()
+    private val isOverview = this.options.focusBounds == null
+    /** Classification / ground-class tracking is only needed for source-classified ground mode. */
+    private val tracksSourceClasses = this.options.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED
     private val sourceRangeX = (maxX - minX).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val sourceRangeY = (maxY - minY).takeIf { it.isFinite() && it > 0.0 } ?: 1.0
     private val focus = this.options.focusBounds
@@ -35,10 +69,15 @@ internal class LidarRasterizer(
     private val longSide = this.options.rasterResolution
     val width: Int
     val height: Int
+    /** Precomputed cell scales: multiplies replace two divisions on every return (hot path). */
+    private val xToGrid: Double
+    private val yToGrid: Double
 
     private val groundMin: FloatArray
     private val groundCount: IntArray
     private val allMin: FloatArray
+    private val allSecondMin: FloatArray
+    private val allLowBandCount: IntArray
     private val allMax: FloatArray
     private val allCount: IntArray
     private val coverageCount: IntArray
@@ -46,14 +85,19 @@ internal class LidarRasterizer(
     private val estimatedPointsInFocus = declaredPointCount.coerceAtLeast(1L).toDouble() *
         ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
         ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
+    private val usefulSampleBudget: Double
     private val sampleStride: Int
     private val coverageStride: Int
+    /** Hard cap on decoded returns for full-footprint overview opens of huge tiles. */
+    private val maxDecodedPoints: Long
+    private val targetElevationCells: Int
 
     var pointsDecoded: Long = 0
         private set
     var pointsBinned: Int = 0
         private set
     private var groundPointsBinned: Int = 0
+    private var elevationCellsPopulated: Int = 0
 
     init {
         if (rangeX >= rangeY) {
@@ -63,23 +107,44 @@ internal class LidarRasterizer(
             height = longSide
             width = (longSide * rangeX / rangeY).roundToInt().coerceIn(MIN_SHORT_SIDE, longSide)
         }
+        xToGrid = (width - 1).toDouble() / rangeX
+        yToGrid = (height - 1).toDouble() / rangeY
         groundMin = FloatArray(width * height) { Float.MAX_VALUE }
         groundCount = IntArray(width * height)
         allMin = FloatArray(width * height) { Float.MAX_VALUE }
+        allSecondMin = FloatArray(width * height) { Float.MAX_VALUE }
+        allLowBandCount = IntArray(width * height)
         allMax = FloatArray(width * height) { -Float.MAX_VALUE }
         allCount = IntArray(width * height)
         coverageCount = IntArray(width * height)
 
-        // A 512 px overview does not benefit from eight million elevation samples. Target enough
-        // returns to populate each output cell several times, with a hard ceiling for large files.
-        val usefulSampleBudget = minOf(
+        // First-paint overview is a detailed product (1,024+). Use the same per-cell sample budget
+        // as cropped refine so full-footprint opens are not soft/sparse compared with zoom-in.
+        usefulSampleBudget = minOf(
             maxBinnedPoints.coerceAtLeast(1.0),
             (width.toDouble() * height.toDouble() * TARGET_SAMPLES_PER_CELL).coerceAtLeast(1.0),
         )
         sampleStride = ceil(estimatedPointsInFocus / usefulSampleBudget).toInt().coerceAtLeast(1)
-        // Footprint coverage needs denser sampling than elevation statistics, but processing every
-        // return caused multi-minute waits on ordinary 100–200 MiB LAZ files.
-        coverageStride = sampleStride.coerceAtMost(MAX_COVERAGE_STRIDE)
+        // Overview: every return at least marks coverage so first paint has no skip-holes.
+        // Focused refine keeps a capped coverage stride for speed on huge crops.
+        coverageStride = if (isOverview) {
+            1
+        } else {
+            sampleStride.coerceAtMost(MAX_COVERAGE_STRIDE)
+        }
+        // Only bail early on absurd multi-hundred-million-point tiles after a dense scan budget.
+        maxDecodedPoints = if (isOverview) {
+            minOf(
+                estimatedPointsInFocus.toLong().coerceAtLeast(1L),
+                maxOf(
+                    (usefulSampleBudget * OVERVIEW_SCAN_MULTIPLIER).toLong(),
+                    width.toLong() * height * OVERVIEW_MIN_RETURNS_PER_CELL,
+                ),
+            )
+        } else {
+            Long.MAX_VALUE
+        }
+        targetElevationCells = max(1, (width * height * OVERVIEW_CELL_FILL_TARGET).roundToInt())
     }
 
     // Rolling counters replace three per-return Long modulo operations. A 200-million-point tile
@@ -126,37 +191,64 @@ internal class LidarRasterizer(
         if (!wasSampleReturn) return true
 
         val normalizedClass = classification.coerceIn(0, 255)
-        // Recorded before the noise test so the histogram still describes the file honestly.
-        classHistogram[normalizedClass]++
+        // Only maintained when source classes are tracked; on huge tiles the histogram write is
+        // measurable, and nothing reads it in the other modes.
+        if (tracksSourceClasses) classHistogram[normalizedClass]++
 
-        // Class 7 is Low Point — points the producer identified as sitting below true ground.
-        // They are exactly the returns that carve a false pit into a min-Z surface, and that pit
-        // then reads as a cellar hole or refuse pit to the detectors. Class 18 is High Noise and
-        // does the same to the canopy maximum. The ground path already ignores both by only
-        // accepting classes 2 and 8; the all-returns path used for the automatic fallback did not.
+        // Class 7 is Low Point — returns the producer identified as sitting below true ground —
+        // and class 18 is High Noise. Rejecting them here, before the statistics below, keeps them
+        // from defining a cell's minimum and from polluting the low-band corroboration counts that
+        // decide whether a lone low return is a spike.
         if (isNoise(normalizedClass)) return true
 
-        if (z < allMin[index]) allMin[index] = z
+        if (z < allMin[index]) {
+            // A newly observed low demotes the previous minimum to second place. Returns that
+            // corroborate each other within a narrow band keep the band count high; a lone return
+            // far below everything else stays isolated and can later be rejected as a low spike.
+            allSecondMin[index] = allMin[index]
+            allMin[index] = z
+            allLowBandCount[index] =
+                if (allSecondMin[index] - z <= LOW_BAND_METERS) 2 else 1
+        } else if (z < allSecondMin[index]) {
+            allSecondMin[index] = z
+            if (z - allMin[index] <= LOW_BAND_METERS) allLowBandCount[index]++
+        } else if (z - allMin[index] <= LOW_BAND_METERS) {
+            allLowBandCount[index]++
+        }
         if (z > allMax[index]) allMax[index] = z
+        if (allCount[index] == 0) elevationCellsPopulated++
         allCount[index]++
         pointsBinned++
 
-        // Class 2 is Ground. Class 8 was historically Model Key-Point; modern files use the key-point flag.
-        val isSourceGround = normalizedClass == 2 || normalizedClass == 8 ||
-            (isKeyPoint && normalizedClass == 2)
-        if (isSourceGround) {
-            if (z < groundMin[index]) groundMin[index] = z
-            groundCount[index]++
-            groundPointsBinned++
+        if (tracksSourceClasses) {
+            // Class 2 is Ground. Class 8 was historically Model Key-Point; modern files use the key-point flag.
+            val isSourceGround = normalizedClass == 2 || normalizedClass == 8 ||
+                (isKeyPoint && normalizedClass == 2)
+            if (isSourceGround) {
+                if (z < groundMin[index]) groundMin[index] = z
+                groundCount[index]++
+                groundPointsBinned++
+            }
         }
         return true
+    }
+
+    /**
+     * Safety valve for enormous full-footprint files only. Does not stop at a coarse “preview”
+     * density — the scan budget already targets full overview quality (see [usefulSampleBudget]).
+     */
+    fun shouldStopDecoding(): Boolean {
+        if (!isOverview) return false
+        return pointsDecoded >= maxDecodedPoints && pointsDecoded >= MIN_OVERVIEW_DECODE
     }
 
     private fun cellIndex(x: Double, y: Double): Int? {
         if (!x.isFinite() || !y.isFinite()) return null
         if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return null
-        val gx = (((x - cropMinX) / rangeX) * (width - 1)).toInt().coerceIn(0, width - 1)
-        val gy = ((1.0 - (y - cropMinY) / rangeY) * (height - 1)).toInt().coerceIn(0, height - 1)
+        // Multiplication by precomputed scales matches the prior division mapping and is
+        // substantially cheaper on every return of large LAZ tiles.
+        val gx = ((x - cropMinX) * xToGrid).toInt().coerceIn(0, width - 1)
+        val gy = ((cropMaxY - y) * yToGrid).toInt().coerceIn(0, height - 1)
         return gy * width + gx
     }
 
@@ -164,9 +256,10 @@ internal class LidarRasterizer(
         if (pointsBinned == 0 || allCount.none { it > 0 }) return null
 
         val populatedCells = allCount.count { it > 0 }
-        val classifiedCells = groundCount.count { it > 0 }
+        val classifiedCells = if (tracksSourceClasses) groundCount.count { it > 0 } else 0
         val classifiedCoverageIsUsable =
-            groundPointsBinned >= MIN_CLASSIFIED_POINTS &&
+            tracksSourceClasses &&
+                groundPointsBinned >= MIN_CLASSIFIED_POINTS &&
                 classifiedCells >= max(MIN_CLASSIFIED_CELLS, (populatedCells * 0.08f).roundToInt())
 
         val requestedMode = options.groundMode
@@ -176,9 +269,31 @@ internal class LidarRasterizer(
             requestedMode == GroundSurfaceMode.SOURCE_CLASSIFIED -> GroundSurfaceMode.AUTO_LOWEST
             else -> requestedMode
         }
+        var lowSpikesRejected = 0
+        val automaticGround: FloatArray? = if (appliedMode == GroundSurfaceMode.AUTO_LOWEST) {
+            // Robust automatic ground: reject a cell's lowest return when it is isolated (no
+            // corroborating returns within a narrow band) and sits far below the next-lowest
+            // return. Bird/wire strikes and misclassified below-ground noise disappear, while
+            // real ground under canopy — corroborated by several low returns — is preserved.
+            FloatArray(width * height) { index ->
+                val second = allSecondMin[index]
+                val isolatedLow = allCount[index] >= MIN_SAMPLES_FOR_SPIKE_REJECT &&
+                    allLowBandCount[index] == 1 &&
+                    second != Float.MAX_VALUE &&
+                    second - allMin[index] > LOW_SPIKE_DROP_METERS
+                if (isolatedLow) {
+                    lowSpikesRejected++
+                    second
+                } else {
+                    allMin[index]
+                }
+            }
+        } else {
+            null
+        }
         val source = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED -> groundMin
-            GroundSurfaceMode.AUTO_LOWEST -> allMin
+            GroundSurfaceMode.AUTO_LOWEST -> automaticGround ?: allMin
             GroundSurfaceMode.SURFACE_MODEL -> allMax
         }
         val sourceCounts = when (appliedMode) {
@@ -199,7 +314,7 @@ internal class LidarRasterizer(
             suppressIsolatedLowNoise(surface, width, height)
         }
         val bareEarth = if (options.smoothingRadius > 0) {
-            boxSmooth(cleaned, width, height, options.smoothingRadius)
+            multiScaleSmooth(cleaned, width, height, options.smoothingRadius)
         } else {
             cleaned
         }
@@ -212,13 +327,63 @@ internal class LidarRasterizer(
             }
         }
 
+        val totalCells = width * height
+        // Overview first view: draw the continuous filled surface (no skip-holes).
+        // Focused refine keeps the coverage mask so empty margins stay transparent.
+        val validData = if (isOverview) {
+            BooleanArray(totalCells) { bareEarth[it].isFinite() }
+        } else {
+            coverageMask
+        }
+        val groundSamplesPerCell = if (populatedCells > 0) {
+            val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
+                groundPointsBinned
+            } else {
+                pointsBinned
+            }
+            groundSamples.toFloat() / populatedCells
+        } else {
+            0f
+        }
+        val groundCellFraction = when (appliedMode) {
+            GroundSurfaceMode.SOURCE_CLASSIFIED -> classifiedCells.toFloat() / totalCells
+            GroundSurfaceMode.AUTO_LOWEST -> populatedCells.toFloat() / totalCells
+            GroundSurfaceMode.SURFACE_MODEL -> 0f
+        }
+        val groundQuality = when (appliedMode) {
+            GroundSurfaceMode.SURFACE_MODEL -> GroundSurfaceQuality.SURFACE_MODEL
+            GroundSurfaceMode.SOURCE_CLASSIFIED ->
+                if (groundSamplesPerCell >= 4f && classifiedCells * 2 >= populatedCells) {
+                    GroundSurfaceQuality.CLASSIFIED_DENSE
+                } else {
+                    GroundSurfaceQuality.CLASSIFIED_SPARSE
+                }
+            GroundSurfaceMode.AUTO_LOWEST ->
+                if (groundSamplesPerCell >= 6f) {
+                    GroundSurfaceQuality.ESTIMATED_ROBUST
+                } else {
+                    GroundSurfaceQuality.ESTIMATED_FRAGILE
+                }
+        }
+        val groundReport = GroundSurfaceReport(
+            quality = groundQuality,
+            groundCellFraction = groundCellFraction,
+            groundSamplesPerCell = groundSamplesPerCell,
+            lowSpikesRejected = lowSpikesRejected,
+        )
+
         val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
+        val earlyOutNote = if (isOverview && pointsDecoded < estimatedPointsInFocus.toLong()) {
+            " · overview early-out"
+        } else {
+            ""
+        }
         val samplingNote = when {
             sampleStride > 1 ->
-                "sampled every ${sampleStride}th elevation return and every ${coverageStride}th footprint return across $pointsDecoded decoded points"
-            else -> "$pointsDecoded points decoded"
+                "sampled every ${sampleStride}th elevation return and every ${coverageStride}th footprint return across $pointsDecoded decoded points$earlyOutNote"
+            else -> "$pointsDecoded points decoded$earlyOutNote"
         }
         val modeNote = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED ->
@@ -231,15 +396,32 @@ internal class LidarRasterizer(
             GroundSurfaceMode.SURFACE_MODEL -> "highest-return surface model (vegetation and structures included)"
         }
         val focusNote = if (focus == null) "complete footprint" else "detailed viewport"
-        val smoothingNote = if (options.smoothingRadius == 0) "unsmoothed" else "smoothing radius ${options.smoothingRadius}"
-        val classNote = classHistogram.withIndex()
-            .filter { it.value > 0 }
-            .sortedByDescending { it.value }
-            .take(5)
-            .joinToString(prefix = "classes ", separator = ", ") { "${it.index}:${it.value}" }
+        val smoothingNote = if (options.smoothingRadius == 0) {
+            "unsmoothed"
+        } else {
+            "multi-scale smoothing radius ${options.smoothingRadius}"
+        }
+        val qualityNote = buildString {
+            append(" · ground quality ")
+            append(groundQuality.name.lowercase().replace('_', ' '))
+            if (lowSpikesRejected > 0) {
+                append(" · ")
+                append(lowSpikesRejected)
+                append(" isolated low spikes rejected")
+            }
+        }
+        val classNote = if (tracksSourceClasses) {
+            classHistogram.withIndex()
+                .filter { it.value > 0 }
+                .sortedByDescending { it.value }
+                .take(5)
+                .joinToString(prefix = "classes ", separator = ", ") { "${it.index}:${it.value}" }
+        } else {
+            "classification not tracked for this ground mode"
+        }
 
         return DemGenerator.LasLoadResult(
-            grid = ElevationGrid(width, height, bareEarth, canopy, cellSize, coverageMask),
+            grid = ElevationGrid(width, height, bareEarth, canopy, cellSize, validData),
             totalPointsRead = pointsDecoded.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             groundPointsUsed = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
@@ -248,11 +430,12 @@ internal class LidarRasterizer(
             },
             usedClassificationFilter = appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED,
             pointFormat = pointFormat,
-            note = "$sourceLabel · $focusNote · $modeNote · $classNote · $samplingNote · ${width}×$height $smoothingNote",
+            note = "$sourceLabel · $focusNote · $modeNote · $classNote · $samplingNote · ${width}×$height $smoothingNote$qualityNote",
             requestedGroundMode = requestedMode,
             appliedGroundMode = appliedMode,
             sampledPoints = pointsBinned,
             wasTruncated = false,
+            groundReport = groundReport,
         )
     }
 
@@ -269,9 +452,15 @@ internal class LidarRasterizer(
         private const val MIN_SHORT_SIDE = 48
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12
-        private const val TARGET_SAMPLES_PER_CELL = 8.0
-        private const val MAX_COVERAGE_STRIDE = 8
-        private const val MAX_BINNED_POINTS = 4_000_000.0
+        private const val TARGET_SAMPLES_PER_CELL = 12.0
+        /** Tighter than before so overview footprints fill continuously on first paint. */
+        private const val MAX_COVERAGE_STRIDE = 4
+        private const val MAX_BINNED_POINTS = 8_000_000.0
+        /** Decoded returns per elevation sample budget for full-footprint opens. */
+        private const val OVERVIEW_SCAN_MULTIPLIER = 16.0
+        private const val OVERVIEW_MIN_RETURNS_PER_CELL = 20L
+        private const val MIN_OVERVIEW_DECODE = 200_000L
+        private const val OVERVIEW_CELL_FILL_TARGET = 0.92
     }
 }
 
@@ -313,10 +502,10 @@ internal fun buildCoverageMask(counts: IntArray, width: Int, height: Int): Boole
     val populated = counts.count { it > 0 }
     if (populated == 0) return BooleanArray(counts.size)
 
-    // Bridge ordinary raster-bin gaps, but keep large holes and space outside irregular flight
-    // footprints transparent. Radius adapts to decoded point density and remains tightly bounded.
+    // Bridge ordinary raster-bin gaps from strided sampling, but keep true empty flight
+    // margins transparent. Wider radius than before so first overview is not Swiss cheese.
     val averageSpacing = sqrt(counts.size.toDouble() / populated)
-    val radius = (ceil(averageSpacing * 2.0).toInt()).coerceIn(2, 8)
+    val radius = (ceil(averageSpacing * 2.5).toInt()).coerceIn(2, 20)
     val distance = IntArray(counts.size) { Int.MAX_VALUE }
     val queue = IntArray(counts.size)
     var head = 0
@@ -351,24 +540,65 @@ internal fun buildCoverageMask(counts: IntArray, width: Int, height: Int): Boole
 
 private fun suppressIsolatedLowNoise(source: FloatArray, width: Int, height: Int): FloatArray {
     val output = source.copyOf()
-    val neighbors = FloatArray(8)
-    for (y in 1 until height - 1) {
-        for (x in 1 until width - 1) {
-            var count = 0
-            for (dy in -1..1) {
-                for (dx in -1..1) {
-                    if (dx == 0 && dy == 0) continue
-                    neighbors[count++] = source[(y + dy) * width + x + dx]
-                }
+    val interiorHeight = (height - 2).coerceAtLeast(0)
+    if (interiorHeight == 0 || width < 3) return output
+
+    val threadCount = min(POST_PROCESS_PARALLELISM, interiorHeight)
+    if (threadCount <= 1 || width * height < MIN_CELLS_FOR_PARALLEL_POST) {
+        for (y in 1 until height - 1) {
+            suppressIsolatedLowNoiseRow(source, output, width, y)
+        }
+        return output
+    }
+
+    val rowsPerThread = (interiorHeight + threadCount - 1) / threadCount
+    val pending = (1 until threadCount).map { chunk ->
+        val startY = 1 + chunk * rowsPerThread
+        val endY = min(1 + (chunk + 1) * rowsPerThread, height - 1)
+        postProcessPool.submit {
+            for (y in startY until endY) {
+                suppressIsolatedLowNoiseRow(source, output, width, y)
             }
-            neighbors.sort(0, count)
-            val median = neighbors[count / 2]
-            val index = y * width + x
-            // Remove only extreme low outliers; shallow cellars, ditches and tracks remain untouched.
-            if (source[index] < median - LOW_NOISE_THRESHOLD_METERS) output[index] = median
         }
     }
+    for (y in 1 until min(1 + rowsPerThread, height - 1)) {
+        suppressIsolatedLowNoiseRow(source, output, width, y)
+    }
+    pending.forEach { it.get() }
     return output
+}
+
+private fun suppressIsolatedLowNoiseRow(
+    source: FloatArray,
+    output: FloatArray,
+    width: Int,
+    y: Int,
+) {
+    val neighbors = FloatArray(8)
+    for (x in 1 until width - 1) {
+        var count = 0
+        for (dy in -1..1) {
+            for (dx in -1..1) {
+                if (dx == 0 && dy == 0) continue
+                neighbors[count++] = source[(y + dy) * width + x + dx]
+            }
+        }
+        // Eight-element insertion sort avoids generic Array.sort overhead across up to a
+        // million raster cells while producing the same median.
+        for (i in 1 until count) {
+            val value = neighbors[i]
+            var j = i - 1
+            while (j >= 0 && neighbors[j] > value) {
+                neighbors[j + 1] = neighbors[j]
+                j--
+            }
+            neighbors[j + 1] = value
+        }
+        val median = neighbors[count / 2]
+        val index = y * width + x
+        // Remove only extreme low outliers; shallow cellars, ditches and tracks remain untouched.
+        if (source[index] < median - LOW_NOISE_THRESHOLD_METERS) output[index] = median
+    }
 }
 
 internal fun boxSmooth(source: FloatArray, width: Int, height: Int, radius: Int): FloatArray {
@@ -406,4 +636,35 @@ private fun rectangleSum(
 ): Double = integral[(y1 + 1) * stride + x1 + 1] - integral[y0 * stride + x1 + 1] -
     integral[(y1 + 1) * stride + x0] + integral[y0 * stride + x0]
 
+/**
+ * Two-scale edge-preserving smoothing. A fine pass keeps small earthworks; a coarser pass removes
+ * residual noise in flat areas. Cells where the two scales disagree (sharp banks, cellar walls)
+ * keep the fine result, so smoothing strength adapts per cell instead of blurring everything.
+ */
+internal fun multiScaleSmooth(source: FloatArray, width: Int, height: Int, radius: Int): FloatArray {
+    if (radius <= 0) return source.copyOf()
+    val fine = boxSmooth(source, width, height, radius)
+    val coarse = boxSmooth(source, width, height, radius * 2)
+    val output = FloatArray(source.size)
+    for (index in output.indices) {
+        val disagreement = kotlin.math.abs(fine[index] - coarse[index])
+        val fineWeight = (disagreement / MULTI_SCALE_EDGE_METERS).coerceIn(0f, 1f)
+        output[index] = fineWeight * fine[index] + (1f - fineWeight) * coarse[index]
+    }
+    return output
+}
+
 private const val LOW_NOISE_THRESHOLD_METERS = 3f
+/** Returns within this height of the cell minimum corroborate it as real ground. */
+private const val LOW_BAND_METERS = 0.6f
+/** An isolated lowest return must sit this far below the next-lowest to be rejected. */
+private const val LOW_SPIKE_DROP_METERS = 1.2f
+/** Spike rejection needs enough samples for the corroboration band to be meaningful. */
+private const val MIN_SAMPLES_FOR_SPIKE_REJECT = 4
+/** Fine/coarse disagreement (meters) at which multi-scale smoothing fully keeps the fine pass. */
+private const val MULTI_SCALE_EDGE_METERS = 0.5f
+private const val MIN_CELLS_FOR_PARALLEL_POST = 40_000
+private val POST_PROCESS_PARALLELISM = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+private val postProcessPool = Executors.newFixedThreadPool(POST_PROCESS_PARALLELISM) { task ->
+    Thread(task, "terrain-post").apply { isDaemon = true }
+}
