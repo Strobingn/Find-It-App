@@ -190,6 +190,17 @@ internal class LidarRasterizer(
         coverageCount[index]++
         if (!wasSampleReturn) return true
 
+        val normalizedClass = classification.coerceIn(0, 255)
+        // Only maintained when source classes are tracked; on huge tiles the histogram write is
+        // measurable, and nothing reads it in the other modes.
+        if (tracksSourceClasses) classHistogram[normalizedClass]++
+
+        // Class 7 is Low Point — returns the producer identified as sitting below true ground —
+        // and class 18 is High Noise. Rejecting them here, before the statistics below, keeps them
+        // from defining a cell's minimum and from polluting the low-band corroboration counts that
+        // decide whether a lone low return is a spike.
+        if (isNoise(normalizedClass)) return true
+
         if (z < allMin[index]) {
             // A newly observed low demotes the previous minimum to second place. Returns that
             // corroborate each other within a narrow band keep the band count high; a lone return
@@ -209,11 +220,7 @@ internal class LidarRasterizer(
         allCount[index]++
         pointsBinned++
 
-        // Skip classification work when the requested surface does not use ASPRS ground classes.
-        // On multi-hundred-million-point tiles this avoids histogram + class tests for every sample.
         if (tracksSourceClasses) {
-            val normalizedClass = classification.coerceIn(0, 255)
-            classHistogram[normalizedClass]++
             // Class 2 is Ground. Class 8 was historically Model Key-Point; modern files use the key-point flag.
             val isSourceGround = normalizedClass == 2 || normalizedClass == 8 ||
                 (isKeyPoint && normalizedClass == 2)
@@ -433,6 +440,15 @@ internal class LidarRasterizer(
     }
 
     companion object {
+        /**
+         * ASPRS noise classes: 7 is Low Point, 18 is High Noise.
+         *
+         * These are returns the data producer already identified as not being real surface. A
+         * low point sits below true ground, so letting one define a cell's minimum carves a
+         * false pit into the bare-earth model; a high-noise point inflates the canopy maximum.
+         */
+        internal fun isNoise(classification: Int): Boolean = classification == 7 || classification == 18
+
         private const val MIN_SHORT_SIDE = 48
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12

@@ -439,7 +439,10 @@ fun AiAnalysisWorkspace(
                             label = { Text("Source: $sourceRenderLabel", style = MaterialTheme.typography.labelSmall) },
                             modifier = Modifier.height(CompactButtonHeight),
                         )
-                        TerrainDerivedLayer.entries.forEach { layer ->
+                        // Only layers this result carries. A cached analysis written before a
+                        // layer existed restores fine and then throws when it is selected.
+                        val availableLayers = aiState.localResult?.layers?.values?.keys.orEmpty()
+                        TerrainDerivedLayer.entries.filter { it in availableLayers }.forEach { layer ->
                             FilterChip(
                                 selected = !aiState.showSourceHillshade && aiState.selectedLayer == layer,
                                 onClick = {

@@ -101,10 +101,19 @@ private class RefinerContext(
 object MetalDetectingTargetRefiner {
     private const val MAX_PER_TYPE = 12
     private const val MAX_TOTAL = 48
-    /** Small, capped demotion for detector cautions; field rejection remains stronger. */
+
+    /**
+     * Per-caution demotion, and the most any number of them can remove.
+     *
+     * Deliberately smaller than the 0.28 a field-verified rejection removes: a caution is the
+     * detector saying a natural explanation is available, whereas a rejection is someone having
+     * stood on the spot. The cap keeps a heavily-cautioned strong candidate visible and ranked
+     * low rather than silently deleted, so it can still be field-checked and fed back.
+     */
     internal const val CAUTION_PENALTY_EACH = 0.06f
     internal const val CAUTION_PENALTY_CAP = 0.18f
 
+    /** Demotion for a candidate carrying [count] caution reasons. */
     internal fun cautionPenalty(count: Int): Float =
         (count.coerceAtLeast(0) * CAUTION_PENALTY_EACH).coerceAtMost(CAUTION_PENALTY_CAP)
 
@@ -341,6 +350,11 @@ object MetalDetectingTargetRefiner {
             } else {
                 rawValue
             }
+            // Caution reasons name the ways a candidate could be a natural feature or a rendering
+            // artifact rather than something built. They used to be labels only, so a candidate
+            // carrying every caution the detector could raise still outranked a clean one with a
+            // slightly lower raw response. They now subtract, which is what makes human features
+            // cluster above isolated natural anomalies rather than merely reading differently.
             val cautions = classifyCaution(type, x, y, index, ctx, feedback, xPercent, yPercent)
             val adjusted = (afterFeedback - cautionPenalty(cautions.size)).coerceIn(0f, 1f)
             // Mirrors TerrainIntelligenceEngine's feedback rule: a rejected match can drop an
