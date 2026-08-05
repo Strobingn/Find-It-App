@@ -101,12 +101,6 @@ private class RefinerContext(
 object MetalDetectingTargetRefiner {
     private const val MAX_PER_TYPE = 12
     private const val MAX_TOTAL = 48
-    /** Small, capped demotion for detector cautions; field rejection remains stronger. */
-    internal const val CAUTION_PENALTY_EACH = 0.06f
-    internal const val CAUTION_PENALTY_CAP = 0.18f
-
-    internal fun cautionPenalty(count: Int): Float =
-        (count.coerceAtLeast(0) * CAUTION_PENALTY_EACH).coerceAtMost(CAUTION_PENALTY_CAP)
 
     /**
      * Per-caution demotion, and the most any number of them can remove.
