@@ -20,5 +20,5 @@ Response to audit: domain existed with unit tests but no production callers; two
 | Item | Status |
 |------|--------|
 | Cloud multi-device sync | Not started; local queue + conflict resolver ready |
-| ARCore guidance | Deferred |
+| Google ARCore world-mesh anchors | Deferred (poor canopy fit); **camera AR guidance shipped** on GROKV2.5.0 |
 | Auto historic-map extraction | Deferred (manual feature entry only) |

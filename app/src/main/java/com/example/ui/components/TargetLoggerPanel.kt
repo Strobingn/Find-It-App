@@ -88,6 +88,7 @@ import com.example.data.field.ExcavationLogEntry
 import com.example.data.field.FieldNavigation
 import com.example.data.field.FieldWaypoint
 import com.example.data.field.FindSiteClusterer
+import com.example.data.field.NavigationTarget
 import com.example.data.field.OptimizedFieldRoute
 import com.example.data.field.PendingSyncEntry
 import com.example.data.field.SurveyBoundary
@@ -183,6 +184,7 @@ fun TargetLoggerPanel(
     var binarySuccessMessage by remember { mutableStateOf("") }
     var pendingProjectBytes by remember { mutableStateOf(ByteArray(0)) }
     var navigationTarget by remember { mutableStateOf<TargetSignal?>(null) }
+    var showArForFind by remember { mutableStateOf(false) }
     var plannedRoute by remember { mutableStateOf<OptimizedFieldRoute?>(null) }
     val routeStopCount = loggedSignals.count { it.latitude != null && it.longitude != null }
     val planRoute: () -> Unit = {
@@ -572,7 +574,38 @@ fun TargetLoggerPanel(
                 gpsEnabled = gpsEnabled,
                 onEnableGps = onEnableGps,
                 onStop = { navigationTarget = null },
+                onOpenAr = { showArForFind = true },
             )
+            if (showArForFind) {
+                val lat = target.latitude ?: target.gpsLatitude
+                val lon = target.longitude ?: target.gpsLongitude
+                if (lat != null && lon != null) {
+                    ArGuidanceDialog(
+                        target = NavigationTarget(
+                            label = "${target.metalType.label} · ${target.status}",
+                            latitude = lat,
+                            longitude = lon,
+                        ),
+                        deviceLatitude = deviceLatitude,
+                        deviceLongitude = deviceLongitude,
+                        deviceAccuracyMeters = deviceAccuracyMeters,
+                        headingDegrees = compassHeadingDegrees,
+                        playlistLabel = if (navPlaylistIds.isNotEmpty()) {
+                            "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}"
+                        } else {
+                            null
+                        },
+                        onNextStop = if (navPlaylistIds.size > 1) {
+                            { onNavPlaylistNext() }
+                        } else {
+                            null
+                        },
+                        onDismiss = { showArForFind = false },
+                    )
+                } else {
+                    showArForFind = false
+                }
+            }
         }
 
         if (exportMessage != null) {
@@ -837,6 +870,7 @@ private fun FieldNavigationCard(
     gpsEnabled: Boolean,
     onEnableGps: () -> Unit,
     onStop: () -> Unit,
+    onOpenAr: () -> Unit = {},
 ) {
     val targetLatitude = target.latitude
     val targetLongitude = target.longitude
@@ -952,10 +986,19 @@ private fun FieldNavigationCard(
                 )
             }
             Text(
-                "Compass guidance is for field checking. Calibrate the phone and verify the target against the terrain before excavating.",
+                "Compass / AR guidance is for field checking. Calibrate the phone and verify the target against the terrain before excavating. LiDAR does not prove buried metal.",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
+            Button(
+                onClick = onOpenAr,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("open_ar_guidance_field"),
+            ) {
+                Text("Open AR guidance")
+            }
         }
     }
 }

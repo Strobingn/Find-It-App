@@ -92,12 +92,14 @@ import androidx.compose.runtime.DisposableEffect
 import com.example.analysis.HomesiteProbabilityMap
 import com.example.data.field.BoundaryProximityLevel
 import com.example.data.field.FieldNavigation
+import com.example.data.field.NavigationTarget
 import com.example.data.field.ProximityAlerter
 import com.example.analysis.TerrainCellInspector
 import com.example.analysis.TerrainViewshedAnalyzer
 import com.example.analysis.TerrainElevationProfiler
 import com.example.data.LidarSearchRequest
 import com.example.data.NormalizedRasterBounds
+import com.example.ui.components.ArGuidanceDialog
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.MeasurementFormat
 import com.example.geospatial.trueToMagneticBearingDegrees
@@ -326,7 +328,11 @@ private fun TerrainTab(
     val navigationTarget by viewModel.navigationTarget.collectAsStateWithLifecycle()
     val deviceLatitude by viewModel.deviceLatitude.collectAsStateWithLifecycle()
     val deviceLongitude by viewModel.deviceLongitude.collectAsStateWithLifecycle()
+    val deviceAccuracyMeters by viewModel.deviceLocationAccuracyMeters.collectAsStateWithLifecycle()
     val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
+    val navPlaylistIds by viewModel.navPlaylistIds.collectAsStateWithLifecycle()
+    val navPlaylistIndex by viewModel.navPlaylistIndex.collectAsStateWithLifecycle()
+    var showArGuidance by rememberSaveable { mutableStateOf(false) }
     val navigationSolution = remember(navigationTarget, deviceLatitude, deviceLongitude) {
         val target = navigationTarget ?: return@remember null
         val lat = deviceLatitude ?: return@remember null
@@ -941,11 +947,47 @@ private fun TerrainTab(
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
-                    TextButton(
-                        onClick = { viewModel.setNavigationTarget(null) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    ) { Text("Clear", style = MaterialTheme.typography.labelSmall) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = { showArGuidance = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.testTag("open_ar_guidance_terrain"),
+                        ) { Text("Open AR", style = MaterialTheme.typography.labelSmall) }
+                        TextButton(
+                            onClick = {
+                                showArGuidance = false
+                                viewModel.setNavigationTarget(null)
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) { Text("Clear", style = MaterialTheme.typography.labelSmall) }
+                    }
                 }
+            }
+        }
+
+        LaunchedEffect(showArGuidance, navigationTarget) {
+            if (showArGuidance && navigationTarget == null) showArGuidance = false
+        }
+        if (showArGuidance) {
+            navigationTarget?.let { target ->
+                ArGuidanceDialog(
+                    target = target,
+                    deviceLatitude = deviceLatitude,
+                    deviceLongitude = deviceLongitude,
+                    deviceAccuracyMeters = deviceAccuracyMeters,
+                    headingDegrees = compassHeadingDegrees,
+                    playlistLabel = if (navPlaylistIds.isNotEmpty()) {
+                        "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}"
+                    } else {
+                        null
+                    },
+                    onNextStop = if (navPlaylistIds.size > 1) {
+                        { viewModel.navPlaylistNext() }
+                    } else {
+                        null
+                    },
+                    onDismiss = { showArGuidance = false },
+                )
             }
         }
 
