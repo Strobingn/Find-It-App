@@ -207,14 +207,42 @@ fun ToolsTab(
             archiveInspectStatus = "Inspect canceled"
             return@rememberLauncherForActivityResult
         }
-        runCatching {
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: error("Could not read the selected file")
-            ProjectArchiveImport.inspect(bytes)
-        }.onSuccess { result ->
-            archiveInspectStatus = result.message
-        }.onFailure {
-            archiveInspectStatus = "Inspect failed: ${it.localizedMessage}"
+        scope.launch {
+            archiveInspectStatus = "Inspecting archive…"
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val declaredLength = context.contentResolver
+                        .openAssetFileDescriptor(uri, "r")
+                        ?.use { it.declaredLength }
+                        ?: -1L
+                    if (ProjectArchiveImport.exceedsSizeCap(declaredLength)) {
+                        return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = "Archive too large (max ${ProjectArchiveImport.MAX_ARCHIVE_BYTES / (1024 * 1024)} MB)",
+                            manifestName = null,
+                        )
+                    }
+                    val read = context.contentResolver.openInputStream(uri)?.use { input ->
+                        ProjectArchiveImport.readBytesCapped(input, declaredLength)
+                    } ?: return@runCatching ProjectArchiveImport.Result(
+                        ok = false,
+                        message = "Could not read the selected file",
+                        manifestName = null,
+                    )
+                    val bytes = read.bytes
+                        ?: return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = read.error ?: "Could not read the selected file",
+                            manifestName = null,
+                        )
+                    ProjectArchiveImport.inspect(bytes)
+                }
+            }
+            result.onSuccess { inspectResult ->
+                archiveInspectStatus = inspectResult.message
+            }.onFailure {
+                archiveInspectStatus = "Inspect failed: ${it.localizedMessage}"
+            }
         }
     }
     val archiveImportLauncher = rememberLauncherForActivityResult(
@@ -228,12 +256,30 @@ fun ToolsTab(
             archiveInspectStatus = "Extracting archive…"
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val cacheZip = File(context.cacheDir, "findit-import-${System.currentTimeMillis()}.zip")
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        cacheZip.outputStream().use { output -> input.copyTo(output) }
-                    } ?: error("Could not read the selected file")
-                    val bytes = cacheZip.readBytes()
-                    cacheZip.delete()
+                    val declaredLength = context.contentResolver
+                        .openAssetFileDescriptor(uri, "r")
+                        ?.use { it.declaredLength }
+                        ?: -1L
+                    if (ProjectArchiveImport.exceedsSizeCap(declaredLength)) {
+                        return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = "Archive too large (max ${ProjectArchiveImport.MAX_ARCHIVE_BYTES / (1024 * 1024)} MB)",
+                            manifestName = null,
+                        )
+                    }
+                    val read = context.contentResolver.openInputStream(uri)?.use { input ->
+                        ProjectArchiveImport.readBytesCapped(input, declaredLength)
+                    } ?: return@runCatching ProjectArchiveImport.Result(
+                        ok = false,
+                        message = "Could not read the selected file",
+                        manifestName = null,
+                    )
+                    val bytes = read.bytes
+                        ?: return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = read.error ?: "Could not read the selected file",
+                            manifestName = null,
+                        )
                     ProjectArchiveImport.applyIfSafe(bytes, context.filesDir)
                 }
             }

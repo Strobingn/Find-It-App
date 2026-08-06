@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 class SitePackageShareTest {
 
@@ -32,6 +34,86 @@ class SitePackageShareTest {
         val empty = ProjectArchiveImport.inspect(ByteArray(0))
         assertFalse(empty.ok)
         assertEquals("Empty file", empty.message)
+    }
+
+    @Test
+    fun applyIfSafeRejectsZipSlipPath() {
+        // Valid manifest so inspect passes; payload path escapes dest via `..`.
+        val manifest = buildString {
+            appendLine("FINDIT_PROJECT_ARCHIVE_V1")
+            appendLine("name\tZipSlip")
+            appendLine("created\t1700000000000")
+            appendLine("file\t../evil.txt\t5")
+        }
+        val archive = createZipArchive(
+            linkedMapOf(
+                ProjectArchiveWriter.MANIFEST_PATH to manifest.toByteArray(Charsets.UTF_8),
+                "../evil.txt" to "pwned".toByteArray(Charsets.UTF_8),
+            ),
+        )
+        val destRoot = Files.createTempDirectory("findit-zipslip").toFile()
+        try {
+            val result = ProjectArchiveImport.applyIfSafe(archive, destRoot)
+            assertFalse("zip-slip entry must be rejected", result.ok)
+            assertTrue(
+                result.message.contains("unsafe", ignoreCase = true) ||
+                    result.message.contains("zip-slip", ignoreCase = true),
+            )
+            // Must never materialize outside the intended extract tree.
+            val escaped = File(destRoot, "evil.txt")
+            assertFalse("zip-slip must not write $escaped", escaped.exists())
+            val parentEvil = File(destRoot.parentFile, "evil.txt")
+            assertFalse("zip-slip must not write $parentEvil", parentEvil.exists())
+            val underImports = File(destRoot, "findit-imports${File.separator}evil.txt")
+            assertFalse(underImports.exists())
+        } finally {
+            destRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun isUnsafeZipPathDetectsTraversal() {
+        assertTrue(ProjectArchiveImport.isUnsafeZipPath("../evil.txt"))
+        assertTrue(ProjectArchiveImport.isUnsafeZipPath("foo/../../evil.txt"))
+        assertTrue(ProjectArchiveImport.isUnsafeZipPath("/abs/evil.txt"))
+        assertFalse(ProjectArchiveImport.isUnsafeZipPath("targets.csv"))
+        assertFalse(ProjectArchiveImport.isUnsafeZipPath("nested/dir/file.laz"))
+    }
+
+    @Test
+    fun inspectRejectsOversizedArchive() {
+        // Construct a byte array larger than the cap without allocating 80MB+ of zip.
+        // Use a fake oversized buffer only if cap is small enough for tests; otherwise
+        // verify exceedsSizeCap and the early length gate on a known-oversize claim.
+        assertTrue(ProjectArchiveImport.exceedsSizeCap(ProjectArchiveImport.MAX_ARCHIVE_BYTES + 1))
+        assertFalse(ProjectArchiveImport.exceedsSizeCap(-1L))
+        assertFalse(ProjectArchiveImport.exceedsSizeCap(0L))
+        assertFalse(ProjectArchiveImport.exceedsSizeCap(1_024L))
+    }
+
+    @Test
+    fun applyIfSafeExtractsSafeArchive() {
+        val archive = ProjectArchiveWriter.write(
+            projectName = "Safe extract",
+            files = listOf(ProjectArchiveFile("targets.csv", "id\n1\n".toByteArray())),
+            createdAtMillis = 1_700_000_000_000L,
+        )
+        val destRoot = Files.createTempDirectory("findit-safe").toFile()
+        try {
+            val result = ProjectArchiveImport.applyIfSafe(archive, destRoot)
+            assertTrue(result.ok)
+            assertEquals(1, result.fileCount)
+            assertNotNullPath(result.extractDirPath)
+            val extracted = File(result.extractDirPath!!, "targets.csv")
+            assertTrue(extracted.exists())
+            assertEquals("id\n1\n", extracted.readText())
+        } finally {
+            destRoot.deleteRecursively()
+        }
+    }
+
+    private fun assertNotNullPath(path: String?) {
+        assertTrue(path != null && path.isNotBlank())
     }
 
     @Test
