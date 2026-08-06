@@ -2257,6 +2257,85 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * One-tap reopen of a saved LAZ/LAS from the home recent-projects strip.
+     * Looks up [displayName] (or file name) in the durable lidar store, then decodes via the
+     * same [TerrainDecodeCoordinator] path as cold-start restore / library open.
+     */
+    fun reopenSavedLidar(displayName: String) {
+        viewModelScope.launch {
+            val application = getApplication<Application>()
+            _activeTerrainSummary.value = "Opening $displayName…"
+            val dataset = withContext(Dispatchers.IO) {
+                val store = AppTerrainStorage.lidarStore(application)
+                store.list().firstOrNull {
+                    it.displayName.equals(displayName, ignoreCase = true) ||
+                        it.file.name.equals(displayName, ignoreCase = true) ||
+                        it.file.nameWithoutExtension.equals(
+                            displayName.substringBeforeLast('.'),
+                            ignoreCase = true,
+                        )
+                }
+            }
+            if (dataset == null || !dataset.file.isFile) {
+                _activeTerrainSummary.value = "Could not find saved LiDAR: $displayName"
+                return@launch
+            }
+            val file = dataset.file
+            val name = dataset.displayName
+            val preferredOptions = LidarImportOptions(
+                groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+                rasterResolution = LidarImportOptions.DEFAULT_OVERVIEW_RESOLUTION,
+                smoothingRadius = 0,
+            )
+            val diskCache = AppTerrainStorage.decodedTerrainCache(application)
+            val cached = withContext(Dispatchers.IO) {
+                diskCache.get(file, preferredOptions)
+            }
+            if (cached != null) {
+                val scene = withContext(Dispatchers.Default) {
+                    TerrainGpuSceneBuilder.build(cached.grid)
+                }
+                TerrainPerformanceSession.publish(scene)
+                setCustomTerrain(
+                    result = cached,
+                    source = TerrainImportSource(
+                        uri = Uri.fromFile(file).toString(),
+                        displayName = name,
+                        options = preferredOptions,
+                    ),
+                )
+                return@launch
+            }
+            try {
+                val terrainCache = LazTerrainCache(LazTerrainMemoryCache(), diskCache)
+                val coordinator = TerrainDecodeCoordinator(terrainCache)
+                val outcome = coordinator.decode(
+                    file = file,
+                    displayName = name,
+                    options = preferredOptions,
+                    onStage = { stage ->
+                        withContext(Dispatchers.Main.immediate) {
+                            _activeTerrainSummary.value = stage
+                        }
+                    },
+                )
+                TerrainPerformanceSession.publish(outcome.gpuScene)
+                setCustomTerrain(
+                    result = outcome.terrain,
+                    source = TerrainImportSource(
+                        uri = Uri.fromFile(file).toString(),
+                        displayName = name,
+                        options = preferredOptions,
+                    ),
+                )
+            } catch (error: Throwable) {
+                _activeTerrainSummary.value =
+                    "Could not open $name: ${error.localizedMessage ?: "decode failed"}"
+            }
+        }
+    }
+
     private fun saveSettings() {
         // Prevent saving defaults over user settings until loadSettings() completes
         if (!isSettingsLoaded) return

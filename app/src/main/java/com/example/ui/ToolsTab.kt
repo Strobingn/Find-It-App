@@ -48,6 +48,7 @@ import com.example.data.field.FieldSessionStats
 import com.example.data.field.FieldSessionStatsCalculator
 import com.example.geospatial.DaylightPlanner
 import com.example.geospatial.GeoSpatialLibrary
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -65,6 +66,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -130,6 +132,7 @@ fun ToolsTab(
     var shareStatus by remember { mutableStateOf<String?>(null) }
     var qrPayloadText by remember { mutableStateOf<String?>(null) }
     var archiveInspectStatus by remember { mutableStateOf<String?>(null) }
+    var archiveImportDialog by remember { mutableStateOf<String?>(null) }
 
     val sitePackageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
@@ -212,6 +215,38 @@ fun ToolsTab(
             archiveInspectStatus = result.message
         }.onFailure {
             archiveInspectStatus = "Inspect failed: ${it.localizedMessage}"
+        }
+    }
+    val archiveImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri == null) {
+            archiveInspectStatus = "Import canceled"
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            archiveInspectStatus = "Extracting archive…"
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val cacheZip = File(context.cacheDir, "findit-import-${System.currentTimeMillis()}.zip")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        cacheZip.outputStream().use { output -> input.copyTo(output) }
+                    } ?: error("Could not read the selected file")
+                    val bytes = cacheZip.readBytes()
+                    cacheZip.delete()
+                    ProjectArchiveImport.applyIfSafe(bytes, context.filesDir)
+                }
+            }
+            result.onSuccess { importResult ->
+                archiveInspectStatus = importResult.message
+                if (importResult.ok) {
+                    archiveImportDialog =
+                        "Extracted ${importResult.fileCount} file(s) to ${importResult.extractDirPath}. " +
+                            "Open Library for LAZ. CSV/find merge is not automatic."
+                }
+            }.onFailure {
+                archiveInspectStatus = "Import failed: ${it.localizedMessage}"
+            }
         }
     }
     val qgisBundleLauncher = rememberLauncherForActivityResult(
@@ -894,7 +929,8 @@ fun ToolsTab(
                     ?: "Build QR text for package hash, or inspect a zip",
                 statusActive = qrPayloadText != null || archiveInspectStatus != null,
                 description = "QR payloads never embed the full zip — large archives emit SHARE_FILE " +
-                    "with name/size/sha256. Inspect validates a Find It manifest without importing.",
+                    "with name/size/sha256. Inspect validates a Find It manifest; import extracts " +
+                    "files only (no auto Room merge).",
             ) {
                 TextButton(
                     onClick = {
@@ -919,12 +955,38 @@ fun ToolsTab(
                     },
                     modifier = Modifier.testTag("tool_qr_payload"),
                 ) { Text("Build QR text") }
-                if (qrPayloadText != null) {
+                qrPayloadText?.let { payload ->
+                    // ZXing not on classpath — large monospace card for external QR apps.
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tool_qr_payload_display"),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                "Scan/share text as QR via any QR app",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                payload,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
                     TextButton(
                         onClick = {
                             val intent = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, qrPayloadText)
+                                putExtra(Intent.EXTRA_TEXT, payload)
                             }
                             context.startActivity(Intent.createChooser(intent, "Share QR payload"))
                         },
@@ -939,6 +1001,10 @@ fun ToolsTab(
                     },
                     modifier = Modifier.testTag("tool_archive_inspect"),
                 ) { Text("Inspect archive") }
+                TextButton(
+                    onClick = { archiveImportLauncher.launch("application/zip") },
+                    modifier = Modifier.testTag("tool_archive_import"),
+                ) { Text("Import archive (files only)") }
             }
         }
         item {
@@ -971,6 +1037,26 @@ fun ToolsTab(
                 ) { Text("Open finds") }
             }
         }
+    }
+
+    archiveImportDialog?.let { message ->
+        AlertDialog(
+            onDismissRequest = { archiveImportDialog = null },
+            title = { Text("Archive extracted") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        archiveImportDialog = null
+                        onNavigate(AppDestination.LIBRARY)
+                    },
+                    modifier = Modifier.testTag("tool_archive_import_open_library"),
+                ) { Text("Open Library for LAZ") }
+            },
+            dismissButton = {
+                TextButton(onClick = { archiveImportDialog = null }) { Text("OK") }
+            },
+        )
     }
 }
 

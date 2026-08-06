@@ -216,7 +216,7 @@ fun HomeHubScreen(
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            "Reopen from Library (decode runs there).",
+                            "Tap a file to decode and open on Terrain.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -231,7 +231,10 @@ fun HomeHubScreen(
                                     shape = RoundedCornerShape(20.dp),
                                     color = MaterialTheme.colorScheme.secondaryContainer,
                                     modifier = Modifier
-                                        .clickable { onOpen(AppDestination.LIBRARY) }
+                                        .clickable {
+                                            viewModel.reopenSavedLidar(dataset.displayName)
+                                            onOpen(AppDestination.TERRAIN)
+                                        }
                                         .testTag("home_recent_${dataset.file.nameWithoutExtension}"),
                                 ) {
                                     Text(

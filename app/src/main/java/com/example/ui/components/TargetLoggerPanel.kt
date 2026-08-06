@@ -106,6 +106,7 @@ import com.example.geospatial.MeasurementFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1620,19 +1621,24 @@ private fun ExcavationLogSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "Photos (${digPhotoUris.size}/10)",
+                    "Photos (${digPhotoUris.size}/10) · timeline order",
                     style = MaterialTheme.typography.titleSmall,
                 )
-                digPhotoUris.forEach { photoUri ->
+                digPhotoUris.forEachIndexed { index, photoUri ->
+                    val label = digPhotoTimelineLabel(index + 1, photoUri)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dig_photo_timeline_${index + 1}"),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            photoUri.substringAfterLast('/').takeLast(32),
+                            label,
                             modifier = Modifier.weight(1f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
                         )
                         TextButton(onClick = { digPhotoUris = digPhotoUris - photoUri }) {
                             Text("Remove")
@@ -1847,6 +1853,23 @@ private fun SurveyBoundaryCard(
                                 enabled = hasGpsFix && deviceLatitude != null && deviceLongitude != null,
                                 modifier = Modifier.testTag("boundary_add_gps_vertex_${boundary.id}"),
                             ) { Text("Add GPS vertex") }
+                            if (boundary.vertices.size >= 3) {
+                                TextButton(
+                                    onClick = {
+                                        val lat = deviceLatitude ?: return@TextButton
+                                        val lon = deviceLongitude ?: return@TextButton
+                                        val moved = boundary.vertices.dropLast(1) +
+                                            BoundaryVertex(lat, lon)
+                                        onUpdateBoundary(boundary.copy(vertices = moved))
+                                    },
+                                    enabled = hasGpsFix &&
+                                        deviceLatitude != null &&
+                                        deviceLongitude != null,
+                                    modifier = Modifier.testTag(
+                                        "boundary_move_last_vertex_${boundary.id}",
+                                    ),
+                                ) { Text("Move last vertex to GPS") }
+                            }
                         }
                     }
                 }
@@ -2453,3 +2476,23 @@ private fun ExcavationLogsDialog(
 
 private fun formatDigLogTime(millis: Long): String =
     SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(millis))
+
+/** Ordered dig-photo timeline label: "Photo N · name" and file lastModified when URI is file://. */
+internal fun digPhotoTimelineLabel(order: Int, photoUri: String): String {
+    val name = photoUri.substringAfterLast('/').takeLast(28).ifBlank { "#$order" }
+    val timePart = runCatching {
+        val uri = Uri.parse(photoUri)
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            val path = uri.path ?: return@runCatching null
+            val file = File(path)
+            if (file.isFile && file.lastModified() > 0L) {
+                SimpleDateFormat("MMM d HH:mm", Locale.US).format(Date(file.lastModified()))
+            } else null
+        } else null
+    }.getOrNull()
+    return if (timePart != null) {
+        "Photo $order · $name · $timePart"
+    } else {
+        "Photo $order · $name"
+    }
+}

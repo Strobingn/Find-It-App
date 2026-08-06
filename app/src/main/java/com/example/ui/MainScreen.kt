@@ -5,8 +5,10 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -68,6 +71,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -113,7 +120,9 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** Kept for layout unit tests; primary nav always shows labels now (5 destinations). */
 internal fun usesCompactBottomNavigation(smallestScreenWidthDp: Int): Boolean = smallestScreenWidthDp < 600
@@ -844,21 +853,36 @@ private fun TerrainTab(
                     )
                     // Feature 16 — AR-lite compass ring (bearing + mag when GPS known)
                     magneticBearing?.let { mag ->
-                        Text(
-                            buildString {
-                                append("Bearing ${mag.toInt()}° · mag")
-                                compassHeadingDegrees?.let { heading ->
-                                    val turn = FieldNavigation.signedTurnDegrees(heading, mag)
-                                    append(" · heading ${heading.toInt()}°")
-                                    if (kotlin.math.abs(turn) >= 8f) {
-                                        append(if (turn > 0f) " · turn R ${turn.toInt()}°" else " · turn L ${(-turn).toInt()}°")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            NavCompassRing(
+                                headingDegrees = compassHeadingDegrees,
+                                targetBearingDegrees = mag,
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .testTag("nav_compass_ring"),
+                            )
+                            Text(
+                                buildString {
+                                    append("Bearing ${mag.toInt()}° · mag")
+                                    compassHeadingDegrees?.let { heading ->
+                                        val turn = FieldNavigation.signedTurnDegrees(heading, mag)
+                                        append(" · heading ${heading.toInt()}°")
+                                        if (kotlin.math.abs(turn) >= 8f) {
+                                            append(
+                                                if (turn > 0f) " · turn R ${turn.toInt()}°"
+                                                else " · turn L ${(-turn).toInt()}°",
+                                            )
+                                        }
                                     }
-                                }
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.testTag("nav_compass_bearing"),
-                        )
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.testTag("nav_compass_bearing"),
+                            )
+                        }
                     }
                     if (proximityAlerter.isInside) {
                         Text(
@@ -1226,6 +1250,57 @@ private fun ImportTab(
                 onImported()
             },
         )
+    }
+}
+
+/**
+ * Simple 2D greyscale compass ring: outer circle, device heading needle, target bearing tick.
+ * Angles are degrees clockwise from north (screen up = 0°).
+ */
+@Composable
+private fun NavCompassRing(
+    headingDegrees: Float?,
+    targetBearingDegrees: Float,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val radius = size.minDimension / 2f * 0.88f
+        val stroke = Stroke(width = 2.5f)
+        drawCircle(
+            color = Color(0xFF9E9E9E),
+            radius = radius,
+            center = Offset(cx, cy),
+            style = stroke,
+        )
+        // North tick (top)
+        drawLine(
+            color = Color(0xFFBDBDBD),
+            start = Offset(cx, cy - radius),
+            end = Offset(cx, cy - radius + 6f),
+            strokeWidth = 2f,
+            cap = StrokeCap.Round,
+        )
+        fun ray(degrees: Float, length: Float, color: Color, width: Float) {
+            val rad = Math.toRadians(degrees.toDouble() - 90.0)
+            val dx = cos(rad).toFloat()
+            val dy = sin(rad).toFloat()
+            drawLine(
+                color = color,
+                start = Offset(cx, cy),
+                end = Offset(cx + dx * length, cy + dy * length),
+                strokeWidth = width,
+                cap = StrokeCap.Round,
+            )
+        }
+        // Target bearing (lighter / longer)
+        ray(targetBearingDegrees, radius * 0.92f, Color(0xFFE0E0E0), 3.5f)
+        // Device heading (darker needle)
+        headingDegrees?.let { heading ->
+            ray(heading, radius * 0.72f, Color(0xFF616161), 3f)
+        }
+        drawCircle(color = Color(0xFF757575), radius = 3.5f, center = Offset(cx, cy))
     }
 }
 
