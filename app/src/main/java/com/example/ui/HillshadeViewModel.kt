@@ -8,6 +8,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.analysis.FeatureTypeCalibration
 import com.example.analysis.MetalDetectingTargetType
+import com.example.analysis.ReviewedCandidateExample
+import com.example.analysis.ReviewedExampleStore
 import com.example.analysis.TerrainDerivedLayerCache
 import com.example.analysis.TerrainDerivedLayers
 import com.example.analysis.TerrainIntelligenceEngine
@@ -145,6 +147,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     // are visible here (homesite overlay) without re-running the extraction.
     private val terrainDerivedLayerCache = TerrainDerivedLayerCache(File(application.cacheDir, "terrain-intelligence-v2"))
 
+    /** Append-only field-review store shared with [AiTerrainViewModel] for ranker training. */
+    private val reviewedStore by lazy {
+        ReviewedExampleStore(File(getApplication<Application>().filesDir, "reviewed-examples.tsv"))
+    }
+
     // Guard flag to prevent saveSettings() from overwriting DB values with defaults before loading completes
     private var isSettingsLoaded = false
     private var restoreImportedTerrainOnStart = false
@@ -269,6 +276,17 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
      */
     private val _featureTypeCalibration = MutableStateFlow<Map<MetalDetectingTargetType, Float>>(emptyMap())
     val featureTypeCalibration: StateFlow<Map<MetalDetectingTargetType, Float>> = _featureTypeCalibration.asStateFlow()
+
+    /**
+     * Latest historic-map vs terrain relief agreement (0..1), published by the map tab when an
+     * aligned overlay is scored. Null means no adjustment is applied to ranking.
+     */
+    private val _historicMapAgreementScore = MutableStateFlow<Float?>(null)
+    val historicMapAgreementScore: StateFlow<Float?> = _historicMapAgreementScore.asStateFlow()
+
+    fun setHistoricMapAgreementScore(score: Float?) {
+        _historicMapAgreementScore.value = score
+    }
 
     private val _analyzedDatasets = MutableStateFlow<List<AnalyzedDatasetEntity>>(emptyList())
     val analyzedDatasets: StateFlow<List<AnalyzedDatasetEntity>> = _analyzedDatasets.asStateFlow()
@@ -1580,6 +1598,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 operation = SyncOperation.UPSERT,
                 payload = "terrain=${signal.terrainKey};status=${signal.status};outcome=${signal.outcome.name}",
             )
+            // Field-checked outcomes feed the ranker training store (UNVERIFIED is not a review).
+            if (signal.outcome != VerificationOutcome.UNVERIFIED) {
+                val example = ReviewedCandidateExample.fromSignal(
+                    signal = signal,
+                    scoreAtReview = (signal.signalStrength / 100f).coerceIn(0f, 1f),
+                )
+                if (example != null) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { reviewedStore.append(example) }
+                    }
+                }
+            }
         }
     }
 

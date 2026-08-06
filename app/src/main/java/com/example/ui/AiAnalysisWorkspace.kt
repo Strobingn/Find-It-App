@@ -94,9 +94,16 @@ fun AiAnalysisWorkspace(
     val terrainKey by viewModel.activeTerrainKey.collectAsStateWithLifecycle()
     val gridSpacing by viewModel.gridSpacing.collectAsStateWithLifecycle()
     val featureTypeCalibration by viewModel.featureTypeCalibration.collectAsStateWithLifecycle()
+    val historicMapAgreementScore by viewModel.historicMapAgreementScore.collectAsStateWithLifecycle()
     val visualizationMode by viewModel.visualizationMode.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val analyzedDatasets by viewModel.analyzedDatasets.collectAsStateWithLifecycle()
+
+    // Keep AI ranker state in sync with map-published historic agreement so ExplainableRanker
+    // applies the same capped adjustment as MetalDetectingTargetRefiner.
+    LaunchedEffect(historicMapAgreementScore) {
+        assistantViewModel.setHistoricMapAgreementScore(historicMapAgreementScore)
+    }
 
     val secondaryDataset = remember(analyzedDatasets, terrainKey) {
         // Prefer a different dataset than the active terrain key for compare-two-sites.
@@ -205,10 +212,20 @@ fun AiAnalysisWorkspace(
     // Re-derives live from the current logged finds (not just at "Analyze" time) so marking a
     // find CONFIRMED/REJECTED in the Finds tab immediately re-scores historic targets here too,
     // without needing to re-run the full (much more expensive) derived-layer analysis.
-    val historicTargets = remember(aiState.localResult, signals, featureTypeCalibration) {
+    val historicTargets = remember(
+        aiState.localResult,
+        signals,
+        featureTypeCalibration,
+        historicMapAgreementScore,
+    ) {
         val result = aiState.localResult ?: return@remember emptyList()
         val feedbackPoints = VerifiedFeedback.derive(signals, result.datasetKey)
-        MetalDetectingTargetRefiner.refine(result, feedbackPoints, featureTypeCalibration)
+        MetalDetectingTargetRefiner.refine(
+            result = result,
+            feedback = feedbackPoints,
+            calibration = featureTypeCalibration,
+            historicMapAgreementScore = historicMapAgreementScore,
+        )
     }
     val huntZones = remember(historicTargets, aiState.localResult) {
         val resultLayers = aiState.localResult?.layers ?: return@remember emptyList()

@@ -146,6 +146,11 @@ fun TerrainGoogleMapScreen(
     routeWaypoints: List<FieldWaypoint> = emptyList(),
     routeTotalMeters: Float = 0f,
     onClearRoute: () -> Unit = {},
+    /**
+     * Publishes the latest historic-map vs terrain agreement score (0..1) for ranking adjustment,
+     * or null when no overlay is active / scoring failed.
+     */
+    onHistoricMapAgreementScore: (Float?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -305,6 +310,11 @@ fun TerrainGoogleMapScreen(
                 )
             }.getOrNull()
         }
+    }
+    // Publish agreement into ranking so MetalDetectingTargetRefiner / ExplainableRanker can
+    // apply the capped MapTerrainAgreement adjustment (null clears the prior score).
+    LaunchedEffect(historicAgreement?.score) {
+        onHistoricMapAgreementScore(historicAgreement?.score)
     }
 
     fun refreshHistoricMaps() {
@@ -743,7 +753,10 @@ fun TerrainGoogleMapScreen(
                 onToggleVisible = { record -> updateHistoricMap(record.copy(visible = !record.visible)) },
                 onDelete = { record ->
                     historicMapRepository.delete(record)
-                    scope.launch(Dispatchers.IO) { historicMapDao.deleteById(record.id) }
+                    scope.launch(Dispatchers.IO) {
+                        historicMapDao.deleteById(record.id)
+                        historicMapFeatureDao.deleteByMapId(record.id)
+                    }
                     refreshHistoricMaps()
                     if (activeHistoricMapId == record.id) activeHistoricMapId = null
                 },

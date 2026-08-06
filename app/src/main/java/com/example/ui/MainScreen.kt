@@ -1046,6 +1046,7 @@ private fun GoogleMapTab(
         routeWaypoints = plannedRoute?.waypoints ?: emptyList(),
         routeTotalMeters = plannedRoute?.totalDistanceMeters?.toFloat() ?: 0f,
         onClearRoute = { viewModel.setPlannedRoute(null) },
+        onHistoricMapAgreementScore = viewModel::setHistoricMapAgreementScore,
         modifier = Modifier.fillMaxSize().padding(padding),
     )
 }
