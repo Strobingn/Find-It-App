@@ -96,6 +96,7 @@ fun AiAnalysisWorkspace(
     val featureTypeCalibration by viewModel.featureTypeCalibration.collectAsStateWithLifecycle()
     val historicMapAgreementScore by viewModel.historicMapAgreementScore.collectAsStateWithLifecycle()
     val visualizationMode by viewModel.visualizationMode.collectAsStateWithLifecycle()
+    val inspectedCellSummary by viewModel.inspectedCellSummary.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val analyzedDatasets by viewModel.analyzedDatasets.collectAsStateWithLifecycle()
 
@@ -127,6 +128,7 @@ fun AiAnalysisWorkspace(
         aiState.localResult,
         visualizationMode,
         secondaryDataset,
+        inspectedCellSummary,
     ) {
         val secondarySummary = secondaryDataset?.let { ds ->
             buildString {
@@ -153,12 +155,16 @@ fun AiAnalysisWorkspace(
             excavationLogs = excavationLogs,
             breadcrumbTracks = breadcrumbTracks,
             localResult = aiState.localResult,
-            inspectedCellSummary = "",
+            inspectedCellSummary = inspectedCellSummary,
             visualizationMode = visualizationMode,
             secondaryTerrainSummary = secondarySummary,
             secondaryTerrainContext = secondaryContext,
-            secondaryCandidateCount = 0,
-            secondaryFindCount = 0,
+            secondaryCandidateCount = secondaryDataset?.let { ds ->
+                ds.targetsJson.count { it == '{' }.coerceAtLeast(0)
+            } ?: 0,
+            secondaryFindCount = secondaryDataset?.let { ds ->
+                signals.count { it.datasetKey == ds.datasetKey || it.terrainKey == ds.datasetKey }
+            } ?: 0,
         )
     }
 

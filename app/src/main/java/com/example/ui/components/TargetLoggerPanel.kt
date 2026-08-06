@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +41,8 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -137,6 +140,7 @@ fun TargetLoggerPanel(
     onLogSignal: () -> Unit,
     onDeleteSignal: (TargetSignal) -> Unit,
     onUpdateSignal: (TargetSignal) -> Unit,
+    onToggleStarred: (TargetSignal) -> Unit = {},
     onClearAll: () -> Unit,
     onBuildProjectExport: suspend () -> ProjectExportFiles,
     onBuildQgisBundle: suspend () -> ByteArray? = { null },
@@ -362,12 +366,43 @@ fun TargetLoggerPanel(
     }
 
     var thisTripOnly by remember { mutableStateOf(false) }
-    val displayedSignals = remember(loggedSignals, thisTripOnly) {
-        if (!thisTripOnly) {
-            loggedSignals
-        } else {
-            val cutoff = System.currentTimeMillis() - 8L * 60L * 60L * 1000L
-            loggedSignals.filter { it.timestamp >= cutoff }
+    var starredOnly by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(FindSortMode.STARRED_FIRST) }
+    val displayedSignals = remember(
+        loggedSignals,
+        thisTripOnly,
+        starredOnly,
+        sortMode,
+        deviceLatitude,
+        deviceLongitude,
+    ) {
+        val cutoff = System.currentTimeMillis() - 8L * 60L * 60L * 1000L
+        val filtered = loggedSignals.filter { signal ->
+            (!thisTripOnly || signal.timestamp >= cutoff) &&
+                (!starredOnly || signal.starred)
+        }
+        when (sortMode) {
+            FindSortMode.STARRED_FIRST -> filtered.sortedWith(
+                compareByDescending<TargetSignal> { it.starred }.thenByDescending { it.timestamp },
+            )
+            FindSortMode.NEWEST -> filtered.sortedByDescending { it.timestamp }
+            FindSortMode.NEAREST -> {
+                val lat = deviceLatitude
+                val lon = deviceLongitude
+                if (lat == null || lon == null) {
+                    filtered.sortedByDescending { it.timestamp }
+                } else {
+                    filtered.sortedBy { signal ->
+                        val sLat = signal.latitude ?: signal.gpsLatitude
+                        val sLon = signal.longitude ?: signal.gpsLongitude
+                        if (sLat == null || sLon == null) {
+                            Double.MAX_VALUE
+                        } else {
+                            FieldNavigation.distanceMeters(lat, lon, sLat, sLon)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -577,9 +612,9 @@ fun TargetLoggerPanel(
                 }
             }
 
-            // Feature 18 — this-trip filter (last 8 hours)
+            // Filters: this trip, starred only, sort mode
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -589,20 +624,42 @@ fun TargetLoggerPanel(
                     label = { Text("This trip") },
                     modifier = Modifier.testTag("filter_this_trip"),
                 )
-                Text(
-                    if (thisTripOnly) {
-                        "${displayedSignals.size} of ${loggedSignals.size} (last 8 h)"
-                    } else {
-                        "${loggedSignals.size} find${if (loggedSignals.size == 1) "" else "s"}"
+                FilterChip(
+                    selected = starredOnly,
+                    onClick = { starredOnly = !starredOnly },
+                    label = { Text("Starred only") },
+                    leadingIcon = {
+                        Icon(
+                            if (starredOnly) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
                     },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("filter_starred_only"),
                 )
+                FindSortMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = sortMode == mode,
+                        onClick = { sortMode = mode },
+                        label = { Text(mode.label) },
+                        modifier = Modifier.testTag("sort_${mode.name.lowercase()}"),
+                    )
+                }
             }
+            Text(
+                "${displayedSignals.size} of ${loggedSignals.size} find${if (loggedSignals.size == 1) "" else "s"}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             if (displayedSignals.isEmpty()) {
                 Text(
-                    "No finds in the last 8 hours. Clear the This trip filter to see older finds.",
+                    when {
+                        starredOnly && thisTripOnly -> "No starred finds in the last 8 hours."
+                        starredOnly -> "No starred finds yet. Tap the star on a find to prioritize it."
+                        thisTripOnly -> "No finds in the last 8 hours. Clear This trip to see older finds."
+                        else -> "No finds logged yet."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 8.dp),
@@ -622,6 +679,7 @@ fun TargetLoggerPanel(
                             onDeleteSignal(signal)
                         },
                         onNavigate = { navigationTarget = signal },
+                        onToggleStarred = { onToggleStarred(signal) },
                         digLogCount = excavationLogs.count { it.targetId == signal.id },
                         onOpenDigLogs = { digLogSignal = signal },
                     )
@@ -905,12 +963,19 @@ private fun FieldNavigationCard(
 private fun formatNavigationDistance(meters: Double): String =
     "${MeasurementFormat.length(meters)} away"
 
+private enum class FindSortMode(val label: String) {
+    STARRED_FIRST("Starred first"),
+    NEWEST("Newest"),
+    NEAREST("Nearest"),
+}
+
 @Composable
 private fun SignalCard(
     signal: TargetSignal,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onNavigate: () -> Unit,
+    onToggleStarred: () -> Unit = {},
     digLogCount: Int = 0,
     onOpenDigLogs: () -> Unit = {},
 ) {
@@ -928,8 +993,22 @@ private fun SignalCard(
                 tint = Color(signal.metalType.colorHex),
             )
             Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(signal.metalType.label, fontWeight = FontWeight.Bold)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(signal.metalType.label, fontWeight = FontWeight.Bold)
+                    if (signal.starred) {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            Icons.Default.Star,
+                            contentDescription = "Starred",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
                 val depth = signal.depthCm?.let { "$it cm" } ?: "depth unknown"
                 Text(
                     "Grid ${signal.gridX.toInt()}, ${signal.gridY.toInt()} · $depth · ${signal.signalStrength.toInt()}%",
@@ -984,6 +1063,20 @@ private fun SignalCard(
                         color = MaterialTheme.colorScheme.secondary,
                     )
                 }
+            }
+            IconButton(
+                onClick = onToggleStarred,
+                modifier = Modifier.size(48.dp).testTag("toggle_star_find"),
+            ) {
+                Icon(
+                    if (signal.starred) Icons.Default.Star else Icons.Default.StarBorder,
+                    contentDescription = if (signal.starred) "Unstar find" else "Star find",
+                    tint = if (signal.starred) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
             }
             IconButton(onClick = onEdit, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Edit, contentDescription = "Edit find")

@@ -1613,6 +1613,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun toggleStarred(signal: TargetSignal) {
+        updateLoggedSignal(signal.copy(starred = !signal.starred))
+    }
+
+    /** Plain-language cell summary for AI field pack (Question the cell / evidence). */
+    private val _inspectedCellSummary = MutableStateFlow("")
+    val inspectedCellSummary: StateFlow<String> = _inspectedCellSummary.asStateFlow()
+
+    fun setInspectedCellSummary(summary: String) {
+        _inspectedCellSummary.value = summary
+    }
+
     fun deleteLoggedSignal(signal: TargetSignal) {
         viewModelScope.launch {
             signalDao.deleteById(signal.id)

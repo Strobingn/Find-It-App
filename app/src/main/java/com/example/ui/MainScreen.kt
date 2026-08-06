@@ -511,13 +511,28 @@ private fun TerrainTab(
                 } else {
                     viewshedState.value = null
                     horizonState.value = null
-                    inspectedCell.value = TerrainCellInspector.inspect(
+                    val inspection = TerrainCellInspector.inspect(
                         grid = elevationGrid,
                         metadata = metadata,
                         xPercent = xPercent,
                         yPercent = yPercent,
                         vegetationFilter = vegetation,
                         featureScaleMeters = featureScale,
+                    )
+                    inspectedCell.value = inspection
+                    viewModel.setInspectedCellSummary(
+                        buildString {
+                            append("Cell x=").append("%.1f".format(inspection.xPercent))
+                            append("% y=").append("%.1f".format(inspection.yPercent)).append("%")
+                            append(" elev≈").append("%.2f".format(inspection.elevationMeters)).append(" m")
+                            append(" slope≈").append("%.1f".format(inspection.slopeDegrees)).append("°")
+                            append(" relief≈").append("%.2f".format(inspection.localReliefMeters)).append(" m")
+                            inspection.latitude?.let { lat ->
+                                inspection.longitude?.let { lon ->
+                                    append(" · ").append("%.5f".format(lat)).append(", ").append("%.5f".format(lon))
+                                }
+                            }
+                        },
                     )
                 }
             },
@@ -1181,6 +1196,7 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         onLogSignal = viewModel::logCurrentSignal,
         onDeleteSignal = viewModel::deleteLoggedSignal,
         onUpdateSignal = viewModel::updateLoggedSignal,
+        onToggleStarred = viewModel::toggleStarred,
         onClearAll = viewModel::clearLoggedSignals,
         onBuildProjectExport = viewModel::buildProjectExportFiles,
         onBuildQgisBundle = viewModel::buildQgisBundleBytes,
