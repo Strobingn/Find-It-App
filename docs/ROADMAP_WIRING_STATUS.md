@@ -15,9 +15,9 @@
 | Tile download / mosaics | **Mostly wired** |
 | Historic analysis / candidates | **Mostly wired** |
 | Field verification offline | **Wired** |
-| AR field guidance | **Wired** (camera + compass reticle; non-AR fallback; not Google ARCore plane mesh) |
-| Historic map georef | **Wired** (auto feature extract **missing**) |
-| ML ranker engine | **Partial** (engine + train UI + feedback folds; regional field datasets open) |
+| AR field guidance | **Wired** (camera + compass reticle + **world-anchor projection**; ARCore optional when installed) |
+| Historic map georef | **Wired** (manual + **auto ink extraction** after Fit) |
+| ML ranker engine | **Mostly** (engine + train UI + folds + **regional corpus export/import**) |
 | Advanced tools (viewshed, profile, horizon, compare) | **Wired** |
 | Interop export | **Mostly wired** (GeoPackage/share/archive; **cloud multi-device sync missing**) |
 | Site Package Pack (10) | **Wired** |
@@ -51,10 +51,10 @@
 | **1** Core workflows | **Mostly** | Release-gate device validation on every path still optional |
 | **2** Tile/mosaics | **Mostly** | On-device large mosaic stress open |
 | **3** Historic analysis | **Mostly** | Measured FP reduction on verified sites open |
-| **4** Performance | **Partial** | Diagnostics/benchmark suite incomplete; cancel/cache present |
-| **5** Field verification | **Yes** | Offline path complete; **AR camera guidance wired** (sensor+GPS; not ARCore world mesh) |
-| **6** Historic maps | **Yes** | Auto image extraction of roads/walls deferred |
-| **7** ML ranking | **Partial** | Train/activate + ReviewedExamples/folds exist; Hudson Valley / regional datasets field-dependent |
+| **4** Performance | **Mostly** | **PerfHarness** synthetic grid/hillshade + JSONL log; cancel/cache present; large-mosaic stress still open |
+| **5** Field verification | **Yes** | Offline path complete; camera AR + **world-anchor** math; ARCore SDK optional when Play Services AR installed |
+| **6** Historic maps | **Yes** | **Auto-extract** ink→roads/walls/structures/boundaries after georef Fit (operator review drafts) |
+| **7** ML ranking | **Mostly** | Train/activate + folds + **RegionalCorpus** export/import (Hudson Valley / Northeast) |
 | **8** Advanced tools | **Yes** | Viewshed, horizon, profile, compare, multi-dataset |
 | **9** Interop/cloud | **Partial** | CSV/GPX/KML/GeoJSON/SHP/KMZ/PDF/PNG/GeoTIFF/QGIS/archive/GeoPackage/share; **no cloud multi-device sync**; QR is text handoff not full camera-scan product |
 
@@ -97,12 +97,11 @@ Home + Terrain quality banners; ethics on mark/dig; offline assist drafts; VIZ/N
 
 | Item | Reason |
 |------|--------|
-| Google ARCore plane / world-mesh anchors | Poor fit under canopy; GPS+compass camera AR is the field product path |
+| ARCore Geospatial / VPS cloud localization | Needs Google Cloud key + coverage; outdoor woods often unsupported |
 | Cloud multi-device sync delivery | External service; local queue + conflict resolver ready |
-| Auto historic-map feature extraction | CV future work (manual feature entry only) |
+| Neural historic-map CV (deep OCR / vectorization) | Ink-threshold extractor ships; DL models not bundled |
 | Two-epoch change detection | Not started |
-| Regional ML training corpora | Field-dependent data collection |
-| Full performance benchmark harness | Phase 4 incomplete |
+| Large-mosaic stress / release-gate device matrix | Open product QA |
 | QR camera-scan import product | Text/payload handoff only |
 
 ---

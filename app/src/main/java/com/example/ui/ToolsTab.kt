@@ -37,8 +37,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ai.FieldOfflineAssist
+import com.example.analysis.ReviewedExampleStore
+import com.example.analysis.ml.RegionalCorpus
+import com.example.analysis.ml.RegionalCorpusCatalog
 import com.example.data.DetectionSource
 import com.example.data.MetalType
+import com.example.data.PerfHarness
 import com.example.data.TargetSignal
 import com.example.data.download.LazDownloadQueue
 import com.example.data.export.ProjectArchiveImport
@@ -46,6 +50,7 @@ import com.example.data.export.QrSharePayload
 import com.example.data.field.BoundaryProximityLevel
 import com.example.data.field.FieldSessionStats
 import com.example.data.field.FieldSessionStatsCalculator
+import com.example.geospatial.ArCoreAvailability
 import com.example.geospatial.DaylightPlanner
 import com.example.geospatial.GeoSpatialLibrary
 import androidx.compose.material3.AlertDialog
@@ -133,6 +138,12 @@ fun ToolsTab(
     var qrPayloadText by remember { mutableStateOf<String?>(null) }
     var archiveInspectStatus by remember { mutableStateOf<String?>(null) }
     var archiveImportDialog by remember { mutableStateOf<String?>(null) }
+    var regionalCorpusStatus by remember { mutableStateOf<String?>(null) }
+    var perfHarnessStatus by remember { mutableStateOf<String?>(null) }
+    val arCoreStatus = remember(context) { ArCoreAvailability.status(context) }
+    val reviewedStore = remember(context) {
+        ReviewedExampleStore(File(context.filesDir, "reviewed-examples.tsv"))
+    }
 
     val sitePackageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
@@ -472,6 +483,107 @@ fun ToolsTab(
                     onClick = { onNavigate(AppDestination.MAP) },
                     modifier = Modifier.testTag("tool_coverage_gap_open_map"),
                 ) { Text("Open map") }
+            }
+        }
+        item {
+            val examples = remember(regionalCorpusStatus) {
+                runCatching { reviewedStore.readAll() }.getOrDefault(emptyList())
+            }
+            val statsLines = remember(examples) {
+                RegionalCorpus.allStats(examples).joinToString(" · ") { s ->
+                    "${s.region.id}:${s.total}"
+                }.ifBlank { "no reviewed examples yet" }
+            }
+            ToolCard(
+                icon = Icons.Default.Hub,
+                title = "Regional ML corpora",
+                status = regionalCorpusStatus ?: statsLines,
+                statusActive = examples.isNotEmpty(),
+                description = "Export Hudson Valley / Northeast slices of field reviews for ranker " +
+                    "training. Train on the AI tab uses regional data when both classes exist in-region. " +
+                    "Not metal identity — terrain feedback only.",
+            ) {
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val all = reviewedStore.readAll()
+                            val region = RegionalCorpusCatalog.HUDSON_VALLEY
+                            val out = File(context.filesDir, "corpus-${region.id}.tsv")
+                            val n = RegionalCorpus.exportToFile(reviewedStore, region, out)
+                            withContext(Dispatchers.Main) {
+                                regionalCorpusStatus =
+                                    "Exported $n ${region.displayName} example(s) → ${out.name} " +
+                                        "(store total ${all.size})"
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_regional_corpus_export_hv"),
+                ) { Text("Export Hudson Valley corpus") }
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val region = RegionalCorpusCatalog.NORTHEAST
+                            val out = File(context.filesDir, "corpus-${region.id}.tsv")
+                            val n = RegionalCorpus.exportToFile(reviewedStore, region, out)
+                            withContext(Dispatchers.Main) {
+                                regionalCorpusStatus =
+                                    "Exported $n ${region.displayName} example(s) → ${out.name}"
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_regional_corpus_export_ne"),
+                ) { Text("Export Northeast corpus") }
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val src = File(context.filesDir, "corpus-${RegionalCorpusCatalog.HUDSON_VALLEY.id}.tsv")
+                            val n = RegionalCorpus.importIntoStore(reviewedStore, src)
+                            withContext(Dispatchers.Main) {
+                                regionalCorpusStatus = if (n > 0) {
+                                    "Imported $n example(s) from ${src.name}"
+                                } else {
+                                    "Nothing imported — export a corpus first or check ${src.name}"
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_regional_corpus_import"),
+                ) { Text("Re-import HV corpus into store") }
+                TextButton(
+                    onClick = { onNavigate(AppDestination.AI) },
+                    modifier = Modifier.testTag("tool_regional_corpus_train"),
+                ) { Text("Open AI · train ranker") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Insights,
+                title = "Perf harness",
+                status = perfHarnessStatus
+                    ?: "Synthetic grid + hillshade timings · Phase 4 diagnostics",
+                statusActive = perfHarnessStatus != null,
+                description = "Runs a device-local micro-benchmark (synthetic DEM hillshade) and " +
+                    "writes JSONL under app files. ARCore: ${ArCoreAvailability.statusLabel(arCoreStatus)}.",
+            ) {
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.Default) {
+                            val report = PerfHarness.runSyntheticTerrainBenchmark(gridSide = 96, repeats = 3)
+                            val log = File(context.filesDir, "perf-harness.jsonl")
+                            PerfHarness.appendJsonl(log)
+                            withContext(Dispatchers.Main) {
+                                perfHarnessStatus = report.lineSequence().take(6).joinToString(" · ")
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_perf_harness_run"),
+                ) { Text("Run synthetic perf harness") }
+                TextButton(
+                    onClick = {
+                        perfHarnessStatus = PerfHarness.formatReport()
+                    },
+                    modifier = Modifier.testTag("tool_perf_harness_report"),
+                ) { Text("Show last report") }
             }
         }
         item {

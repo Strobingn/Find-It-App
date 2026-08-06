@@ -170,6 +170,8 @@ dependencies {
   implementation(libs.androidx.camera.lifecycle)
   implementation(libs.androidx.camera.view)
   implementation(libs.androidx.camera.core)
+  // Optional outdoor world anchors — app runs without Play Services AR via compass projection.
+  implementation("com.google.ar:core:1.48.0")
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

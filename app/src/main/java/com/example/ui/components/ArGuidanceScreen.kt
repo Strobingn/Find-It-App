@@ -59,6 +59,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.field.ArGuidance
 import com.example.data.field.FieldNavigation
 import com.example.data.field.NavigationTarget
+import com.example.geospatial.ArCoreAvailability
+import com.example.geospatial.ArCoreWorldAnchor
 import com.example.geospatial.MeasurementFormat
 import com.example.geospatial.trueToMagneticBearingDegrees
 import java.util.concurrent.Executors
@@ -158,6 +160,32 @@ fun ArGuidanceScreen(
     }
 
     val useCamera = cameraGranted && !cameraFailed && !forceFallback
+    val arCoreSupported = remember(context) { ArCoreAvailability.isSupported(context) }
+    var useWorldAnchor by remember { mutableStateOf(true) }
+    val worldAnchor = remember(
+        deviceLatitude,
+        deviceLongitude,
+        target.latitude,
+        target.longitude,
+        headingDegrees,
+        arCoreSupported,
+        deviceAccuracyMeters,
+        useWorldAnchor,
+    ) {
+        if (!useWorldAnchor) {
+            null
+        } else {
+            ArCoreWorldAnchor.compute(
+                deviceLat = deviceLatitude,
+                deviceLon = deviceLongitude,
+                targetLat = target.latitude,
+                targetLon = target.longitude,
+                headingDegrees = headingDegrees,
+                arCoreAvailable = arCoreSupported,
+                accuracyMeters = deviceAccuracyMeters,
+            )
+        }
+    }
 
     Box(
         modifier = modifier
@@ -178,10 +206,19 @@ fun ArGuidanceScreen(
             )
         }
 
-        ArReticleOverlay(
-            state = overlay,
-            modifier = Modifier.fillMaxSize().testTag("ar_reticle_overlay"),
-        )
+        // Prefer world-anchor projection (ARCore-ready pose math) when enabled; else classic reticle.
+        if (useWorldAnchor && worldAnchor?.projection != null) {
+            WorldAnchorReticleOverlay(
+                projection = worldAnchor.projection!!,
+                isArrived = worldAnchor.isArrived,
+                modifier = Modifier.fillMaxSize().testTag("ar_world_anchor_overlay"),
+            )
+        } else {
+            ArReticleOverlay(
+                state = overlay,
+                modifier = Modifier.fillMaxSize().testTag("ar_reticle_overlay"),
+            )
+        }
 
         Column(
             modifier = Modifier
@@ -241,10 +278,10 @@ fun ArGuidanceScreen(
                         modifier = Modifier.testTag("ar_distance_line"),
                     )
                     Text(
-                        overlay.instruction,
+                        worldAnchor?.instruction ?: overlay.instruction,
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (overlay.isArrived) {
+                        color = if ((worldAnchor?.isArrived == true) || overlay.isArrived) {
                             MaterialTheme.colorScheme.primary
                         } else {
                             MaterialTheme.colorScheme.onSurface
@@ -259,13 +296,20 @@ fun ArGuidanceScreen(
                         )
                     }
                     Text(
-                        if (useCamera) "Camera mode · hold phone upright" else "Compass fallback (no camera)",
+                        buildString {
+                            if (useCamera) append("Camera") else append("Compass fallback")
+                            append(" · ")
+                            append(
+                                worldAnchor?.modeLabel
+                                    ?: if (useCamera) "hold phone upright" else "no camera",
+                            )
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("ar_mode_label"),
                     )
                     Text(
-                        overlay.honestyLine,
+                        worldAnchor?.honestyLine ?: overlay.honestyLine,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -280,13 +324,21 @@ fun ArGuidanceScreen(
                 .padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            OutlinedButton(
+                onClick = { useWorldAnchor = !useWorldAnchor },
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("ar_toggle_world_anchor"),
+            ) {
+                Text(if (useWorldAnchor) "Classic reticle" else "World anchor")
+            }
             if (useCamera) {
                 OutlinedButton(
                     onClick = { forceFallback = true },
                     modifier = Modifier
                         .weight(1f)
                         .testTag("ar_use_compass_fallback"),
-                ) { Text("Compass only") }
+                ) { Text("No cam") }
             } else if (!cameraGranted || cameraFailed) {
                 OutlinedButton(
                     onClick = {
@@ -374,6 +426,56 @@ private fun CameraPreviewLayer(
         factory = { previewView },
         modifier = modifier,
     )
+}
+
+@Composable
+private fun WorldAnchorReticleOverlay(
+    projection: ArCoreWorldAnchor.ScreenProjection,
+    isArrived: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val accent = if (isArrived) Color(0xFFBDBDBD) else Color(0xFFF5F5F5)
+    val dim = Color(0x88FFFFFF)
+    Canvas(modifier = modifier) {
+        val cx = size.width / 2f + projection.x * size.width * 0.42f
+        val cy = size.height / 2f + projection.y * size.height * 0.28f
+        val r = size.minDimension * 0.08f
+        drawLine(
+            color = dim,
+            start = Offset(size.width / 2f, size.height * 0.35f),
+            end = Offset(size.width / 2f, size.height * 0.65f),
+            strokeWidth = 2f,
+        )
+        drawLine(
+            color = dim,
+            start = Offset(size.width * 0.35f, size.height / 2f),
+            end = Offset(size.width * 0.65f, size.height / 2f),
+            strokeWidth = 2f,
+        )
+        // World-anchor ring (slightly larger than classic reticle)
+        drawCircle(
+            color = accent,
+            radius = r,
+            center = Offset(cx, cy),
+            style = Stroke(width = 5f),
+        )
+        drawCircle(
+            color = accent,
+            radius = r * 0.35f,
+            center = Offset(cx, cy),
+            style = Stroke(width = 3f),
+        )
+        if (!projection.inFront) {
+            // Side chevron when target is behind
+            drawLine(
+                color = accent,
+                start = Offset(cx - r, cy),
+                end = Offset(cx + r, cy),
+                strokeWidth = 4f,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
 }
 
 @Composable

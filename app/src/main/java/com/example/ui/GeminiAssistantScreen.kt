@@ -359,8 +359,17 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         val storeExamples = runCatching { reviewedStore().readAll() }.getOrDefault(emptyList())
         val datasetKey = result.datasetKey
         val datasetMatched = storeExamples.filter { it.datasetKey == datasetKey }
+        // Prefer regional corpus when reviewed examples cluster inside a catalog region.
+        val region = com.example.analysis.ml.RegionalCorpus.detectRegion(
+            storeExamples.mapNotNull { it.latitude }.averageOrNull(),
+            storeExamples.mapNotNull { it.longitude }.averageOrNull(),
+        )
+        val regionalMatched = region?.let {
+            com.example.analysis.ml.RegionalCorpus.filter(storeExamples, it)
+        }.orEmpty()
         val labeledFromStore = when {
             hasBothVerdicts(datasetMatched) -> datasetMatched
+            region != null && hasBothVerdicts(regionalMatched) -> regionalMatched
             hasBothVerdicts(storeExamples) -> storeExamples
             else -> emptyList()
         }.filter {
@@ -466,9 +475,10 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
             trainingExamples
         }
 
+        val regionTag = region?.id ?: "global"
         val training = RankerTrainer.train(
             examples = examplesForTrainer,
-            modelVersion = "field-checks-${System.currentTimeMillis()}",
+            modelVersion = "field-checks-$regionTag-${System.currentTimeMillis()}",
             featureNames = CandidateFeatures.FEATURE_NAMES,
         )
 
@@ -494,7 +504,12 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
             production.accuracy
         }
 
-        val sourceLabel = if (labeledFromStore.isNotEmpty()) "reviewed store" else "verified feedback"
+        val sourceLabel = when {
+            labeledFromStore.isEmpty() -> "verified feedback"
+            region != null && regionalMatched.size == labeledFromStore.size ->
+                "regional corpus (${region.displayName})"
+            else -> "reviewed store"
+        }
         val message = "Trained on ${trainingExamples.size} examples from $sourceLabel " +
             "($confirmed productive, $rejected rejected, ${hardNegatives.size} hard negatives) · " +
             "spatial folds ${foldSizes.joinToString("/")} · accuracy " +
@@ -502,6 +517,9 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
 
         return RankerTrainOutcome(ranker = production.ranker, message = message)
     }
+
+    private fun List<Double>.averageOrNull(): Double? =
+        if (isEmpty()) null else average()
 
     private fun hasBothVerdicts(examples: List<ReviewedCandidateExample>): Boolean {
         var productive = false

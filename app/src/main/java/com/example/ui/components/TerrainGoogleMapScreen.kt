@@ -101,6 +101,7 @@ import com.example.data.historicmap.GeoReferencer
 import com.example.data.historicmap.HistoricMapAgreementScorer
 import com.example.data.historicmap.HistoricMapControlPoint
 import com.example.data.historicmap.HistoricMapFeature
+import com.example.data.historicmap.HistoricMapFeatureExtractor
 import com.example.data.historicmap.HistoricMapGeoreference
 import com.example.data.historicmap.MapFeatureAgreement
 import com.example.data.historicmap.MapFeatureType
@@ -617,6 +618,41 @@ fun TerrainGoogleMapScreen(
         }
     }
 
+    fun autoExtractHistoricFeatures() {
+        val active = historicMaps.firstOrNull { it.id == activeHistoricMapId } ?: return
+        val bitmap = historicBitmaps[active.id]?.takeIf { !it.isRecycled }
+        if (bitmap == null) {
+            historicMapMessage = "Wait for the map image to load before auto-extract."
+            return
+        }
+        val transform = active.transformStorage?.let { GeoReferenceTransform.fromStorage(it) }
+            ?: active.controlPoints.takeIf { it.size >= 2 }?.let { GeoReferencer.fit(it).transform }
+        if (transform == null) {
+            historicMapMessage = "Fit control points first — auto-extract needs a georeference transform."
+            return
+        }
+        historicMapMessage = "Auto-extracting features…"
+        scope.launch(Dispatchers.Default) {
+            val w = bitmap.width
+            val h = bitmap.height
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+            val result = HistoricMapFeatureExtractor.extract(
+                pixels = pixels,
+                width = w,
+                height = h,
+                mapId = active.id,
+                transform = transform,
+            )
+            withContext(Dispatchers.IO) {
+                result.features.forEach { historicMapFeatureDao.upsert(it.toEntity()) }
+            }
+            withContext(Dispatchers.Main) {
+                historicMapMessage = result.note
+            }
+        }
+    }
+
     LaunchedEffect(googleMap, activeHistoricMap?.controlPoints, controlPointMode) {
         val map = googleMap ?: return@LaunchedEffect
         controlPointMarkers.forEach { it.remove() }
@@ -896,6 +932,7 @@ fun TerrainGoogleMapScreen(
                         ?: MapFeatureType.ROAD
                     addHistoricPointFeatureAtLastTap(type)
                 },
+                onAutoExtractFeatures = { autoExtractHistoricFeatures() },
                 onDeleteMapFeature = { deleteHistoricFeature(it) },
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 92.dp, end = 12.dp).width(280.dp),
             )
@@ -1276,6 +1313,7 @@ private fun HistoricMapPanel(
     onFeatureTypeSelected: (String) -> Unit = {},
     onAddFeatureFromControlPoints: () -> Unit = {},
     onAddPointFeatureAtLastTap: () -> Unit = {},
+    onAutoExtractFeatures: () -> Unit = {},
     onDeleteMapFeature: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -1539,12 +1577,21 @@ private fun HistoricMapPanel(
                     )
                 }
                 HorizontalDivider()
-                Text("Map features (manual)", style = MaterialTheme.typography.labelLarge)
+                Text("Map features", style = MaterialTheme.typography.labelLarge)
                 Text(
-                    "Trace roads, walls, structures, or boundaries from control points or a map tap.",
+                    "Auto-extract ink regions after Fit, or add features manually from control points / map tap. Drafts only — review before trusting.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Button(
+                    onClick = onAutoExtractFeatures,
+                    enabled = active.controlPoints.size >= 2 || active.transformStorage != null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("historic_feature_auto_extract"),
+                ) {
+                    Text("Auto-extract roads / walls / structures")
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1574,7 +1621,7 @@ private fun HistoricMapPanel(
                 }
                 if (mapFeatures.isEmpty()) {
                     Text(
-                        "No manual features yet for this map.",
+                        "No features yet for this map.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

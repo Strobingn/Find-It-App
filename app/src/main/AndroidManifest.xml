@@ -37,6 +37,11 @@
             android:name="com.google.android.geo.API_KEY"
             android:value="${MAPS_API_KEY}" />
 
+        <!-- Optional ARCore: world-anchor guidance uses Session when installed; else compass projection. -->
+        <meta-data
+            android:name="com.google.ar.core"
+            android:value="optional" />
+
         <service
             android:name=".data.download.LazDownloadService"
             android:exported="false"
