@@ -77,6 +77,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 import com.example.R
 import android.media.AudioManager
 import android.media.ToneGenerator
@@ -241,9 +242,11 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 navigate(AppDestination.LIBRARY)
             }
             AppDestination.COMPARE -> CompareTab(viewModel, padding)
-            AppDestination.TOOLS -> ToolsTab(viewModel, padding) { dest ->
-                navigate(dest)
-            }
+            AppDestination.TOOLS -> ToolsTab(
+                viewModel = viewModel,
+                padding = padding,
+                onNavigate = { dest -> navigate(dest) },
+            )
         }
     }
 }
@@ -293,6 +296,7 @@ private fun TerrainTab(
     val isReloadingSurface by viewModel.isReloadingSurface.collectAsStateWithLifecycle()
     val surfaceReloadMessage by viewModel.surfaceReloadMessage.collectAsStateWithLifecycle()
     val boundaryProximityAlert by viewModel.boundaryProximityAlert.collectAsStateWithLifecycle()
+    val terrainQuality by viewModel.terrainQuality.collectAsStateWithLifecycle()
     val surveyBoundaries by viewModel.surveyBoundaries.collectAsStateWithLifecycle()
     val vmViewportReset by viewModel.viewportResetKey.collectAsStateWithLifecycle()
     val vmViewportZoom by viewModel.viewportZoom.collectAsStateWithLifecycle()
@@ -754,6 +758,30 @@ private fun TerrainTab(
             }
         }
 
+        // Ground quality / CRS / density honesty banner (product pack) — mirrors Home scorecard.
+        terrainQuality?.let { quality ->
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
+                tonalElevation = 3.dp,
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 42.dp)
+                    .fillMaxWidth(0.96f)
+                    .testTag("terrain_quality_banner"),
+            ) {
+                Text(
+                    quality.bannerLine(),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
@@ -1021,6 +1049,9 @@ private fun CompareTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 
 @Composable
 private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    // Same key as AiAnalysisWorkspace so NAV_TARGET apply crosses AI → Finds.
+    val assistantViewModel: AiTerrainViewModel = composeViewModel(key = "ai_analysis_workspace")
+    val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
     val sweepX by viewModel.sweepX.collectAsStateWithLifecycle()
     val sweepY by viewModel.sweepY.collectAsStateWithLifecycle()
@@ -1037,6 +1068,21 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val navPlaylistIds by viewModel.navPlaylistIds.collectAsStateWithLifecycle()
     val navPlaylistIndex by viewModel.navPlaylistIndex.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // Auto-apply AI NAV_TARGET ids as multi-stop playlist when Finds is open.
+    LaunchedEffect(aiState.pendingNavTargetIds, signals) {
+        val ids = aiState.pendingNavTargetIds
+        if (ids.isEmpty()) return@LaunchedEffect
+        val geoMatched = ids.any { id ->
+            signals.any { s ->
+                s.id == id && (s.latitude != null || s.gpsLatitude != null) &&
+                    (s.longitude != null || s.gpsLongitude != null)
+            }
+        }
+        if (geoMatched) {
+            viewModel.setNavPlaylist(ids)
+            assistantViewModel.consumeNavTargets()
+        }
+    }
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }

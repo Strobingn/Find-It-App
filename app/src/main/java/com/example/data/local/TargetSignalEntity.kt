@@ -30,6 +30,7 @@ data class TargetSignalEntity(
     val datasetKey: String? = null,
     val terrainKey: String? = null,
     val detectedFeatureType: String? = null,
+    val starred: Boolean = false,
 )
 
 fun TargetSignal.toEntity() = TargetSignalEntity(
@@ -54,6 +55,7 @@ fun TargetSignal.toEntity() = TargetSignalEntity(
     datasetKey = datasetKey,
     terrainKey = terrainKey,
     detectedFeatureType = detectedFeatureType,
+    starred = starred,
 )
 
 fun TargetSignalEntity.toDomain() = TargetSignal(
@@ -78,6 +80,7 @@ fun TargetSignalEntity.toDomain() = TargetSignal(
     datasetKey = datasetKey,
     terrainKey = terrainKey,
     detectedFeatureType = detectedFeatureType,
+    starred = starred,
 )
 
 private inline fun <reified T : Enum<T>> enumValueOrDefault(value: String, fallback: T): T =
