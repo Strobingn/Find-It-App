@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Sync
@@ -34,6 +35,11 @@ import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.WbTwilight
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ai.FieldOfflineAssist
+import com.example.data.DetectionSource
+import com.example.data.MetalType
+import com.example.data.TargetSignal
 import com.example.data.download.LazDownloadQueue
 import com.example.data.export.ProjectArchiveImport
 import com.example.data.export.QrSharePayload
@@ -41,6 +47,7 @@ import com.example.data.field.BoundaryProximityLevel
 import com.example.data.field.FieldSessionStats
 import com.example.data.field.FieldSessionStatsCalculator
 import com.example.geospatial.DaylightPlanner
+import com.example.geospatial.GeoSpatialLibrary
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -78,6 +85,7 @@ import kotlinx.coroutines.withContext
 fun ToolsTab(
     viewModel: HillshadeViewModel,
     padding: PaddingValues,
+    aiViewModel: AiTerrainViewModel = viewModel(key = "ai_analysis_workspace"),
     onNavigate: (AppDestination) -> Unit,
 ) {
     val context = LocalContext.current
@@ -90,6 +98,7 @@ fun ToolsTab(
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
     val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
     val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    val activeTerrainKey by viewModel.activeTerrainKey.collectAsStateWithLifecycle()
     val activeGroundMode by viewModel.activeGroundMode.collectAsStateWithLifecycle()
     val activeClassPreset by viewModel.activeClassPreset.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
@@ -97,6 +106,7 @@ fun ToolsTab(
     val isReloadingSurface by viewModel.isReloadingSurface.collectAsStateWithLifecycle()
     val boundaryProximityAlert by viewModel.boundaryProximityAlert.collectAsStateWithLifecycle()
     val lastExportMessage by viewModel.lastExportMessage.collectAsStateWithLifecycle()
+    val aiState by aiViewModel.state.collectAsStateWithLifecycle()
 
     val deviceLat by viewModel.deviceLatitude.collectAsStateWithLifecycle()
     val deviceLon by viewModel.deviceLongitude.collectAsStateWithLifecycle()
@@ -109,10 +119,14 @@ fun ToolsTab(
     var pendingClippedLasBytes by remember { mutableStateOf(ByteArray(0)) }
     var pendingGeoPackageBytes by remember { mutableStateOf(ByteArray(0)) }
     var pendingAnnotatedMapBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingQgisBundleBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingGeoTiffBytes by remember { mutableStateOf(ByteArray(0)) }
     var isExportingSitePackage by remember { mutableStateOf(false) }
     var sitePackageStatus by remember { mutableStateOf<String?>(null) }
     var geoPackageStatus by remember { mutableStateOf<String?>(null) }
     var annotatedMapStatus by remember { mutableStateOf<String?>(null) }
+    var qgisExportStatus by remember { mutableStateOf<String?>(null) }
+    var coverageGapStatus by remember { mutableStateOf<String?>(null) }
     var shareStatus by remember { mutableStateOf<String?>(null) }
     var qrPayloadText by remember { mutableStateOf<String?>(null) }
     var archiveInspectStatus by remember { mutableStateOf<String?>(null) }
@@ -200,6 +214,38 @@ fun ToolsTab(
             archiveInspectStatus = "Inspect failed: ${it.localizedMessage}"
         }
     }
+    val qgisBundleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) {
+            qgisExportStatus = "QGIS bundle export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingQgisBundleBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            qgisExportStatus = "QGIS bundle saved (${pendingQgisBundleBytes.size} bytes)"
+        }.onFailure {
+            qgisExportStatus = "QGIS bundle failed: ${it.localizedMessage}"
+        }
+    }
+    val geoTiffLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("image/tiff"),
+    ) { uri ->
+        if (uri == null) {
+            qgisExportStatus = "GeoTIFF export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingGeoTiffBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            qgisExportStatus = "GeoTIFF saved (${pendingGeoTiffBytes.size} bytes)"
+        }.onFailure {
+            qgisExportStatus = "GeoTIFF failed: ${it.localizedMessage}"
+        }
+    }
     // Site center when georeferenced, live GPS fix otherwise; null hides the times gracefully.
     val daylightToday = remember(metadata, deviceLat, deviceLon) {
         val latLon = metadata.bounds?.let {
@@ -270,6 +316,80 @@ fun ToolsTab(
                 TextButton(
                     onClick = { onNavigate(AppDestination.MAP) },
                     modifier = Modifier.testTag("tool_open_coverage"),
+                ) { Text("Open map") }
+            }
+        }
+        item {
+            val candidateCount = aiState.localResult?.candidates?.size ?: 0
+            ToolCard(
+                icon = Icons.Default.MyLocation,
+                title = "Coverage gap targets",
+                status = coverageGapStatus ?: when {
+                    candidateCount > 0 ->
+                        "$candidateCount local candidate(s) · $recordedPoints trail pts · offline gaps"
+                    recordedPoints > 0 ->
+                        "No local analysis yet · $recordedPoints trail pts on map"
+                    else ->
+                        "Run AI local analysis or record GPS trails"
+                },
+                statusActive = candidateCount > 0 || recordedPoints > 0,
+                description = "Offline draft of unverified gap targets from high-score terrain " +
+                    "candidates away from logged finds (FieldOfflineAssist). Creates map markers " +
+                    "when candidates exist; otherwise opens the map sweep-coverage view from trail density. " +
+                    "LiDAR does not prove buried metal.",
+            ) {
+                TextButton(
+                    onClick = {
+                        val candidates = aiState.localResult?.candidates.orEmpty()
+                        if (candidates.isEmpty()) {
+                            coverageGapStatus = if (recordedPoints > 0) {
+                                "No candidates — open map for trail density coverage"
+                            } else {
+                                "Run local analysis on the AI tab first"
+                            }
+                            onNavigate(AppDestination.MAP)
+                            return@TextButton
+                        }
+                        val (text, gaps) = FieldOfflineAssist.coverageGapTargets(
+                            candidates = candidates,
+                            breadcrumbTracks = breadcrumbTracks,
+                            signals = loggedSignals,
+                        )
+                        if (gaps.isEmpty()) {
+                            coverageGapStatus = text.lineSequence().firstOrNull()
+                                ?: "No gap targets selected"
+                            return@TextButton
+                        }
+                        gaps.forEach { gap ->
+                            val coordinate = GeoSpatialLibrary.gridToGeographic(
+                                gap.xPercent,
+                                gap.yPercent,
+                                metadata,
+                            )
+                            viewModel.updateLoggedSignal(
+                                TargetSignal(
+                                    gridX = gap.xPercent.coerceIn(0f, 100f),
+                                    gridY = gap.yPercent.coerceIn(0f, 100f),
+                                    metalType = MetalType.MANUAL_MARKER,
+                                    signalStrength = (gap.confidence * 100f).coerceIn(0f, 100f),
+                                    latitude = coordinate?.first,
+                                    longitude = coordinate?.second,
+                                    source = DetectionSource.AI_ANALYSIS,
+                                    notes = gap.label,
+                                    status = "Coverage gap",
+                                    datasetKey = aiState.localResult?.datasetKey,
+                                    terrainKey = activeTerrainKey,
+                                ),
+                            )
+                        }
+                        coverageGapStatus = "Placed ${gaps.size} gap marker(s) on map"
+                        onNavigate(AppDestination.MAP)
+                    },
+                    modifier = Modifier.testTag("tool_coverage_gap_targets"),
+                ) { Text("Coverage gap targets") }
+                TextButton(
+                    onClick = { onNavigate(AppDestination.MAP) },
+                    modifier = Modifier.testTag("tool_coverage_gap_open_map"),
                 ) { Text("Open map") }
             }
         }
@@ -690,6 +810,79 @@ fun ToolsTab(
                     enabled = terrainReady,
                     modifier = Modifier.testTag("tool_annotated_map_export"),
                 ) { Text("Export map zip") }
+            }
+        }
+        item {
+            val georefReady = terrainReady && metadata.isGeoreferenced
+            ToolCard(
+                icon = Icons.Default.Layers,
+                title = "QGIS / GeoTIFF export",
+                status = qgisExportStatus ?: when {
+                    !terrainReady -> "Load a terrain first"
+                    !metadata.isGeoreferenced -> "Needs georeferenced terrain (real bounds)"
+                    else -> "Ready · GeoTIFF + shapefile targets + .qgs"
+                },
+                statusActive = georefReady,
+                description = "QGIS-ready zip (bare-earth GeoTIFF, find shapefile, project.qgs) for " +
+                    "desktop GIS. Standalone GeoTIFF is the same elevation raster without the " +
+                    "vector/project extras. Local grids without bounds cannot be exported safely.",
+            ) {
+                TextButton(
+                    onClick = {
+                        if (!georefReady) {
+                            qgisExportStatus = "Needs a georeferenced terrain with bounds"
+                            return@TextButton
+                        }
+                        qgisExportStatus = "Building QGIS bundle…"
+                        scope.launch {
+                            runCatching { viewModel.buildQgisBundleBytes() }
+                                .onSuccess { bytes ->
+                                    if (bytes == null) {
+                                        qgisExportStatus =
+                                            "This terrain has no geographic bounds, so a GeoTIFF/QGIS bundle cannot be placed safely."
+                                    } else {
+                                        pendingQgisBundleBytes = bytes
+                                        qgisBundleLauncher.launch(
+                                            "find-it-qgis-bundle-${System.currentTimeMillis()}.zip",
+                                        )
+                                    }
+                                }
+                                .onFailure {
+                                    qgisExportStatus = "QGIS bundle failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    enabled = georefReady,
+                    modifier = Modifier.testTag("tool_qgis_bundle_export"),
+                ) { Text("Export QGIS bundle") }
+                TextButton(
+                    onClick = {
+                        if (!georefReady) {
+                            qgisExportStatus = "Needs a georeferenced terrain with bounds"
+                            return@TextButton
+                        }
+                        qgisExportStatus = "Building GeoTIFF…"
+                        scope.launch {
+                            runCatching { viewModel.buildGeoTiffBytes() }
+                                .onSuccess { bytes ->
+                                    if (bytes == null) {
+                                        qgisExportStatus =
+                                            "This terrain has no geographic bounds, so a GeoTIFF cannot be placed safely."
+                                    } else {
+                                        pendingGeoTiffBytes = bytes
+                                        geoTiffLauncher.launch(
+                                            "find-it-terrain-${System.currentTimeMillis()}.tif",
+                                        )
+                                    }
+                                }
+                                .onFailure {
+                                    qgisExportStatus = "GeoTIFF failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    enabled = georefReady,
+                    modifier = Modifier.testTag("tool_geotiff_export"),
+                ) { Text("Export GeoTIFF") }
             }
         }
         item {

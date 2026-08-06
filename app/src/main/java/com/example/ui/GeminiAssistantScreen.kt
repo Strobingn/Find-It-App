@@ -57,6 +57,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ai.FieldAiCopilot
+import com.example.ai.FieldAiFeature
+import com.example.ai.FieldAiSessionPack
 import com.example.ai.GeminiApiClient
 import com.example.ai.GeminiConversationTurn
 import com.example.ai.GeminiTerrainImageEncoder
@@ -184,6 +187,24 @@ data class AiTerrainState(
     val rankedCandidates: List<RankedCandidate>? = null,
     val rankerMessage: String? = null,
     val isTrainingRanker: Boolean = false,
+    /** Hillshade azimuth from LIGHTING_ADVISOR; consumed by the terrain UI then cleared. */
+    val pendingLightingAzimuth: Float? = null,
+    /** Hillshade altitude from LIGHTING_ADVISOR; consumed by the terrain UI then cleared. */
+    val pendingLightingAltitude: Float? = null,
+    /** Viz mode index from VIZ_MODE= tag; consumed by the terrain UI then cleared. */
+    val pendingVizMode: Int? = null,
+    /** Signal ids from NAV_TARGET id= tags; consumed by navigation UI then cleared. */
+    val pendingNavTargetIds: List<Long> = emptyList(),
+    /** Suggested metal type from voice/photo structured assist; user confirms before write. */
+    val pendingMetalType: String? = null,
+    /** Suggested verification outcome from voice/photo structured assist. */
+    val pendingOutcome: String? = null,
+    /** Suggested find status from voice/photo structured assist. */
+    val pendingStatus: String? = null,
+    /** Cleaned notes suggestion from voice/photo structured assist. */
+    val pendingStructuredNotes: String? = null,
+    /** Title of the last Field AI feature that completed successfully. */
+    val lastFieldFeature: String? = null,
 )
 
 class AiTerrainViewModel(application: Application) : AndroidViewModel(application) {
@@ -610,6 +631,236 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                         _state.value.cloudMapTargets
                     },
                     cloudTerrainKey = if (cloudTargets.isNotEmpty()) terrainKey else _state.value.cloudTerrainKey,
+                ).withProviderStatus()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    isSending = false,
+                    cloudError = error.localizedMessage ?: "Cloud AI request failed",
+                    cloudStage = "Cloud AI request stopped",
+                ).withProviderStatus()
+            }
+        }
+    }
+
+    fun clearPendingLighting() {
+        _state.value = _state.value.copy(
+            pendingLightingAzimuth = null,
+            pendingLightingAltitude = null,
+        )
+    }
+
+    /** Clears just the pending nav-target handoff once the Finds tab has applied it as a route target. */
+    fun consumeNavTargets() {
+        _state.value = _state.value.copy(pendingNavTargetIds = emptyList())
+    }
+
+    /** Clears pack-3 structured action tags (viz, nav, metal, outcome, status, notes). Does not clear lighting. */
+    fun clearPendingStructuredActions() {
+        _state.value = _state.value.copy(
+            pendingVizMode = null,
+            pendingNavTargetIds = emptyList(),
+            pendingMetalType = null,
+            pendingOutcome = null,
+            pendingStatus = null,
+            pendingStructuredNotes = null,
+        )
+    }
+
+    /**
+     * Posts an offline (no network) assist result into the conversation.
+     * Optional [mapTargets] replace [AiTerrainState.cloudMapTargets] when non-empty.
+     * Parses `NAV_TARGET id=` lines into [AiTerrainState.pendingNavTargetIds].
+     */
+    fun postOfflineAssist(
+        title: String,
+        body: String,
+        mapTargets: List<CloudMapTarget> = emptyList(),
+        terrainKey: String? = null,
+    ) {
+        val userMessage = AiMessage(
+            id = ids.getAndIncrement(),
+            role = AiMessageRole.USER,
+            text = title,
+        )
+        val modelMessage = AiMessage(
+            id = ids.getAndIncrement(),
+            role = AiMessageRole.MODEL,
+            text = body,
+            provider = null,
+        )
+        val navTargetIds = FieldAiCopilot.parseNavTargetIds(body)
+        _state.value = _state.value.copy(
+            messages = _state.value.messages + userMessage + modelMessage,
+            cloudError = null,
+            cloudStage = "Offline assist ready",
+            cloudMapTargets = if (mapTargets.isNotEmpty()) mapTargets else _state.value.cloudMapTargets,
+            cloudTerrainKey = if (mapTargets.isNotEmpty()) {
+                terrainKey ?: _state.value.cloudTerrainKey
+            } else {
+                _state.value.cloudTerrainKey
+            },
+            pendingNavTargetIds = if (navTargetIds.isNotEmpty()) {
+                navTargetIds
+            } else {
+                _state.value.pendingNavTargetIds
+            },
+            lastFieldFeature = title,
+        ).withProviderStatus()
+    }
+
+    /**
+     * Runs one of the twenty Field AI specialist features through [TerrainAiGateway]
+     * (OpenAI primary / Gemini fallback). Structured tags are stored on state for UI apply:
+     * lighting ([AiTerrainState.pendingLightingAzimuth] / [AiTerrainState.pendingLightingAltitude]),
+     * viz mode ([AiTerrainState.pendingVizMode]), nav targets ([AiTerrainState.pendingNavTargetIds]),
+     * and voice/photo find fields (metal / outcome / status / notes).
+     */
+    fun runFieldAiFeature(
+        feature: FieldAiFeature,
+        pack: FieldAiSessionPack,
+        viewport: TerrainVisionSnapshot,
+        attachViewportImage: Boolean,
+        terrainKey: String? = null,
+    ) {
+        if (_state.value.isSending) return
+        val preference = _state.value.providerPreference
+        if (TerrainAiGateway.preferredProvider(appContext) == null) {
+            _state.value = _state.value.copy(
+                cloudError = "Add an OpenAI key for the primary provider or a Gemini key for fallback. Offline analysis still works without a key.",
+            )
+            return
+        }
+
+        val wantsImage = attachViewportImage && feature.prefersViewportImage
+        val canAttachImage = wantsImage &&
+            viewport.bitmap?.let { !it.isRecycled && it.width > 0 && it.height > 0 } == true
+        val imageFallbackNote = if (wantsImage && !canAttachImage) {
+            " (viewport image unavailable — text-only)"
+        } else {
+            ""
+        }
+
+        val userPrompt = FieldAiCopilot.buildUserPrompt(feature, pack)
+        val displayText = buildString {
+            append(feature.title)
+            append('\n')
+            append(userPrompt.take(4000))
+        }
+        val userMessage = AiMessage(
+            id = ids.getAndIncrement(),
+            role = AiMessageRole.USER,
+            text = displayText,
+            usedViewportImage = canAttachImage,
+        )
+        val withUser = _state.value.messages + userMessage
+        _state.value = _state.value.copy(
+            messages = withUser,
+            isSending = true,
+            cloudError = null,
+            cloudStage = if (canAttachImage) {
+                "Preparing ${feature.title} with viewport image…"
+            } else {
+                "Running ${feature.title}$imageFallbackNote…"
+            },
+        )
+
+        viewModelScope.launch {
+            try {
+                val image = if (canAttachImage) {
+                    withContext(Dispatchers.Default) { GeminiTerrainImageEncoder.encode(viewport) }
+                } else {
+                    null
+                }
+                // Prefer text-only when encode fails rather than hard-failing the feature.
+                val usedImage = image != null
+                val systemContext = buildString {
+                    append(pack.terrainContext)
+                    append("\n\n")
+                    append(FieldAiCopilot.buildSystemAddendum(feature))
+                }
+                val answer = gateway.generate(
+                    conversation = withUser.map {
+                        GeminiConversationTurn(
+                            role = if (it.role == AiMessageRole.MODEL) "model" else "user",
+                            text = it.text,
+                        )
+                    },
+                    systemContext = systemContext,
+                    image = image,
+                    requestedProvider = preference,
+                    onProviderStage = { stage ->
+                        _state.value = _state.value.copy(cloudStage = stage)
+                    },
+                )
+                val cloudTargets = if (usedImage) {
+                    parseCloudMapTargets(answer.text, viewport.bounds)
+                } else {
+                    emptyList()
+                }
+                val fallbackNote = answer.fallbackReason?.let {
+                    "\n\nFallback used because OpenAI returned: $it"
+                }.orEmpty()
+                val lighting = if (feature == FieldAiFeature.LIGHTING_ADVISOR) {
+                    FieldAiCopilot.parseLightingRecommendation(answer.text)
+                } else {
+                    null
+                }
+                val navTargetIds = FieldAiCopilot.parseNavTargetIds(answer.text)
+                val vizMode = FieldAiCopilot.parseVizMode(answer.text)
+                val structuredFind = feature == FieldAiFeature.VOICE_STRUCTURED_FIND ||
+                    feature == FieldAiFeature.PHOTO_CATALOG_ASSIST
+                val metalType = if (structuredFind) {
+                    FieldAiCopilot.parseMetalTypeSuggestion(answer.text)
+                } else {
+                    null
+                }
+                val outcome = if (structuredFind) {
+                    FieldAiCopilot.parseOutcomeSuggestion(answer.text)
+                } else {
+                    null
+                }
+                val status = if (structuredFind) {
+                    FieldAiCopilot.parseStatusSuggestion(answer.text)
+                } else {
+                    null
+                }
+                val structuredNotes = if (structuredFind) {
+                    FieldAiCopilot.parseNotesSuggestion(answer.text)
+                } else {
+                    null
+                }
+                _state.value = _state.value.copy(
+                    messages = _state.value.messages + AiMessage(
+                        id = ids.getAndIncrement(),
+                        role = AiMessageRole.MODEL,
+                        text = removeCloudMapTargetTags(answer.text) + fallbackNote,
+                        provider = answer.provider,
+                        usedViewportImage = usedImage,
+                    ),
+                    isSending = false,
+                    cloudError = null,
+                    cloudStage = "Completed ${feature.title} with ${answer.provider.label}",
+                    cloudMapTargets = if (cloudTargets.isNotEmpty()) {
+                        cloudTargets
+                    } else {
+                        _state.value.cloudMapTargets
+                    },
+                    cloudTerrainKey = if (cloudTargets.isNotEmpty()) terrainKey else _state.value.cloudTerrainKey,
+                    pendingLightingAzimuth = lighting?.azimuth ?: _state.value.pendingLightingAzimuth,
+                    pendingLightingAltitude = lighting?.altitude ?: _state.value.pendingLightingAltitude,
+                    pendingVizMode = vizMode ?: _state.value.pendingVizMode,
+                    pendingNavTargetIds = if (navTargetIds.isNotEmpty()) {
+                        navTargetIds
+                    } else {
+                        _state.value.pendingNavTargetIds
+                    },
+                    pendingMetalType = metalType ?: _state.value.pendingMetalType,
+                    pendingOutcome = outcome ?: _state.value.pendingOutcome,
+                    pendingStatus = status ?: _state.value.pendingStatus,
+                    pendingStructuredNotes = structuredNotes ?: _state.value.pendingStructuredNotes,
+                    lastFieldFeature = feature.title,
                 ).withProviderStatus()
             } catch (cancelled: CancellationException) {
                 throw cancelled

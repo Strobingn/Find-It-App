@@ -1823,6 +1823,27 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
+     * Standalone GeoTIFF of the full-source bare-earth grid. Null when the terrain has no
+     * real geographic bounds (local-only grids cannot be placed safely in GIS).
+     */
+    suspend fun buildGeoTiffBytes(): ByteArray? = renderMutex.withLock {
+        withContext(Dispatchers.Default) {
+            val fullResult = overviewTerrain
+            val exportGrid = fullResult?.grid ?: _elevationGrid.value
+            val metadata = fullResult?.geoMetadata ?: _activeGeoMetadata.value
+            val bounds = metadata.bounds ?: return@withContext null
+            if (exportGrid.width < 2 || exportGrid.height < 2) return@withContext null
+            GeoTiffWriter.writeElevation(
+                grid = exportGrid,
+                westLongitude = bounds.minLon,
+                northLatitude = bounds.maxLat,
+                cellWidthDegrees = (bounds.maxLon - bounds.minLon) / (exportGrid.width - 1),
+                cellHeightDegrees = (bounds.maxLat - bounds.minLat) / (exportGrid.height - 1),
+            )
+        }
+    }
+
+    /**
      * QGIS-ready bundle: GeoTIFF of the full-source bare-earth grid, the targets as a
      * shapefile, and a .qgs that opens both. Null when the terrain has no real bounds.
      */
