@@ -112,6 +112,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.cos
+import kotlin.math.roundToInt
 
 @Composable
 fun TargetLoggerPanel(
@@ -638,6 +639,7 @@ fun TargetLoggerPanel(
             } else {
                 null
             },
+            compassHeadingDegrees = compassHeadingDegrees,
             onDismiss = { editingSignal = null },
             onSave = {
                 onUpdateSignal(it)
@@ -1008,6 +1010,7 @@ private fun EditSignalDialog(
     signal: TargetSignal,
     excavationLogs: List<ExcavationLogEntry> = emptyList(),
     surfaceZSample: SurfaceZSample? = null,
+    compassHeadingDegrees: Float? = null,
     onDismiss: () -> Unit,
     onSave: (TargetSignal) -> Unit,
     onSaveExcavationLog: (ExcavationLogEntry) -> Unit = {},
@@ -1109,7 +1112,8 @@ private fun EditSignalDialog(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
             }
-            photoUris = (photoUris + uri.toString()).distinct().take(10)
+            val encoded = encodeDirectionalPhotoUri(uri.toString(), compassHeadingDegrees)
+            photoUris = (photoUris + encoded).distinct().take(10)
         }
     }
     var notes by remember(signal.id) { mutableStateOf(signal.notes) }
@@ -1188,17 +1192,18 @@ private fun EditSignalDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text("Photos (${photoUris.size}/10)", style = MaterialTheme.typography.titleSmall)
-                photoUris.forEach { photoUri ->
+                photoUris.forEachIndexed { index, photoUri ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            photoUri.substringAfterLast('/').takeLast(32),
+                            directionalPhotoLabel(index + 1, photoUri),
                             modifier = Modifier.weight(1f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        // Match by full encoded string so bearing-tagged URIs remove cleanly.
                         TextButton(onClick = { photoUris = photoUris - photoUri }) { Text("Remove") }
                     }
                 }
@@ -1213,7 +1218,13 @@ private fun EditSignalDialog(
                 ) {
                     Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Add photo")
+                    Text(
+                        if (compassHeadingDegrees != null) {
+                            "Add photo · ${compassHeadingDegrees.roundToInt()}°"
+                        } else {
+                            "Add photo"
+                        },
+                    )
                 }
                 Text("Voice notes (${voiceNoteUris.size}/10)", style = MaterialTheme.typography.titleSmall)
                 voiceNoteUris.forEachIndexed { index, voiceUri ->
@@ -1327,6 +1338,7 @@ private fun EditSignalDialog(
                 }
                 ExcavationLogSection(
                     logs = excavationLogs,
+                    compassHeadingDegrees = compassHeadingDegrees,
                     onStart = onStartExcavationLog,
                     onSave = onSaveExcavationLog,
                     onDelete = onDeleteExcavationLog,
@@ -1367,6 +1379,7 @@ private fun EditSignalDialog(
 @Composable
 private fun ExcavationLogSection(
     logs: List<ExcavationLogEntry>,
+    compassHeadingDegrees: Float? = null,
     onStart: () -> ExcavationLogEntry?,
     onSave: (ExcavationLogEntry) -> Unit,
     onDelete: (ExcavationLogEntry) -> Unit,
@@ -1514,7 +1527,8 @@ private fun ExcavationLogSection(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
             }
-            digPhotoUris = (digPhotoUris + uri.toString()).distinct().take(10)
+            val encoded = encodeDirectionalPhotoUri(uri.toString(), compassHeadingDegrees)
+            digPhotoUris = (digPhotoUris + encoded).distinct().take(10)
         }
     }
 
@@ -1936,10 +1950,11 @@ private fun OfflineSyncQueueCard(
             Text("Offline sync queue", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
                 if (entries.isEmpty()) {
-                    "Local field changes stay on-device. When a cloud endpoint is available (Phase 9), " +
-                        "queued upserts and deletes replay in order without duplicates."
+                    "Local field changes stay on-device. Conflict resolver ready · cloud sync not " +
+                        "started (Phase 9). Queued upserts/deletes will replay in order without duplicates."
                 } else {
-                    "${entries.size} change(s) waiting to sync. Oldest first; failed sends keep their attempt count."
+                    "${entries.size} change(s) waiting to sync. Oldest first; failed sends and " +
+                        "revision conflicts keep their attempt count / note."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2477,22 +2492,55 @@ private fun ExcavationLogsDialog(
 private fun formatDigLogTime(millis: Long): String =
     SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(millis))
 
-/** Ordered dig-photo timeline label: "Photo N · name" and file lastModified when URI is file://. */
+/**
+ * Stores a content/file URI with optional compass bearing so field photos keep direction.
+ * Format: `uri|bearing=123` — strip with [decodeDirectionalPhotoUri] for file ops.
+ */
+internal fun encodeDirectionalPhotoUri(uri: String, bearingDegrees: Float?): String {
+    if (bearingDegrees == null || !bearingDegrees.isFinite()) return uri
+    val clean = uri.substringBefore("|bearing=")
+    return "$clean|bearing=${bearingDegrees.roundToInt()}"
+}
+
+/** Returns the raw URI and optional bearing degrees from an encoded photo string. */
+internal fun decodeDirectionalPhotoUri(encoded: String): Pair<String, Float?> {
+    val marker = "|bearing="
+    val idx = encoded.lastIndexOf(marker)
+    if (idx < 0) return encoded to null
+    val uri = encoded.substring(0, idx)
+    val bearing = encoded.substring(idx + marker.length).toFloatOrNull()
+    return uri to bearing
+}
+
+/** Find-photo label: "Photo N · 123°" when bearing is present, else filename tail. */
+internal fun directionalPhotoLabel(order: Int, encoded: String): String {
+    val (uri, bearing) = decodeDirectionalPhotoUri(encoded)
+    val name = uri.substringAfterLast('/').takeLast(28).ifBlank { "#$order" }
+    return if (bearing != null) {
+        "Photo $order · ${bearing.roundToInt()}° · $name"
+    } else {
+        "Photo $order · $name"
+    }
+}
+
+/** Ordered dig-photo timeline label: "Photo N · bearing · name" and file lastModified when file://. */
 internal fun digPhotoTimelineLabel(order: Int, photoUri: String): String {
-    val name = photoUri.substringAfterLast('/').takeLast(28).ifBlank { "#$order" }
+    val (uri, bearing) = decodeDirectionalPhotoUri(photoUri)
+    val name = uri.substringAfterLast('/').takeLast(28).ifBlank { "#$order" }
     val timePart = runCatching {
-        val uri = Uri.parse(photoUri)
-        if (uri.scheme.equals("file", ignoreCase = true)) {
-            val path = uri.path ?: return@runCatching null
+        val parsed = Uri.parse(uri)
+        if (parsed.scheme.equals("file", ignoreCase = true)) {
+            val path = parsed.path ?: return@runCatching null
             val file = File(path)
             if (file.isFile && file.lastModified() > 0L) {
                 SimpleDateFormat("MMM d HH:mm", Locale.US).format(Date(file.lastModified()))
             } else null
         } else null
     }.getOrNull()
-    return if (timePart != null) {
-        "Photo $order · $name · $timePart"
-    } else {
-        "Photo $order · $name"
+    return buildString {
+        append("Photo $order")
+        if (bearing != null) append(" · ${bearing.roundToInt()}°")
+        append(" · $name")
+        if (timePart != null) append(" · $timePart")
     }
 }

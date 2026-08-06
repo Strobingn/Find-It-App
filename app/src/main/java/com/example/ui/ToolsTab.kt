@@ -674,8 +674,8 @@ fun ToolsTab(
                 },
                 statusActive = pendingSyncCount > 0,
                 description = "Every target, dig log, trail, and boundary change is coalesced " +
-                    "into an ordered offline queue (delete-wins, no silent drops). Cloud delivery " +
-                    "is Phase 9; the queue is durable today.",
+                    "into an ordered offline queue (delete-wins, no silent drops). Conflict " +
+                    "resolver ready · cloud sync not started (Phase 9).",
             ) {
                 TextButton(
                     onClick = { onNavigate(AppDestination.FIELD) },

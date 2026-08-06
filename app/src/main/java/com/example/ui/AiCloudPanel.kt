@@ -1,6 +1,10 @@
 package com.example.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +26,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -68,6 +73,7 @@ import com.example.data.MetalType
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
+import java.util.Locale
 
 /**
  * Built-in AI field prompts for metal-detecting / historic-site work.
@@ -303,6 +309,58 @@ fun AiCloudPanel(
             localResult = state.localResult,
             freeformNotes = "",
         )
+    }
+
+    var speechError by remember { mutableStateOf<String?>(null) }
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val spoken = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (spoken.isBlank()) {
+            if (result.resultCode != android.app.Activity.RESULT_OK) {
+                speechError = "Speech recognition canceled or returned no text."
+            }
+            return@rememberLauncherForActivityResult
+        }
+        speechError = null
+        draft = spoken
+        val pack = baseFieldPack.copy(freeformNotes = spoken)
+        assistantViewModel.runFieldAiFeature(
+            feature = FieldAiFeature.VOICE_STRUCTURED_FIND,
+            pack = pack,
+            viewport = viewport,
+            attachViewportImage = false,
+            terrainKey = terrainKey,
+        )
+    }
+
+    fun launchStructuredFindDictation() {
+        speechError = null
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Describe the find for structured logging")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        val canHandle = intent.resolveActivity(context.packageManager) != null
+        if (!canHandle) {
+            speechError = "No speech recognition app is available on this device."
+            return
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            speechError = "Speech recognition is not available."
+        } catch (error: Exception) {
+            speechError = error.localizedMessage ?: "Could not start speech recognition."
+        }
     }
 
     LazyColumn(
@@ -561,6 +619,32 @@ fun AiCloudPanel(
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { launchStructuredFindDictation() },
+                    enabled = !state.isSending && state.activeProvider != null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(CompactButtonHeight)
+                        .testTag("ai_voice_structured_dictate"),
+                    contentPadding = CompactButtonPadding,
+                ) {
+                    Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.height(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Dictate for structured find", style = MaterialTheme.typography.labelSmall)
+                }
+                Text(
+                    "Uses device speech recognition",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                speechError?.let { err ->
+                    Text(
+                        err,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("ai_voice_structured_error"),
                     )
                 }
                 Row(

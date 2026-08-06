@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -39,8 +40,8 @@ import com.example.geospatial.MeasurementFormat
 import java.util.Locale
 
 /**
- * Compact cell-metrics card. Viewshed is intentionally not embedded here — it has its own
- * [ViewshedCard] so the terrain canvas stays readable.
+ * Compact cell-metrics card. Viewshed / horizon results live on their own cards so the terrain
+ * canvas stays readable.
  */
 @Composable
 fun TerrainCellInspectionPanel(
@@ -50,6 +51,9 @@ fun TerrainCellInspectionPanel(
     isComputingViewshed: Boolean = false,
     canComputeViewshed: Boolean = true,
     onComputeViewshed: () -> Unit = {},
+    isComputingHorizon: Boolean = false,
+    canComputeHorizon: Boolean = true,
+    onComputeHorizon: () -> Unit = {},
 ) {
     Card(
         colors = CardDefaults.cardColors(
@@ -124,27 +128,50 @@ fun TerrainCellInspectionPanel(
             } else {
                 InspectionValue("Coordinate", "Local grid")
             }
-            // Compact action only — results + map overlay live on ViewshedCard / canvas.
-            OutlinedButton(
-                onClick = onComputeViewshed,
-                enabled = inspection.valid && canComputeViewshed && !isComputingViewshed,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(44.dp)
-                    .testTag("compute_viewshed_button"),
+            // Compact actions — results live on ViewshedCard / HorizonCard so the map stays free.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (isComputingViewshed) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Computing…")
-                } else {
-                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Viewshed from here")
+                OutlinedButton(
+                    onClick = onComputeViewshed,
+                    enabled = inspection.valid && canComputeViewshed && !isComputingViewshed && !isComputingHorizon,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .testTag("compute_viewshed_button"),
+                ) {
+                    if (isComputingViewshed) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text("…")
+                    } else {
+                        Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Viewshed")
+                    }
+                }
+                OutlinedButton(
+                    onClick = onComputeHorizon,
+                    enabled = inspection.valid && canComputeHorizon && !isComputingHorizon && !isComputingViewshed,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .testTag("compute_horizon_button"),
+                ) {
+                    if (isComputingHorizon) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text("…")
+                    } else {
+                        Icon(Icons.Default.Explore, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Horizon")
+                    }
                 }
             }
             Text(
-                "Result draws on the map; status opens in a small card.",
+                "Viewshed draws on the map; horizon reports open azimuths in a card.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

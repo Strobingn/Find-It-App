@@ -100,13 +100,17 @@ import com.example.data.historicmap.GeoReferencedMap
 import com.example.data.historicmap.GeoReferencer
 import com.example.data.historicmap.HistoricMapAgreementScorer
 import com.example.data.historicmap.HistoricMapControlPoint
+import com.example.data.historicmap.HistoricMapFeature
 import com.example.data.historicmap.HistoricMapGeoreference
 import com.example.data.historicmap.MapFeatureAgreement
+import com.example.data.historicmap.MapFeatureType
+import com.example.data.field.BoundaryVertex
 import com.example.data.field.BreadcrumbTrack
 import com.example.data.field.FieldWaypoint
 import com.example.data.field.SweepCoverageGrid
 import com.example.data.field.SweepCoverageTracker
 import com.example.data.local.AppDatabase
+import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.data.survey.SurveyFeature
 import com.example.data.survey.SurveyGeometryType
@@ -127,9 +131,11 @@ import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
 import java.io.File
 import java.util.Locale
+import java.util.UUID
 import java.security.MessageDigest
 import kotlin.math.cos
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -195,6 +201,10 @@ fun TerrainGoogleMapScreen(
     var showSideBySide by rememberSaveable { mutableStateOf(false) }
     var controlPointMarkers by remember { mutableStateOf<List<Marker>>(emptyList()) }
     val historicMapDao = remember(context) { AppDatabase.get(context).historicMapDao() }
+    val historicMapFeatureDao = remember(context) { AppDatabase.get(context).historicMapFeatureDao() }
+    var historicFeatures by remember { mutableStateOf<List<HistoricMapFeature>>(emptyList()) }
+    var selectedFeatureType by rememberSaveable { mutableStateOf(MapFeatureType.ROAD.name) }
+    var lastMapTapLatLng by remember { mutableStateOf<LatLng?>(null) }
 
     // Live terrain-agreement feedback for the map being aligned: a relief-contrast evidence
     // layer is built once per terrain grid, then the active map's ink is scored against it.
@@ -271,6 +281,17 @@ fun TerrainGoogleMapScreen(
 
     val activeHistoricMap = historicMaps.firstOrNull { it.id == activeHistoricMapId }
     val activeHistoricBitmap = activeHistoricMap?.let { historicBitmaps[it.id] }
+
+    LaunchedEffect(activeHistoricMapId, historicMapFeatureDao) {
+        val mapId = activeHistoricMapId
+        if (mapId == null) {
+            historicFeatures = emptyList()
+            return@LaunchedEffect
+        }
+        historicMapFeatureDao.observeByMapId(mapId).collectLatest { rows ->
+            historicFeatures = rows.map { it.toDomain() }
+        }
+    }
     val historicAgreement by produceState<MapFeatureAgreement?>(
         null,
         reliefEvidence,
@@ -531,12 +552,68 @@ fun TerrainGoogleMapScreen(
     }
 
     // Keep the map-click handler on current control-point state (mapAsync captures once).
+    // Always remember the latest tap for point-feature placement when a historic map is active.
     LaunchedEffect(googleMap, controlPointMode, activeHistoricMapId, pendingImageXFraction, pendingImageYFraction, historicMaps) {
         val map = googleMap ?: return@LaunchedEffect
-        if (controlPointMode && activeHistoricMapId != null) {
-            map.setOnMapClickListener { latLng -> addControlPointAt(latLng) }
+        if (activeHistoricMapId != null) {
+            map.setOnMapClickListener { latLng ->
+                lastMapTapLatLng = latLng
+                if (controlPointMode) addControlPointAt(latLng)
+            }
         } else {
             map.setOnMapClickListener(null)
+        }
+    }
+
+    fun addHistoricFeatureFromControlPoints(type: MapFeatureType) {
+        val active = historicMaps.firstOrNull { it.id == activeHistoricMapId } ?: return
+        if (active.controlPoints.size < 2) {
+            historicMapMessage = "Need at least 2 control points to build a polyline feature."
+            return
+        }
+        val points = active.controlPoints.takeLast(2).map {
+            BoundaryVertex(it.latitude, it.longitude)
+        }
+        val feature = HistoricMapFeature(
+            id = UUID.randomUUID().toString(),
+            mapId = active.id,
+            type = type,
+            points = points,
+            confidence = 0.7f,
+            note = "Manual · last 2 control points",
+            createdAtMillis = System.currentTimeMillis(),
+        )
+        scope.launch(Dispatchers.IO) {
+            historicMapFeatureDao.upsert(feature.toEntity())
+        }
+        historicMapMessage = "Added ${type.label} from last 2 control points."
+    }
+
+    fun addHistoricPointFeatureAtLastTap(type: MapFeatureType) {
+        val active = historicMaps.firstOrNull { it.id == activeHistoricMapId } ?: return
+        val tap = lastMapTapLatLng
+        if (tap == null) {
+            historicMapMessage = "Tap the map first to place a point feature."
+            return
+        }
+        val feature = HistoricMapFeature(
+            id = UUID.randomUUID().toString(),
+            mapId = active.id,
+            type = type,
+            points = listOf(BoundaryVertex(tap.latitude, tap.longitude)),
+            confidence = 0.6f,
+            note = "Manual · map tap",
+            createdAtMillis = System.currentTimeMillis(),
+        )
+        scope.launch(Dispatchers.IO) {
+            historicMapFeatureDao.upsert(feature.toEntity())
+        }
+        historicMapMessage = "Added ${type.label} at last map tap."
+    }
+
+    fun deleteHistoricFeature(featureId: String) {
+        scope.launch(Dispatchers.IO) {
+            historicMapFeatureDao.deleteById(featureId)
         }
     }
 
@@ -753,10 +830,7 @@ fun TerrainGoogleMapScreen(
                 onToggleVisible = { record -> updateHistoricMap(record.copy(visible = !record.visible)) },
                 onDelete = { record ->
                     historicMapRepository.delete(record)
-                    scope.launch(Dispatchers.IO) {
-                        historicMapDao.deleteById(record.id)
-                        historicMapFeatureDao.deleteByMapId(record.id)
-                    }
+                    scope.launch(Dispatchers.IO) { historicMapDao.deleteById(record.id) }
                     refreshHistoricMaps()
                     if (activeHistoricMapId == record.id) activeHistoricMapId = null
                 },
@@ -809,6 +883,20 @@ fun TerrainGoogleMapScreen(
                     historicPanelExpanded = false
                     controlPointMode = false
                 },
+                mapFeatures = historicFeatures,
+                selectedFeatureTypeName = selectedFeatureType,
+                onFeatureTypeSelected = { selectedFeatureType = it },
+                onAddFeatureFromControlPoints = {
+                    val type = MapFeatureType.entries.firstOrNull { it.name == selectedFeatureType }
+                        ?: MapFeatureType.ROAD
+                    addHistoricFeatureFromControlPoints(type)
+                },
+                onAddPointFeatureAtLastTap = {
+                    val type = MapFeatureType.entries.firstOrNull { it.name == selectedFeatureType }
+                        ?: MapFeatureType.ROAD
+                    addHistoricPointFeatureAtLastTap(type)
+                },
+                onDeleteMapFeature = { deleteHistoricFeature(it) },
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 92.dp, end = 12.dp).width(280.dp),
             )
         }
@@ -1183,6 +1271,12 @@ private fun HistoricMapPanel(
     onRemoveLastControlPoint: (HistoricMapOverlay) -> Unit,
     onOpenSideBySide: () -> Unit,
     onClose: () -> Unit,
+    mapFeatures: List<HistoricMapFeature> = emptyList(),
+    selectedFeatureTypeName: String = MapFeatureType.ROAD.name,
+    onFeatureTypeSelected: (String) -> Unit = {},
+    onAddFeatureFromControlPoints: () -> Unit = {},
+    onAddPointFeatureAtLastTap: () -> Unit = {},
+    onDeleteMapFeature: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val active = historicMaps.firstOrNull { it.id == activeId }
@@ -1443,6 +1537,73 @@ private fun HistoricMapPanel(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                HorizontalDivider()
+                Text("Map features (manual)", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "Trace roads, walls, structures, or boundaries from control points or a map tap.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    MapFeatureType.entries.forEach { type ->
+                        FilterChip(
+                            selected = selectedFeatureTypeName == type.name,
+                            onClick = { onFeatureTypeSelected(type.name) },
+                            label = { Text(type.name, style = MaterialTheme.typography.labelSmall) },
+                        )
+                    }
+                }
+                OutlinedButton(
+                    onClick = onAddFeatureFromControlPoints,
+                    enabled = active.controlPoints.size >= 2,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("historic_feature_add"),
+                ) {
+                    Text("Add feature from 2 latest control points")
+                }
+                OutlinedButton(
+                    onClick = onAddPointFeatureAtLastTap,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Add point feature at last map tap")
+                }
+                if (mapFeatures.isEmpty()) {
+                    Text(
+                        "No manual features yet for this map.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    mapFeatures.forEach { feature ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "${feature.type.name} · ${feature.points.size} pt" +
+                                        if (feature.points.size == 1) "" else "s",
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                                if (feature.note.isNotBlank()) {
+                                    Text(
+                                        feature.note,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                            TextButton(onClick = { onDeleteMapFeature(feature.id) }) {
+                                Text("Delete")
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -115,6 +115,7 @@ import com.example.ui.components.TerrainCellInspectionPanel
 import com.example.ui.components.TerrainElevationProfilePanel
 import com.example.ui.components.TerrainGoogleMapScreen
 import com.example.ui.components.SurveyLayerImporter
+import com.example.ui.components.HorizonCard
 import com.example.ui.components.ViewshedCard
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -318,6 +319,7 @@ private fun TerrainTab(
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val inspectedCell = remember { mutableStateOf<com.example.analysis.TerrainCellInspection?>(null) }
     val viewshedState = remember { mutableStateOf<com.example.analysis.TerrainViewshed?>(null) }
+    val horizonState = remember { mutableStateOf<com.example.analysis.TerrainHorizon?>(null) }
     var homesiteOverlayEnabled by rememberSaveable { mutableStateOf(false) }
     val homesiteCells = remember { mutableStateOf<FloatArray?>(null) }
     val homesiteStatus = remember { mutableStateOf<String?>(null) }
@@ -357,6 +359,7 @@ private fun TerrainTab(
         }
     }
     val viewshedComputing = remember { mutableStateOf(false) }
+    val horizonComputing = remember { mutableStateOf(false) }
     var isSelectingProfile by rememberSaveable { mutableStateOf(false) }
     var profileStartPoint by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     var profileEndPoint by remember { mutableStateOf<Pair<Float, Float>?>(null) }
@@ -507,6 +510,7 @@ private fun TerrainTab(
                     }
                 } else {
                     viewshedState.value = null
+                    horizonState.value = null
                     inspectedCell.value = TerrainCellInspector.inspect(
                         grid = elevationGrid,
                         metadata = metadata,
@@ -523,17 +527,26 @@ private fun TerrainTab(
                 .testTag("terrain_workspace"),
         )
 
-        // Viewshed status sits on its own small card — never inside the cell-inspection sheet —
+        // Viewshed / horizon status sit on small cards — never inside the cell-inspection sheet —
         // so the green/blocked overlay on the canvas stays fully visible.
-        ViewshedCard(
-            viewshed = viewshedState.value,
-            isComputing = viewshedComputing.value,
-            cellSizeMeters = elevationGrid.cellSizeMeters,
-            onClear = { viewshedState.value = null },
+        Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(top = 84.dp, start = 12.dp),
-        )
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ViewshedCard(
+                viewshed = viewshedState.value,
+                isComputing = viewshedComputing.value,
+                cellSizeMeters = elevationGrid.cellSizeMeters,
+                onClear = { viewshedState.value = null },
+            )
+            HorizonCard(
+                horizon = horizonState.value,
+                isComputing = horizonComputing.value,
+                onClear = { horizonState.value = null },
+            )
+        }
 
         inspectedCell.value?.let { inspection ->
             TerrainCellInspectionPanel(
@@ -541,7 +554,7 @@ private fun TerrainTab(
                 isComputingViewshed = viewshedComputing.value,
                 canComputeViewshed = elevationGrid.width > 2 && elevationGrid.height > 2,
                 onComputeViewshed = {
-                    if (!viewshedComputing.value) {
+                    if (!viewshedComputing.value && !horizonComputing.value) {
                         viewshedComputing.value = true
                         // Free the map immediately: results go to ViewshedCard + canvas overlay.
                         inspectedCell.value = null
@@ -551,11 +564,32 @@ private fun TerrainTab(
                                     grid = elevationGrid,
                                     observerXPercent = inspection.xPercent,
                                     observerYPercent = inspection.yPercent,
+                                    vegetationFilter = vegetation,
                                     maxWorkers = 4,
                                 )
                             }
                             viewshedState.value = result
                             viewshedComputing.value = false
+                        }
+                    }
+                },
+                isComputingHorizon = horizonComputing.value,
+                canComputeHorizon = elevationGrid.width > 2 && elevationGrid.height > 2,
+                onComputeHorizon = {
+                    if (!horizonComputing.value && !viewshedComputing.value) {
+                        horizonComputing.value = true
+                        inspectedCell.value = null
+                        scope.launch {
+                            val result = withContext(Dispatchers.Default) {
+                                TerrainViewshedAnalyzer.horizon(
+                                    grid = elevationGrid,
+                                    observerXPercent = inspection.xPercent,
+                                    observerYPercent = inspection.yPercent,
+                                    vegetationFilter = vegetation,
+                                )
+                            }
+                            horizonState.value = result
+                            horizonComputing.value = false
                         }
                     }
                 },

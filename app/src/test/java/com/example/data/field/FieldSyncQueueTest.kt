@@ -113,4 +113,26 @@ class FieldSyncQueueTest {
         assertEquals(ids.sorted(), ids)
         assertNotEquals(queue.entries[0].id, queue.entries[1].id)
     }
+
+    @Test
+    fun supersedingUpsertWithDifferentPayloadRecordsConflict() {
+        val queue = FieldSyncQueue()
+            .enqueueTarget("t1", SyncOperation.UPSERT, payload = "{\"note\":\"a\"}", atMillis = 1_000L)
+            .enqueueTarget("t1", SyncOperation.UPSERT, payload = "{\"note\":\"b\"}", atMillis = 2_000L)
+
+        assertEquals(1, queue.conflicts.size)
+        assertEquals("t1", queue.conflicts.single().entityId)
+        assertEquals(SyncConflictResolution.MERGE_REQUIRED, queue.conflicts.single().resolution)
+        assertTrue(queue.pendingFor(SyncEntityType.TARGET_SIGNAL, "t1")?.lastError?.contains("revision") == true)
+    }
+
+    @Test
+    fun identicalPayloadUpsertDoesNotRecordConflict() {
+        val queue = FieldSyncQueue()
+            .enqueueTarget("t1", SyncOperation.UPSERT, payload = "{\"note\":\"same\"}", atMillis = 1_000L)
+            .enqueueTarget("t1", SyncOperation.UPSERT, payload = "{\"note\":\"same\"}", atMillis = 2_000L)
+
+        assertTrue(queue.conflicts.isEmpty())
+        assertNull(queue.pendingFor(SyncEntityType.TARGET_SIGNAL, "t1")?.lastError)
+    }
 }
