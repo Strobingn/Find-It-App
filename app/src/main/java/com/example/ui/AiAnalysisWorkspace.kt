@@ -817,6 +817,47 @@ private fun TargetDetailCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // Feature 15 — penalty / negative-evidence badges (honest, not proof claims)
+            val penaltyLabels = remember(target.evidence, target.cautionReasons) {
+                buildList {
+                    target.evidence.forEach { line ->
+                        val lower = line.lowercase()
+                        when {
+                            "natural-feature penalty" in lower || "natural feature" in lower ->
+                                add("Natural penalty")
+                            "modern-disturbance penalty" in lower || "modern disturbance" in lower ->
+                                add("Modern penalty")
+                            "penalty" in lower -> add(line.take(28))
+                        }
+                    }
+                    target.cautionReasons.take(3).forEach { reason ->
+                        add(reason.take(32))
+                    }
+                }.distinct()
+            }
+            if (penaltyLabels.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    penaltyLabels.forEach { label ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier.testTag("penalty_badge"),
+                        ) {
+                            Text(
+                                label,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                    }
+                }
+            }
             Text(
                 "Search radius: ${target.radiusMeters.toInt()} m",
                 style = MaterialTheme.typography.labelSmall,

@@ -92,6 +92,7 @@ import com.example.data.LidarSearchRequest
 import com.example.data.NormalizedRasterBounds
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.MeasurementFormat
+import com.example.geospatial.trueToMagneticBearingDegrees
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.HOMESITE_BINS
 import com.example.ui.components.LidarCanvasMode
@@ -310,11 +311,22 @@ private fun TerrainTab(
     val navigationTarget by viewModel.navigationTarget.collectAsStateWithLifecycle()
     val deviceLatitude by viewModel.deviceLatitude.collectAsStateWithLifecycle()
     val deviceLongitude by viewModel.deviceLongitude.collectAsStateWithLifecycle()
+    val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
     val navigationSolution = remember(navigationTarget, deviceLatitude, deviceLongitude) {
         val target = navigationTarget ?: return@remember null
         val lat = deviceLatitude ?: return@remember null
         val lon = deviceLongitude ?: return@remember null
         FieldNavigation.solve(lat, lon, target.latitude, target.longitude)
+    }
+    val magneticBearing = remember(navigationSolution, deviceLatitude, deviceLongitude) {
+        val solution = navigationSolution ?: return@remember null
+        val lat = deviceLatitude ?: return@remember null
+        val lon = deviceLongitude ?: return@remember null
+        trueToMagneticBearingDegrees(
+            trueBearingDegrees = solution.targetBearingDegrees,
+            latitude = lat,
+            longitude = lon,
+        )
     }
     // Arrival ping: one tone on entering 15 m, re-arms only after leaving past 30 m.
     val proximityAlerter = remember { ProximityAlerter() }
@@ -630,6 +642,15 @@ private fun TerrainTab(
                         modifier = Modifier.testTag("refine_to_boundary_button"),
                     ) { viewModel.refineToSurveyBoundary() }
                 }
+                if (canRefine) {
+                    TerrainQuickAction(
+                        label = "Refine viewport",
+                        icon = Icons.Default.CropFree,
+                        active = false,
+                        enabled = !isRefining && !isReloadingSurface,
+                        modifier = Modifier.testTag("refine_viewport_rect_button"),
+                    ) { viewModel.refineToNormalizedRect(visibleBounds.value) }
+                }
                 if (canRefine && isDetailed) {
                     TerrainQuickAction("Whole", Icons.Default.ZoomOutMap) { viewModel.showWholeTerrain() }
                 }
@@ -788,11 +809,29 @@ private fun TerrainTab(
                         navigationSolution?.let {
                             "${MeasurementFormat.length(it.distanceMeters.toFloat())} · " +
                                 "${FieldNavigation.compassDirection(it.targetBearingDegrees)} " +
-                                "${it.targetBearingDegrees.toInt()}°"
+                                "${it.targetBearingDegrees.toInt()}° true"
                         } ?: "Waiting for GPS fix - turn on GPS below",
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = FontFamily.Monospace,
                     )
+                    // Feature 16 — AR-lite compass ring (bearing + mag when GPS known)
+                    magneticBearing?.let { mag ->
+                        Text(
+                            buildString {
+                                append("Bearing ${mag.toInt()}° · mag")
+                                compassHeadingDegrees?.let { heading ->
+                                    val turn = FieldNavigation.signedTurnDegrees(heading, mag)
+                                    append(" · heading ${heading.toInt()}°")
+                                    if (kotlin.math.abs(turn) >= 8f) {
+                                        append(if (turn > 0f) " · turn R ${turn.toInt()}°" else " · turn L ${(-turn).toInt()}°")
+                                    }
+                                }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.testTag("nav_compass_bearing"),
+                        )
+                    }
                     if (proximityAlerter.isInside) {
                         Text(
                             "Within arrival range - start swinging",
@@ -995,6 +1034,8 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val deviceLongitude by viewModel.deviceLongitude.collectAsStateWithLifecycle()
     val deviceAccuracyMeters by viewModel.deviceLocationAccuracyMeters.collectAsStateWithLifecycle()
     val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
+    val navPlaylistIds by viewModel.navPlaylistIds.collectAsStateWithLifecycle()
+    val navPlaylistIndex by viewModel.navPlaylistIndex.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -1046,9 +1087,15 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         onCreateBoundaryFromTrail = { track -> viewModel.createSurveyBoundaryFromTrail(track) },
         onCreateBoundaryAroundGps = { viewModel.createSurveyBoundaryAroundGps() },
         onDeleteSurveyBoundary = viewModel::deleteSurveyBoundary,
+        onUpdateBoundary = viewModel::saveSurveyBoundary,
         onMarkSyncSent = viewModel::markPendingSyncSent,
         onClearSyncQueue = viewModel::clearPendingSyncQueue,
         surfaceZForSignal = viewModel::surfaceZForSignal,
+        navPlaylistIds = navPlaylistIds,
+        navPlaylistIndex = navPlaylistIndex,
+        onSetNavPlaylist = viewModel::setNavPlaylist,
+        onNavPlaylistNext = viewModel::navPlaylistNext,
+        onClearNavPlaylist = viewModel::clearNavPlaylist,
         modifier = Modifier.fillMaxSize().padding(padding),
     )
 }

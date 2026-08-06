@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,8 @@ import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Terrain
@@ -30,8 +33,12 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.WbTwilight
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import com.example.data.download.LazDownloadQueue
+import com.example.data.export.ProjectArchiveImport
+import com.example.data.export.QrSharePayload
 import com.example.data.field.BoundaryProximityLevel
+import com.example.data.field.FieldSessionStats
 import com.example.data.field.FieldSessionStatsCalculator
 import com.example.geospatial.DaylightPlanner
 import androidx.compose.material3.Card
@@ -55,10 +62,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.field.FindSiteClusterer
+import java.io.File
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Home for the field-workflow features that otherwise only surface deep inside another tab:
@@ -97,8 +107,15 @@ fun ToolsTab(
 
     var pendingSitePackageBytes by remember { mutableStateOf(ByteArray(0)) }
     var pendingClippedLasBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingGeoPackageBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingAnnotatedMapBytes by remember { mutableStateOf(ByteArray(0)) }
     var isExportingSitePackage by remember { mutableStateOf(false) }
     var sitePackageStatus by remember { mutableStateOf<String?>(null) }
+    var geoPackageStatus by remember { mutableStateOf<String?>(null) }
+    var annotatedMapStatus by remember { mutableStateOf<String?>(null) }
+    var shareStatus by remember { mutableStateOf<String?>(null) }
+    var qrPayloadText by remember { mutableStateOf<String?>(null) }
+    var archiveInspectStatus by remember { mutableStateOf<String?>(null) }
 
     val sitePackageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
@@ -132,6 +149,55 @@ fun ToolsTab(
             sitePackageStatus = "Clipped LAS surface sample saved"
         }.onFailure {
             sitePackageStatus = "Clipped LAS failed: ${it.localizedMessage}"
+        }
+    }
+    val geoPackageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/geopackage+sqlite"),
+    ) { uri ->
+        if (uri == null) {
+            geoPackageStatus = "GeoPackage export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingGeoPackageBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            geoPackageStatus = "GeoPackage saved (${pendingGeoPackageBytes.size} bytes)"
+        }.onFailure {
+            geoPackageStatus = "GeoPackage failed: ${it.localizedMessage}"
+        }
+    }
+    val annotatedMapLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) {
+            annotatedMapStatus = "Annotated map export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingAnnotatedMapBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            annotatedMapStatus = "Annotated map bundle saved"
+        }.onFailure {
+            annotatedMapStatus = "Annotated map failed: ${it.localizedMessage}"
+        }
+    }
+    val archiveInspectLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) {
+            archiveInspectStatus = "Inspect canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: error("Could not read the selected file")
+            ProjectArchiveImport.inspect(bytes)
+        }.onSuccess { result ->
+            archiveInspectStatus = result.message
+        }.onFailure {
+            archiveInspectStatus = "Inspect failed: ${it.localizedMessage}"
         }
     }
     // Site center when georeferenced, live GPS fix otherwise; null hides the times gracefully.
@@ -269,12 +335,28 @@ fun ToolsTab(
                 statusActive = sessionStats.totalFinds > 0,
                 description = "Live dig-day scoreboard from your logged finds and GPS trails: " +
                     "totals, confirm/reject split, distance covered, logging pace" +
-                    (sessionStats.topFindType?.let { ", and your most common find ($it)." } ?: "."),
+                    (sessionStats.topFindType?.let { ", and your most common find ($it)." } ?: ".") +
+                    " Share builds a plain-text day debrief for the system share sheet.",
             ) {
                 TextButton(
                     onClick = { onNavigate(AppDestination.FIELD) },
                     modifier = Modifier.testTag("tool_open_stats"),
                 ) { Text("Open targets") }
+                TextButton(
+                    onClick = {
+                        val text = buildSessionDebriefText(
+                            projectName = metadata.siteName,
+                            stats = sessionStats,
+                        )
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Find It session debrief")
+                            putExtra(Intent.EXTRA_TEXT, text)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "Share session debrief"))
+                    },
+                    modifier = Modifier.testTag("tool_session_debrief_share"),
+                ) { Text("Share debrief") }
             }
         }
         item {
@@ -460,13 +542,15 @@ fun ToolsTab(
                 title = "Site package export",
                 status = when {
                     isExportingSitePackage -> "Building package…"
+                    shareStatus != null -> shareStatus!!
                     sitePackageStatus != null -> sitePackageStatus!!
                     else -> "Export zip with finds, digs, trails, PDF, clipped LAS"
                 },
                 statusActive = !isExportingSitePackage,
                 description = "One offline zip: summary, targets (CSV/GPX/GeoJSON), digs, boundaries, " +
                     "trails, annotated PNG/PDF when available, and optional clipped LAS surface sample. " +
-                    "LAS is a surface sample, not original pulse returns.",
+                    "LAS is a surface sample, not original pulse returns. Share uses the system sheet " +
+                    "(FileProvider) without auto-import on the other device.",
             ) {
                 TextButton(
                     onClick = {
@@ -492,6 +576,38 @@ fun ToolsTab(
                 ) { Text("Export site package") }
                 TextButton(
                     onClick = {
+                        if (isExportingSitePackage) return@TextButton
+                        isExportingSitePackage = true
+                        shareStatus = "Building package for share…"
+                        scope.launch {
+                            runCatching { viewModel.buildSitePackageBytes(includeClippedLas = true) }
+                                .onSuccess { bytes ->
+                                    pendingSitePackageBytes = bytes
+                                    runCatching {
+                                        shareBytesViaFileProvider(
+                                            context = context,
+                                            bytes = bytes,
+                                            fileName = "find-it-site-package-${System.currentTimeMillis()}.zip",
+                                            mimeType = "application/zip",
+                                            chooserTitle = "Share site package",
+                                        )
+                                    }.onSuccess {
+                                        shareStatus = "Share sheet opened (${bytes.size} bytes)"
+                                    }.onFailure {
+                                        shareStatus = "Share failed: ${it.localizedMessage}"
+                                    }
+                                }
+                                .onFailure {
+                                    shareStatus = "Share build failed: ${it.localizedMessage}"
+                                }
+                            isExportingSitePackage = false
+                        }
+                    },
+                    enabled = !isExportingSitePackage,
+                    modifier = Modifier.testTag("tool_site_package_share"),
+                ) { Text("Share package") }
+                TextButton(
+                    onClick = {
                         runCatching { viewModel.buildClippedLasBytes() }
                             .onSuccess { bytes ->
                                 pendingClippedLasBytes = bytes
@@ -504,6 +620,132 @@ fun ToolsTab(
                             }
                     },
                 ) { Text("Clipped LAS only") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Layers,
+                title = "GeoPackage export",
+                status = geoPackageStatus
+                    ?: if (loggedSignals.isEmpty()) {
+                        "No finds yet · empty .gpkg still valid"
+                    } else {
+                        "${loggedSignals.size} find(s) ready"
+                    },
+                statusActive = true,
+                description = "Minimal SQLite GeoPackage with a finds table (id, lat, lon, metal, " +
+                    "status, notes) plus gpkg_contents. Attribute handoff only — not metal proof " +
+                    "from LiDAR.",
+            ) {
+                TextButton(
+                    onClick = {
+                        geoPackageStatus = "Building GeoPackage…"
+                        scope.launch {
+                            runCatching { viewModel.buildGeoPackageBytes() }
+                                .onSuccess { bytes ->
+                                    pendingGeoPackageBytes = bytes
+                                    geoPackageLauncher.launch(
+                                        "find-it-finds-${System.currentTimeMillis()}.gpkg",
+                                    )
+                                }
+                                .onFailure {
+                                    geoPackageStatus = "GeoPackage failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_geopackage_export"),
+                ) { Text("Export GeoPackage") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Map,
+                title = "Annotated map bundle",
+                status = annotatedMapStatus
+                    ?: if (terrainReady) "Ready · PNG + README zip" else "Load terrain first",
+                statusActive = terrainReady,
+                description = "Zip of the annotated terrain PNG (targets overlaid) plus README with " +
+                    "ethics and LiDAR honesty. Built from the same project export renderer.",
+            ) {
+                TextButton(
+                    onClick = {
+                        if (!terrainReady) {
+                            annotatedMapStatus = "Load a terrain first"
+                            return@TextButton
+                        }
+                        annotatedMapStatus = "Building annotated map…"
+                        scope.launch {
+                            runCatching { viewModel.buildAnnotatedMapBundleBytes() }
+                                .onSuccess { bytes ->
+                                    pendingAnnotatedMapBytes = bytes
+                                    annotatedMapLauncher.launch(
+                                        "find-it-annotated-map-${System.currentTimeMillis()}.zip",
+                                    )
+                                }
+                                .onFailure {
+                                    annotatedMapStatus = "Failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    enabled = terrainReady,
+                    modifier = Modifier.testTag("tool_annotated_map_export"),
+                ) { Text("Export map zip") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.QrCode,
+                title = "QR / archive handoff",
+                status = qrPayloadText?.lines()?.take(2)?.joinToString(" · ")
+                    ?: archiveInspectStatus
+                    ?: "Build QR text for package hash, or inspect a zip",
+                statusActive = qrPayloadText != null || archiveInspectStatus != null,
+                description = "QR payloads never embed the full zip — large archives emit SHARE_FILE " +
+                    "with name/size/sha256. Inspect validates a Find It manifest without importing.",
+            ) {
+                TextButton(
+                    onClick = {
+                        shareStatus = "Building package for QR meta…"
+                        scope.launch {
+                            runCatching { viewModel.buildSitePackageBytes(includeClippedLas = false) }
+                                .onSuccess { bytes ->
+                                    val hash = withContext(Dispatchers.Default) {
+                                        QrSharePayload.sha256Hex(bytes)
+                                    }
+                                    qrPayloadText = QrSharePayload.forProject(
+                                        projectName = metadata.siteName,
+                                        archiveByteSize = bytes.size,
+                                        contentHash = hash,
+                                    )
+                                    shareStatus = "QR payload ready (${bytes.size} bytes)"
+                                }
+                                .onFailure {
+                                    shareStatus = "QR build failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_qr_payload"),
+                ) { Text("Build QR text") }
+                if (qrPayloadText != null) {
+                    TextButton(
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, qrPayloadText)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Share QR payload"))
+                        },
+                        modifier = Modifier.testTag("tool_qr_payload_share"),
+                    ) { Text("Share text") }
+                }
+                TextButton(
+                    onClick = {
+                        archiveInspectLauncher.launch(
+                            arrayOf("application/zip", "application/octet-stream", "*/*"),
+                        )
+                    },
+                    modifier = Modifier.testTag("tool_archive_inspect"),
+                ) { Text("Inspect archive") }
             }
         }
         item {
@@ -606,5 +848,52 @@ private fun routeDistanceText(totalMeters: Double): String =
     } else {
         "${totalMeters.toInt()} m"
     }
+
+private fun buildSessionDebriefText(projectName: String, stats: FieldSessionStats): String =
+    buildString {
+        appendLine("Find It session debrief")
+        appendLine("Project: ${projectName.ifBlank { "(unnamed)" }}")
+        appendLine()
+        appendLine("Finds: ${stats.totalFinds} (${stats.positionedFinds} with GPS)")
+        appendLine("Confirmed: ${stats.confirmedFinds}")
+        appendLine("Rejected: ${stats.rejectedFinds}")
+        stats.confirmRate?.let {
+            appendLine("Confirm rate: ${"%.0f".format(Locale.US, it * 100)}%")
+        }
+        appendLine("Distance walked: ${routeDistanceText(stats.distanceMeters)}")
+        stats.activeMinutes?.let { appendLine("Active span: ${it} min") }
+        stats.findsPerHour?.let {
+            appendLine("Pace: ${"%.1f".format(Locale.US, it)} finds/h")
+        }
+        stats.topFindType?.let { appendLine("Top type: $it") }
+        appendLine()
+        appendLine(
+            "LiDAR is terrain context only — not metal identity or dig depth. " +
+                "Only detect on land you have permission to search.",
+        )
+    }
+
+private fun shareBytesViaFileProvider(
+    context: android.content.Context,
+    bytes: ByteArray,
+    fileName: String,
+    mimeType: String,
+    chooserTitle: String,
+) {
+    val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
+    val outFile = File(shareDir, fileName)
+    outFile.writeBytes(bytes)
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        outFile,
+    )
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mimeType
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, chooserTitle))
+}
 
 // Tab indices in MainScreen's tab list.

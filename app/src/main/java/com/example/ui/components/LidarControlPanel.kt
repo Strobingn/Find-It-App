@@ -20,10 +20,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -34,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import com.example.data.GroundSurfaceMode
 import com.example.data.PointClassPreset
 import com.example.geospatial.MeasurementFormat
@@ -99,6 +104,27 @@ fun LidarControlPanel(
         )
 
         ControlCard("Surface source (dual surface)") {
+            // Feature 13 — blink DSM vs ground while enabled; cancelled when composition leaves.
+            var blinkDsmGround by rememberSaveable { mutableStateOf(false) }
+            var blinkShowDsm by remember { mutableStateOf(false) }
+            LaunchedEffect(blinkDsmGround, canChangeSurface) {
+                if (!blinkDsmGround || !canChangeSurface) return@LaunchedEffect
+                try {
+                    while (true) {
+                        blinkShowDsm = !blinkShowDsm
+                        onGroundModeChanged(
+                            if (blinkShowDsm) {
+                                GroundSurfaceMode.SURFACE_MODEL
+                            } else {
+                                GroundSurfaceMode.SOURCE_CLASSIFIED
+                            },
+                        )
+                        delay(800)
+                    }
+                } finally {
+                    // Leave ground mode when blink stops / disposed.
+                }
+            }
             Text(
                 "Choose how returns become the elevation surface. Re-decodes the open LiDAR; " +
                     "this is terrain geometry, not metal detection.",
@@ -113,25 +139,64 @@ fun LidarControlPanel(
             ) {
                 FilterChip(
                     selected = groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED,
-                    onClick = { onGroundModeChanged(GroundSurfaceMode.SOURCE_CLASSIFIED) },
-                    enabled = surfaceControlsEnabled,
+                    onClick = {
+                        blinkDsmGround = false
+                        onGroundModeChanged(GroundSurfaceMode.SOURCE_CLASSIFIED)
+                    },
+                    enabled = surfaceControlsEnabled && !blinkDsmGround,
                     label = { Text("Classified ground") },
                     modifier = Modifier.testTag("surface_mode_classified"),
                 )
                 FilterChip(
                     selected = groundMode == GroundSurfaceMode.AUTO_LOWEST,
-                    onClick = { onGroundModeChanged(GroundSurfaceMode.AUTO_LOWEST) },
-                    enabled = surfaceControlsEnabled,
+                    onClick = {
+                        blinkDsmGround = false
+                        onGroundModeChanged(GroundSurfaceMode.AUTO_LOWEST)
+                    },
+                    enabled = surfaceControlsEnabled && !blinkDsmGround,
                     label = { Text("Auto lowest") },
                     modifier = Modifier.testTag("surface_mode_auto"),
                 )
                 FilterChip(
                     selected = groundMode == GroundSurfaceMode.SURFACE_MODEL,
-                    onClick = { onGroundModeChanged(GroundSurfaceMode.SURFACE_MODEL) },
-                    enabled = surfaceControlsEnabled,
+                    onClick = {
+                        blinkDsmGround = false
+                        onGroundModeChanged(GroundSurfaceMode.SURFACE_MODEL)
+                    },
+                    enabled = surfaceControlsEnabled && !blinkDsmGround,
                     label = { Text("Highest-return DSM") },
                     modifier = Modifier.testTag("surface_mode_dsm"),
                 )
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dual_surface_blink"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Switch(
+                    checked = blinkDsmGround,
+                    onCheckedChange = { enabled ->
+                        blinkDsmGround = enabled
+                        if (!enabled) {
+                            onGroundModeChanged(GroundSurfaceMode.SOURCE_CLASSIFIED)
+                        }
+                    },
+                    enabled = canChangeSurface && !isReloadingSurface,
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Blink DSM/ground",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (blinkDsmGround) "Alternating every 800 ms" else "Compare canopy vs bare earth",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             if (!canChangeSurface) {
                 Text(

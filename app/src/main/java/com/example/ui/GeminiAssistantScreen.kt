@@ -1146,6 +1146,45 @@ private fun LocalCandidateSummary(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        // Feature 15 — penalty badges from local AI evidence / notes
+                        val penaltyLabels = buildList {
+                            candidate.evidence.forEach { line ->
+                                val lower = line.lowercase()
+                                when {
+                                    "natural-feature penalty" in lower -> add("Natural penalty")
+                                    "modern-disturbance penalty" in lower -> add("Modern penalty")
+                                    "penalty" in lower -> add(line.take(28))
+                                }
+                            }
+                            candidate.note.split(" · ").map { it.trim() }.filter { part ->
+                                val lower = part.lowercase()
+                                "natural" in lower || "modern" in lower || "hollow" in lower ||
+                                    "drainage" in lower || "rough" in lower || "fade" in lower
+                            }.take(2).forEach { add(it.take(32)) }
+                        }.distinct()
+                        if (penaltyLabels.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                penaltyLabels.forEach { label ->
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.errorContainer,
+                                        modifier = Modifier.testTag("penalty_badge"),
+                                    ) {
+                                        Text(
+                                            label,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

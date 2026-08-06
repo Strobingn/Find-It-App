@@ -146,10 +146,17 @@ fun TargetLoggerPanel(
     onCreateBoundaryFromTrail: (BreadcrumbTrack) -> Unit = {},
     onCreateBoundaryAroundGps: () -> Unit = {},
     onDeleteSurveyBoundary: (SurveyBoundary) -> Unit = {},
+    onUpdateBoundary: (SurveyBoundary) -> Unit = {},
     onMarkSyncSent: (Long) -> Unit = {},
     onClearSyncQueue: () -> Unit = {},
     /** Relative bare-earth surface context under a find — never dig/metal depth. */
     surfaceZForSignal: (TargetSignal) -> SurfaceZSample? = { null },
+    /** Multi-stop playlist (e.g. AI NAV_TARGET order). */
+    navPlaylistIds: List<Long> = emptyList(),
+    navPlaylistIndex: Int = 0,
+    onSetNavPlaylist: (List<Long>) -> Unit = {},
+    onNavPlaylistNext: () -> Unit = {},
+    onClearNavPlaylist: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -352,6 +359,16 @@ fun TargetLoggerPanel(
         }
     }
 
+    var thisTripOnly by remember { mutableStateOf(false) }
+    val displayedSignals = remember(loggedSignals, thisTripOnly) {
+        if (!thisTripOnly) {
+            loggedSignals
+        } else {
+            val cutoff = System.currentTimeMillis() - 8L * 60L * 60L * 1000L
+            loggedSignals.filter { it.timestamp >= cutoff }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -368,6 +385,12 @@ fun TargetLoggerPanel(
                     "Current grid position: ${currentSweepX.toInt()}, ${currentSweepY.toInt()}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Ethics: only search land you have permission to access. LiDAR is not ownership or metal proof.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("ethics_sticky_mark"),
                 )
                 Button(
                     onClick = onLogSignal,
@@ -394,6 +417,37 @@ fun TargetLoggerPanel(
                     Icon(Icons.Default.Route, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Plan target route · $routeStopCount stops")
+                }
+                OutlinedButton(
+                    onClick = {
+                        val ordered = loggedSignals
+                            .filter { it.latitude != null && it.longitude != null }
+                            .sortedByDescending { it.signalStrength }
+                            .map { it.id }
+                        onSetNavPlaylist(ordered)
+                    },
+                    enabled = routeStopCount >= 1,
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("nav_playlist_from_finds"),
+                ) {
+                    Text("Nav playlist from finds · $routeStopCount")
+                }
+                if (navPlaylistIds.isNotEmpty()) {
+                    Text(
+                        "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("nav_playlist_status"),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = onNavPlaylistNext,
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("nav_playlist_next"),
+                        ) { Text("Next stop") }
+                        OutlinedButton(
+                            onClick = onClearNavPlaylist,
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("nav_playlist_clear"),
+                        ) { Text("Clear playlist") }
+                    }
                 }
             }
         }
@@ -454,12 +508,15 @@ fun TargetLoggerPanel(
             boundaries = surveyBoundaries,
             breadcrumbTracks = breadcrumbTracks,
             hasGpsFix = deviceLatitude != null && deviceLongitude != null,
+            deviceLatitude = deviceLatitude,
+            deviceLongitude = deviceLongitude,
             onCreateFromTrail = onCreateBoundaryFromTrail,
             onCreateAroundGps = {
                 if (deviceLatitude == null || deviceLongitude == null) onEnableGps()
                 onCreateBoundaryAroundGps()
             },
             onDelete = onDeleteSurveyBoundary,
+            onUpdateBoundary = onUpdateBoundary,
         )
 
         OfflineSyncQueueCard(
@@ -518,11 +575,43 @@ fun TargetLoggerPanel(
                 }
             }
 
+            // Feature 18 — this-trip filter (last 8 hours)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = thisTripOnly,
+                    onClick = { thisTripOnly = !thisTripOnly },
+                    label = { Text("This trip") },
+                    modifier = Modifier.testTag("filter_this_trip"),
+                )
+                Text(
+                    if (thisTripOnly) {
+                        "${displayedSignals.size} of ${loggedSignals.size} (last 8 h)"
+                    } else {
+                        "${loggedSignals.size} find${if (loggedSignals.size == 1) "" else "s"}"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (displayedSignals.isEmpty()) {
+                Text(
+                    "No finds in the last 8 hours. Clear the This trip filter to see older finds.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+            }
+
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().weight(1f).testTag("logged_signals_list"),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(loggedSignals, key = { it.id }) { signal ->
+                items(displayedSignals, key = { it.id }) { signal ->
                     SignalCard(
                         signal = signal,
                         onEdit = { editingSignal = signal },
@@ -1281,18 +1370,151 @@ private fun ExcavationLogSection(
     onSave: (ExcavationLogEntry) -> Unit,
     onDelete: (ExcavationLogEntry) -> Unit,
 ) {
+    val context = LocalContext.current
     var editingLog by remember { mutableStateOf<ExcavationLogEntry?>(null) }
     var soilNotes by remember { mutableStateOf("") }
     var findsDescription by remember { mutableStateOf("") }
     var depthText by remember { mutableStateOf("") }
     var findsCountText by remember { mutableStateOf("0") }
+    var digPhotoUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var digVoiceNoteUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var digRecorder by remember { mutableStateOf<VoiceNoteRecorder?>(null) }
+    var isRecordingDigVoice by remember { mutableStateOf(false) }
+    var digRecordingMessage by remember { mutableStateOf<String?>(null) }
+    var digMediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var playingDigVoiceUri by remember { mutableStateOf<String?>(null) }
+
+    fun stopDigPlayback() {
+        digMediaPlayer?.let { player ->
+            runCatching { player.stop() }
+            player.release()
+        }
+        digMediaPlayer = null
+        playingDigVoiceUri = null
+    }
+
+    fun cancelDigRecording() {
+        digRecorder?.cancel()
+        digRecorder = null
+        isRecordingDigVoice = false
+    }
+
+    fun closeDigEditor() {
+        cancelDigRecording()
+        stopDigPlayback()
+        digRecordingMessage = null
+        editingLog = null
+    }
 
     fun openEditor(entry: ExcavationLogEntry) {
+        cancelDigRecording()
+        stopDigPlayback()
+        digRecordingMessage = null
         editingLog = entry
         soilNotes = entry.soilNotes
         findsDescription = entry.findsDescription
         depthText = entry.depthCentimeters?.toString().orEmpty()
         findsCountText = entry.findsCount.toString()
+        digPhotoUris = entry.photoUris
+        digVoiceNoteUris = entry.voiceNoteUris
+    }
+
+    fun startDigVoiceRecording(entry: ExcavationLogEntry) {
+        if (isRecordingDigVoice || digVoiceNoteUris.size >= 10) return
+        val directory = java.io.File(context.filesDir, "field-voice-notes").apply { mkdirs() }
+        val output = java.io.File(directory, "dig-${entry.id}-${System.currentTimeMillis()}.m4a")
+        val active = VoiceNoteRecorder(context, output)
+        runCatching { active.start() }
+            .onSuccess {
+                digRecorder = active
+                isRecordingDigVoice = true
+                digRecordingMessage = null
+            }
+            .onFailure {
+                active.cancel()
+                digRecordingMessage = it.localizedMessage ?: "Could not start the voice-note recorder."
+            }
+    }
+
+    fun stopDigVoiceRecording() {
+        val file = digRecorder?.stop()
+        digRecorder = null
+        isRecordingDigVoice = false
+        if (file == null) {
+            digRecordingMessage = "The voice note was too short or could not be saved."
+        } else {
+            digVoiceNoteUris = (digVoiceNoteUris + Uri.fromFile(file).toString()).distinct().take(10)
+            digRecordingMessage = "Voice note saved offline."
+        }
+    }
+
+    fun playDigVoiceNote(uriText: String) {
+        if (playingDigVoiceUri == uriText) {
+            stopDigPlayback()
+            return
+        }
+        stopDigPlayback()
+        val player = MediaPlayer()
+        runCatching {
+            player.setDataSource(context, Uri.parse(uriText))
+            player.setOnCompletionListener {
+                it.release()
+                if (digMediaPlayer === it) {
+                    digMediaPlayer = null
+                    playingDigVoiceUri = null
+                }
+            }
+            player.prepare()
+            player.start()
+        }.onSuccess {
+            digMediaPlayer = player
+            playingDigVoiceUri = uriText
+            digRecordingMessage = null
+        }.onFailure {
+            player.release()
+            digRecordingMessage = it.localizedMessage ?: "Could not play this voice note."
+        }
+    }
+
+    fun buildUpdatedEntry(entry: ExcavationLogEntry, complete: Boolean): ExcavationLogEntry {
+        val now = System.currentTimeMillis()
+        return entry.copy(
+            depthCentimeters = depthText.toIntOrNull(),
+            soilNotes = soilNotes.trim(),
+            findsDescription = findsDescription.trim(),
+            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+            photoUris = digPhotoUris,
+            voiceNoteUris = digVoiceNoteUris,
+            completedAtMillis = if (complete) now else entry.completedAtMillis,
+            updatedAtMillis = now,
+        )
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            digRecorder?.cancel()
+            digMediaPlayer?.release()
+        }
+    }
+
+    val digAudioPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val entry = editingLog
+        if (granted && entry != null) startDigVoiceRecording(entry) else {
+            digRecordingMessage = "Microphone permission is required to record a voice note."
+        }
+    }
+    val digPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            digPhotoUris = (digPhotoUris + uri.toString()).distinct().take(10)
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1326,6 +1548,17 @@ private fun ExcavationLogSection(
                                 if (entry.findsCount > 0) append("${entry.findsCount} find(s)")
                                 else if (entry.soilNotes.isNotBlank()) append(entry.soilNotes.take(40))
                                 else append("No notes yet")
+                                if (entry.photoUris.isNotEmpty() || entry.voiceNoteUris.isNotEmpty()) {
+                                    append(" · ")
+                                    val parts = mutableListOf<String>()
+                                    if (entry.photoUris.isNotEmpty()) {
+                                        parts += "${entry.photoUris.size} photo${if (entry.photoUris.size == 1) "" else "s"}"
+                                    }
+                                    if (entry.voiceNoteUris.isNotEmpty()) {
+                                        parts += "${entry.voiceNoteUris.size} voice"
+                                    }
+                                    append(parts.joinToString(", "))
+                                }
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1338,6 +1571,12 @@ private fun ExcavationLogSection(
                 }
             }
         }
+        Text(
+            "Ethics: only search land you have permission to access. LiDAR is not ownership or metal proof.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag("ethics_sticky_dig"),
+        )
         OutlinedButton(
             onClick = {
                 val started = onStart()
@@ -1374,40 +1613,148 @@ private fun ExcavationLogSection(
                 label = { Text("Find count") },
                 modifier = Modifier.fillMaxWidth(),
             )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dig_media_section"),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Photos (${digPhotoUris.size}/10)",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                digPhotoUris.forEach { photoUri ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            photoUri.substringAfterLast('/').takeLast(32),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        TextButton(onClick = { digPhotoUris = digPhotoUris - photoUri }) {
+                            Text("Remove")
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { digPhotoPicker.launch("image/*") },
+                    enabled = digPhotoUris.size < 10,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("dig_photo_add"),
+                ) {
+                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add dig photo")
+                }
+                Text(
+                    "Voice notes (${digVoiceNoteUris.size}/10)",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                digVoiceNoteUris.forEachIndexed { index, voiceUri ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Voice note ${index + 1}",
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        TextButton(onClick = { playDigVoiceNote(voiceUri) }) {
+                            Icon(
+                                if (playingDigVoiceUri == voiceUri) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                contentDescription = if (playingDigVoiceUri == voiceUri) {
+                                    "Stop voice note"
+                                } else {
+                                    "Play voice note"
+                                },
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(if (playingDigVoiceUri == voiceUri) "Stop" else "Play")
+                        }
+                        TextButton(
+                            onClick = {
+                                if (playingDigVoiceUri == voiceUri) stopDigPlayback()
+                                deleteVoiceNoteFile(context, voiceUri)
+                                digVoiceNoteUris = digVoiceNoteUris - voiceUri
+                            },
+                        ) { Text("Remove") }
+                    }
+                }
+                Button(
+                    onClick = {
+                        if (isRecordingDigVoice) {
+                            stopDigVoiceRecording()
+                        } else {
+                            val granted = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO,
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (granted) startDigVoiceRecording(entry) else {
+                                digAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                    },
+                    enabled = isRecordingDigVoice || digVoiceNoteUris.size < 10,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("dig_voice_add"),
+                ) {
+                    Icon(
+                        if (isRecordingDigVoice) Icons.Default.Stop else Icons.Default.Mic,
+                        contentDescription = null,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (isRecordingDigVoice) "Stop and save voice note" else "Record dig voice note")
+                }
+                digRecordingMessage?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (
+                            message.startsWith("Could") ||
+                            message.startsWith("Microphone") ||
+                            message.startsWith("The voice")
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
                     onClick = {
-                        val now = System.currentTimeMillis()
-                        val updated = entry.copy(
-                            depthCentimeters = depthText.toIntOrNull(),
-                            soilNotes = soilNotes.trim(),
-                            findsDescription = findsDescription.trim(),
-                            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-                            updatedAtMillis = now,
-                        )
-                        onSave(updated)
+                        if (isRecordingDigVoice) stopDigVoiceRecording()
+                        stopDigPlayback()
+                        onSave(buildUpdatedEntry(entry, complete = false))
                         editingLog = null
+                        digRecordingMessage = null
                     },
+                    enabled = !isRecordingDigVoice,
                     modifier = Modifier.weight(1f).height(48.dp).testTag("save_excavation_log_button"),
                 ) { Text("Save dig") }
                 OutlinedButton(
                     onClick = {
-                        val now = System.currentTimeMillis()
-                        val completed = entry.copy(
-                            depthCentimeters = depthText.toIntOrNull(),
-                            soilNotes = soilNotes.trim(),
-                            findsDescription = findsDescription.trim(),
-                            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-                            completedAtMillis = now,
-                            updatedAtMillis = now,
-                        )
-                        onSave(completed)
+                        if (isRecordingDigVoice) stopDigVoiceRecording()
+                        stopDigPlayback()
+                        onSave(buildUpdatedEntry(entry, complete = true))
                         editingLog = null
+                        digRecordingMessage = null
                     },
+                    enabled = !isRecordingDigVoice,
                     modifier = Modifier.weight(1f).height(48.dp).testTag("complete_excavation_log_button"),
                 ) { Text("Complete dig") }
             }
-            TextButton(onClick = { editingLog = null }) { Text("Close dig editor") }
+            TextButton(onClick = { closeDigEditor() }) { Text("Close dig editor") }
         }
     }
 }
@@ -1417,11 +1764,17 @@ private fun SurveyBoundaryCard(
     boundaries: List<SurveyBoundary>,
     breadcrumbTracks: List<BreadcrumbTrack>,
     hasGpsFix: Boolean,
+    deviceLatitude: Double? = null,
+    deviceLongitude: Double? = null,
     onCreateFromTrail: (BreadcrumbTrack) -> Unit,
     onCreateAroundGps: () -> Unit,
     onDelete: (SurveyBoundary) -> Unit,
+    onUpdateBoundary: (SurveyBoundary) -> Unit = {},
 ) {
     val trailWithEnoughPoints = breadcrumbTracks.firstOrNull { it.points.size >= 3 }
+    var renameTarget by remember { mutableStateOf<SurveyBoundary?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         modifier = Modifier.fillMaxWidth().testTag("survey_boundary_card"),
@@ -1430,7 +1783,7 @@ private fun SurveyBoundaryCard(
             Text("Survey boundary", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
                 "Keep field work inside a permitted search area. Create from a GPS trail (≥3 points) " +
-                    "or a 100 m box around your current fix.",
+                    "or a 100 m box around your current fix. Edit name and vertices offline.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1442,19 +1795,59 @@ private fun SurveyBoundaryCard(
                 )
             } else {
                 boundaries.forEach { boundary ->
-                    Row(
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(boundary.displayName, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "${boundary.vertices.size} vertices",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(boundary.displayName, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${boundary.vertices.size} vertices",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { onDelete(boundary) }) { Text("Delete") }
                         }
-                        TextButton(onClick = { onDelete(boundary) }) { Text("Delete") }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    renameTarget = boundary
+                                    renameText = boundary.displayName
+                                },
+                                modifier = Modifier.testTag("boundary_edit_name_${boundary.id}"),
+                            ) { Text("Edit name") }
+                            if (boundary.vertices.size > 3) {
+                                TextButton(
+                                    onClick = {
+                                        onUpdateBoundary(
+                                            boundary.copy(vertices = boundary.vertices.dropLast(1)),
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("boundary_remove_vertex_${boundary.id}"),
+                                ) { Text("Remove last vertex") }
+                            }
+                            TextButton(
+                                onClick = {
+                                    val lat = deviceLatitude ?: return@TextButton
+                                    val lon = deviceLongitude ?: return@TextButton
+                                    onUpdateBoundary(
+                                        boundary.copy(
+                                            vertices = boundary.vertices + BoundaryVertex(lat, lon),
+                                        ),
+                                    )
+                                },
+                                enabled = hasGpsFix && deviceLatitude != null && deviceLongitude != null,
+                                modifier = Modifier.testTag("boundary_add_gps_vertex_${boundary.id}"),
+                            ) { Text("Add GPS vertex") }
+                        }
                     }
                 }
             }
@@ -1471,6 +1864,37 @@ private fun SurveyBoundaryCard(
                 ) { Text("Around GPS") }
             }
         }
+    }
+
+    renameTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Edit boundary name") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it.take(80) },
+                    label = { Text("Display name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("boundary_rename_field"),
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val name = renameText.trim().ifBlank { target.displayName }
+                        onUpdateBoundary(target.copy(displayName = name))
+                        renameTarget = null
+                    },
+                    modifier = Modifier.testTag("boundary_rename_save"),
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 
