@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -97,6 +98,7 @@ fun AiAnalysisWorkspace(
     val historicMapAgreementScore by viewModel.historicMapAgreementScore.collectAsStateWithLifecycle()
     val visualizationMode by viewModel.visualizationMode.collectAsStateWithLifecycle()
     val inspectedCellSummary by viewModel.inspectedCellSummary.collectAsStateWithLifecycle()
+    val terrainQuality by viewModel.terrainQuality.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val analyzedDatasets by viewModel.analyzedDatasets.collectAsStateWithLifecycle()
 
@@ -106,10 +108,25 @@ fun AiAnalysisWorkspace(
         assistantViewModel.setHistoricMapAgreementScore(historicMapAgreementScore)
     }
 
-    val secondaryDataset = remember(analyzedDatasets, terrainKey) {
-        // Prefer a different dataset than the active terrain key for compare-two-sites.
-        analyzedDatasets.firstOrNull { it.datasetKey != terrainKey }
+    val alternateDatasets = remember(analyzedDatasets, terrainKey) {
+        analyzedDatasets.filter { it.datasetKey != terrainKey }
     }
+    var selectedSecondaryKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(alternateDatasets, terrainKey) {
+        if (selectedSecondaryKey != null &&
+            alternateDatasets.none { it.datasetKey == selectedSecondaryKey }
+        ) {
+            selectedSecondaryKey = null
+        }
+        if (selectedSecondaryKey == null && alternateDatasets.isNotEmpty()) {
+            selectedSecondaryKey = alternateDatasets.first().datasetKey
+        }
+    }
+    val secondaryDataset = remember(alternateDatasets, selectedSecondaryKey) {
+        alternateDatasets.firstOrNull { it.datasetKey == selectedSecondaryKey }
+            ?: alternateDatasets.firstOrNull()
+    }
+    var selectedCandidateSummary by rememberSaveable { mutableStateOf("") }
 
     val fieldPack = remember(
         summary,
@@ -129,6 +146,8 @@ fun AiAnalysisWorkspace(
         visualizationMode,
         secondaryDataset,
         inspectedCellSummary,
+        selectedCandidateSummary,
+        terrainQuality,
     ) {
         val secondarySummary = secondaryDataset?.let { ds ->
             buildString {
@@ -165,6 +184,8 @@ fun AiAnalysisWorkspace(
             secondaryFindCount = secondaryDataset?.let { ds ->
                 signals.count { it.datasetKey == ds.datasetKey || it.terrainKey == ds.datasetKey }
             } ?: 0,
+            selectedCandidateSummary = selectedCandidateSummary,
+            terrainQualitySummary = terrainQuality?.bannerLine().orEmpty(),
         )
     }
 
@@ -650,6 +671,16 @@ fun AiAnalysisWorkspace(
                 }
 
                 if (showTargetDetails.value && historicTargets.isNotEmpty()) {
+                    if (selectedCandidateSummary.isNotBlank()) {
+                        Text(
+                            "AI focus set — dig brief / evidence chain will prioritize it",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .padding(bottom = 4.dp)
+                                .testTag("ai_focus_candidate_hint"),
+                        )
+                    }
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -677,6 +708,20 @@ fun AiAnalysisWorkspace(
                                                 longitude = lon,
                                             ),
                                         )
+                                    }
+                                },
+                                onFocusForAi = {
+                                    selectedCandidateSummary = buildString {
+                                        append(target.type.label)
+                                        append(" · score=").append((target.score * 100f).toInt()).append("%")
+                                        append(" · x=").append("%.1f".format(target.xPercent)).append("%")
+                                        append(" y=").append("%.1f".format(target.yPercent)).append("%")
+                                        if (target.evidence.isNotEmpty()) {
+                                            append(" · evidence=").append(target.evidence.joinToString("; "))
+                                        }
+                                        if (target.cautionReasons.isNotEmpty()) {
+                                            append(" · cautions=").append(target.cautionReasons.joinToString("; "))
+                                        }
                                     }
                                 },
                                 onLog = {
@@ -745,6 +790,43 @@ fun AiAnalysisWorkspace(
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
+        if (alternateDatasets.size > 1) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .testTag("ai_secondary_dataset_picker"),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Compare secondary site",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    alternateDatasets.forEach { ds ->
+                        FilterChip(
+                            selected = secondaryDataset?.datasetKey == ds.datasetKey,
+                            onClick = { selectedSecondaryKey = ds.datasetKey },
+                            label = {
+                                Text(
+                                    ds.displayName.take(28).ifBlank { ds.datasetKey.take(12) },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                )
+                            },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                    }
+                }
+            }
+        }
+
         AiCloudPanel(
             terrainSummary = summary,
             grid = grid,
@@ -756,6 +838,7 @@ fun AiAnalysisWorkspace(
                 viewModel.applyAiFindSuggestions(signalId, metal, outcome, status, notes)
             },
             fieldSessionPack = fieldPack,
+            onClearFocusedCandidate = { selectedCandidateSummary = "" },
             onApplyLighting = { azimuth, altitude ->
                 viewModel.updateSunAzimuth(azimuth)
                 viewModel.updateSunAltitude(altitude)
@@ -858,6 +941,7 @@ private fun TargetDetailCard(
     target: MetalDetectingTarget,
     onLog: () -> Unit,
     onNavigate: (() -> Unit)? = null,
+    onFocusForAi: (() -> Unit)? = null,
     depthEstimate: DigDepthEstimate? = null,
     zoneId: Int? = null,
 ) {
@@ -896,6 +980,17 @@ private fun TargetDetailCard(
                         contentPadding = CompactButtonPadding,
                     ) {
                         Text("Nav", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                if (onFocusForAi != null) {
+                    OutlinedButton(
+                        onClick = onFocusForAi,
+                        modifier = Modifier
+                            .height(CompactButtonHeight)
+                            .testTag("ai_focus_candidate"),
+                        contentPadding = CompactButtonPadding,
+                    ) {
+                        Text("Focus AI", style = MaterialTheme.typography.labelSmall)
                     }
                 }
                 OutlinedButton(

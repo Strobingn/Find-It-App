@@ -223,6 +223,7 @@ fun AiCloudPanel(
     ) -> Unit = { _, _, _, _, _ -> },
     /** Overrides the session pack built from [terrainSummary]/[grid]/[metadata] below, if supplied. */
     fieldSessionPack: FieldAiSessionPack? = null,
+    onClearFocusedCandidate: () -> Unit = {},
     onApplyLighting: (azimuth: Float, altitude: Float) -> Unit = { _, _ -> },
     onApplyVizMode: (Int) -> Unit = {},
     /** Ids stay on assistantViewModel.state until the Finds tab reads and consumes them — this is
@@ -537,6 +538,62 @@ fun AiCloudPanel(
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
+                // Session-pack readiness: what context will ride with the next field-pack run.
+                val readiness = remember(baseFieldPack) {
+                    buildList {
+                        if (baseFieldPack.inspectedCellSummary.isNotBlank()) add("Cell")
+                        if (baseFieldPack.selectedCandidateSummary.isNotBlank()) add("Focus")
+                        if (baseFieldPack.secondaryTerrainSummary.isNotBlank() ||
+                            baseFieldPack.secondaryTerrainContext.isNotBlank()
+                        ) {
+                            add("Secondary")
+                        }
+                        if (baseFieldPack.localResult != null) add("Local AI")
+                        val photos = baseFieldPack.signals.sumOf { it.photoUris.size }
+                        if (photos > 0) add("Photos $photos")
+                        if (baseFieldPack.signals.any { it.starred }) {
+                            add("★${baseFieldPack.signals.count { it.starred }}")
+                        }
+                        if (baseFieldPack.terrainQualitySummary.isNotBlank()) add("Quality")
+                    }
+                }
+                if (readiness.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .testTag("ai_pack_readiness"),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Context:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        readiness.forEach { label ->
+                            AssistChip(
+                                onClick = {},
+                                enabled = false,
+                                label = {
+                                    Text(label, style = MaterialTheme.typography.labelSmall)
+                                },
+                                modifier = Modifier.height(CompactButtonHeight),
+                            )
+                        }
+                        if (baseFieldPack.selectedCandidateSummary.isNotBlank()) {
+                            TextButton(
+                                onClick = onClearFocusedCandidate,
+                                modifier = Modifier
+                                    .height(CompactButtonHeight)
+                                    .testTag("ai_clear_focus_candidate"),
+                                contentPadding = CompactButtonPadding,
+                            ) {
+                                Text("Clear focus", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -653,6 +710,33 @@ fun AiCloudPanel(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    OutlinedButton(
+                        onClick = {
+                            val pack = baseFieldPack
+                            val candidates = pack.localResult?.candidates
+                                ?: state.localResult?.candidates
+                                ?: emptyList()
+                            val offlineDraft = FieldOfflineAssist.digBriefDraft(
+                                candidates = candidates,
+                                signals = pack.signals,
+                                excavationLogs = pack.excavationLogs,
+                                selectedCandidateSummary = pack.selectedCandidateSummary,
+                                inspectedCellSummary = pack.inspectedCellSummary,
+                            )
+                            assistantViewModel.postOfflineAssist(
+                                title = "Offline dig brief",
+                                body = offlineDraft,
+                                terrainKey = terrainKey,
+                            )
+                        },
+                        enabled = !state.isSending,
+                        modifier = Modifier
+                            .height(CompactButtonHeight)
+                            .testTag("ai_offline_dig_brief"),
+                        contentPadding = CompactButtonPadding,
+                    ) {
+                        Text("Offline dig brief", style = MaterialTheme.typography.labelSmall)
+                    }
                     OutlinedButton(
                         onClick = {
                             val pack = baseFieldPack

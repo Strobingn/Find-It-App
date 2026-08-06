@@ -169,6 +169,13 @@ data class FieldAiSessionPack(
     val secondaryCandidateCount: Int = 0,
     val secondaryFindCount: Int = 0,
     val secondaryTerrainContext: String = "",
+    /**
+     * Focused terrain candidate the operator picked (e.g. from target details).
+     * Used by dig brief / evidence chain / deep-dive when non-blank.
+     */
+    val selectedCandidateSummary: String = "",
+    /** Optional ground-quality banner (valid %, canopy, georef) — not metal/age/depth. */
+    val terrainQualitySummary: String = "",
 )
 
 object FieldAiCopilot {
@@ -335,8 +342,17 @@ object FieldAiCopilot {
         appendLine("3) What to look for with a metal detector / shovel test")
         appendLine("4) False-positive risks")
         appendLine("5) Suggested order and time budget (minutes)")
+        appendLine("Hard rule: LiDAR does not prove buried metal, age, or depth.")
         appendLine()
         append(sessionFacts(pack))
+        append(focusedCandidateBlock(pack))
+        if (pack.inspectedCellSummary.isNotBlank()) {
+            appendLine("--- Inspected cell (operator focus) ---")
+            appendLine(pack.inspectedCellSummary.take(2_000))
+            appendLine()
+        }
+        append(candidatesBrief(pack.localResult, limit = 10, detailed = true))
+        append(findsDetail(pack.signals.filter { it.starred || it.outcome != VerificationOutcome.UNVERIFIED }, limit = 15))
     }
 
     private fun siteNarrativePrompt(pack: FieldAiSessionPack): String = buildString {
@@ -418,6 +434,7 @@ object FieldAiCopilot {
         appendLine("If an image is attached, add MAP_TARGET lines for the best 3–6 check points.")
         appendLine()
         append(sessionFacts(pack))
+        append(focusedCandidateBlock(pack))
         append(candidatesBrief(pack.localResult, limit = 15, detailed = true))
     }
 
@@ -554,6 +571,11 @@ object FieldAiCopilot {
         appendLine("Hard rule: LiDAR does not prove buried metal, age, or depth.")
         appendLine()
         append(sessionFacts(pack))
+        append(focusedCandidateBlock(pack))
+        if (pack.selectedCandidateSummary.isNotBlank()) {
+            appendLine("Prioritize a full evidence chain for the FOCUSED candidate above, then cover the next top candidates.")
+            appendLine()
+        }
         append(candidatesBrief(pack.localResult, limit = 10, detailed = true))
         append(findsDetail(pack.signals, limit = 15))
         append(outcomeBreakdown(pack.signals))
@@ -591,8 +613,10 @@ object FieldAiCopilot {
             appendLine()
         }
         append(sessionFacts(pack))
+        append(photoInventory(pack))
         append(findsDetail(pack.signals, limit = 40))
         append(sitesSummary(pack.signals))
+        append(digsSummary(pack.excavationLogs))
     }
 
     private fun coverageGapAiPrompt(pack: FieldAiSessionPack): String = buildString {
@@ -659,6 +683,10 @@ object FieldAiCopilot {
         appendLine("Terrain summary: ${pack.terrainSummary}")
         appendLine("Raster: ${pack.gridWidth}x${pack.gridHeight} @ ${pack.cellSizeMeters} m/cell")
         appendLine("Sun: az=${pack.sunAzimuth}° alt=${pack.sunAltitude}°")
+        appendLine("Visualization mode: ${pack.visualizationMode} (${vizModeLabel(pack.visualizationMode)})")
+        if (pack.terrainQualitySummary.isNotBlank()) {
+            appendLine("Ground quality: ${pack.terrainQualitySummary}")
+        }
         val lat = pack.deviceLatitude
         val lon = pack.deviceLongitude
         if (lat != null && lon != null) {
@@ -668,13 +696,63 @@ object FieldAiCopilot {
         }
         appendLine("Logged finds: ${pack.signals.size}")
         appendLine("Starred finds: ${pack.signals.count { it.starred }}")
+        val photoFinds = pack.signals.count { it.photoUris.isNotEmpty() }
+        val voiceFinds = pack.signals.count { it.voiceNoteUris.isNotEmpty() }
+        val totalPhotos = pack.signals.sumOf { it.photoUris.size } +
+            pack.excavationLogs.sumOf { it.photoUris.size }
+        val totalVoice = pack.signals.sumOf { it.voiceNoteUris.size } +
+            pack.excavationLogs.sumOf { it.voiceNoteUris.size }
+        appendLine("Media: $totalPhotos photo(s) on $photoFinds find(s); $totalVoice voice note(s) on $voiceFinds find(s)")
         appendLine("Dig logs: ${pack.excavationLogs.size}")
         appendLine("GPS trails: ${pack.breadcrumbTracks.size}")
         pack.localResult?.let {
             appendLine("Local analysis recommendation: ${it.recommendation}")
             appendLine("Local candidates: ${it.candidates.size}")
         } ?: appendLine("Local analysis: not run")
+        if (pack.inspectedCellSummary.isNotBlank()) {
+            appendLine("Inspected cell: present (${pack.inspectedCellSummary.take(80)}…)")
+        }
+        if (pack.selectedCandidateSummary.isNotBlank()) {
+            appendLine("Focused candidate: present")
+        }
+        if (pack.secondaryTerrainSummary.isNotBlank() || pack.secondaryTerrainContext.isNotBlank()) {
+            appendLine("Secondary site for compare: present")
+        }
         appendLine()
+    }
+
+    private fun focusedCandidateBlock(pack: FieldAiSessionPack): String {
+        if (pack.selectedCandidateSummary.isBlank()) return ""
+        return buildString {
+            appendLine("--- Focused candidate (operator selected) ---")
+            appendLine(pack.selectedCandidateSummary.take(4_000))
+            appendLine()
+        }
+    }
+
+    private fun photoInventory(pack: FieldAiSessionPack): String {
+        val withPhotos = pack.signals.filter { it.photoUris.isNotEmpty() }
+        val digWithPhotos = pack.excavationLogs.filter { it.photoUris.isNotEmpty() }
+        if (withPhotos.isEmpty() && digWithPhotos.isEmpty()) {
+            return "Photo inventory: no photos attached to finds or dig logs yet.\n"
+        }
+        return buildString {
+            appendLine("--- Photo inventory ---")
+            withPhotos.take(30).forEach { s ->
+                append("Find id=${s.id} photos=${s.photoUris.size}")
+                if (s.voiceNoteUris.isNotEmpty()) append(" voice=${s.voiceNoteUris.size}")
+                append(" · ${s.metalType.label} · ${s.status}")
+                if (s.notes.isNotBlank()) append(" · notes=${s.notes.take(80)}")
+                appendLine()
+            }
+            digWithPhotos.take(15).forEach { log ->
+                appendLine(
+                    "Dig targetId=${log.targetId} photos=${log.photoUris.size}" +
+                        if (log.voiceNoteUris.isNotEmpty()) " voice=${log.voiceNoteUris.size}" else "",
+                )
+            }
+            appendLine()
+        }
     }
 
     private fun findsDetail(signals: List<TargetSignal>, limit: Int): String {
@@ -690,6 +768,11 @@ object FieldAiCopilot {
                 append("${i + 1}. id=${s.id} ${s.metalType.label}")
                 if (s.starred) append(" ★")
                 append(" · $geo · ${s.status} · ${s.outcome.label}")
+                if (s.photoUris.isNotEmpty()) append(" · photos=${s.photoUris.size}")
+                if (s.voiceNoteUris.isNotEmpty()) append(" · voice=${s.voiceNoteUris.size}")
+                s.detectedFeatureType?.takeIf { it.isNotBlank() }?.let {
+                    append(" · feature=$it")
+                }
                 if (s.notes.isNotBlank()) append(" · notes=${s.notes.take(120)}")
                 appendLine()
             }
@@ -719,9 +802,13 @@ object FieldAiCopilot {
                     .filter { it.isNotBlank() }
                     .joinToString(" · ")
                     .take(100)
+                val media = buildString {
+                    if (log.photoUris.isNotEmpty()) append(" photos=${log.photoUris.size}")
+                    if (log.voiceNoteUris.isNotEmpty()) append(" voice=${log.voiceNoteUris.size}")
+                }
                 appendLine(
                     "target=${log.targetId} complete=${log.isComplete} " +
-                        "depth=${log.depthCentimeters ?: "?"} notes=$notes",
+                        "depth=${log.depthCentimeters ?: "?"}$media notes=$notes",
                 )
             }
         }

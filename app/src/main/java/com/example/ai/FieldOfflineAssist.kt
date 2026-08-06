@@ -2,6 +2,7 @@ package com.example.ai
 
 import com.example.analysis.TerrainFeatureCandidate
 import com.example.data.TargetSignal
+import com.example.data.VerificationOutcome
 import com.example.data.field.BreadcrumbTrack
 import com.example.data.field.ExcavationLogEntry
 import com.example.data.field.FieldNavigation
@@ -10,9 +11,10 @@ import kotlin.math.hypot
 import kotlin.math.sqrt
 
 /**
- * Pure offline (no network) drafts for return-trip order and coverage-gap map targets.
+ * Pure offline (no network) drafts for return-trip order, coverage-gap map targets,
+ * and a next-dig brief from ranked candidates + starred/open work.
  * Complements cloud [FieldAiFeature.RETURN_TRIP_PLANNER] / [FieldAiFeature.COVERAGE_GAP_AI]
- * when keys are missing or the operator wants an instant local draft.
+ * / [FieldAiFeature.DIG_BRIEF] when keys are missing or the operator wants an instant local draft.
  */
 object FieldOfflineAssist {
 
@@ -28,6 +30,96 @@ object FieldOfflineAssist {
         val label: String,
         val confidence: Float,
     )
+
+    /**
+     * Offline dig brief from top local candidates, starred finds, open digs, and optional focus.
+     * No network; never claims metal/age/depth from LiDAR.
+     */
+    fun digBriefDraft(
+        candidates: List<TerrainFeatureCandidate>,
+        signals: List<TargetSignal>,
+        excavationLogs: List<ExcavationLogEntry>,
+        selectedCandidateSummary: String = "",
+        inspectedCellSummary: String = "",
+        maxCandidates: Int = 5,
+    ): String {
+        val top = candidates.sortedByDescending { it.score }.take(maxCandidates.coerceAtLeast(1))
+        val starred = signals.filter { it.starred }
+        val openDigs = excavationLogs.filter { !it.isComplete }
+        val verifiedNearby = signals.filter {
+            it.outcome == VerificationOutcome.CONFIRMED_FEATURE ||
+                it.outcome == VerificationOutcome.REJECTED_FALSE_POSITIVE
+        }
+
+        return buildString {
+            appendLine("Offline dig brief")
+            appendLine()
+            appendLine("Hard rule: LiDAR does not prove buried metal, age, or depth.")
+            appendLine("This is a local ranking draft — not a cloud plan.")
+            appendLine()
+            if (selectedCandidateSummary.isNotBlank()) {
+                appendLine("--- Focused candidate ---")
+                appendLine(selectedCandidateSummary.take(1_500))
+                appendLine()
+            }
+            if (inspectedCellSummary.isNotBlank()) {
+                appendLine("--- Inspected cell ---")
+                appendLine(inspectedCellSummary.take(800))
+                appendLine()
+            }
+            appendLine("--- Priority check points (top candidates) ---")
+            if (top.isEmpty()) {
+                appendLine("No terrain candidates. Run local analysis first, then retry.")
+            } else {
+                top.forEachIndexed { i, c ->
+                    appendLine(
+                        String.format(
+                            Locale.US,
+                            "%d. %s · score=%.0f%% · x=%.1f%% y=%.1f%%%s",
+                            i + 1,
+                            c.type.label,
+                            c.score * 100f,
+                            c.xPercent,
+                            c.yPercent,
+                            if (c.evidence.isNotEmpty()) {
+                                " · evidence=${c.evidence.take(2).joinToString(";")}"
+                            } else {
+                                ""
+                            },
+                        ),
+                    )
+                }
+            }
+            appendLine()
+            appendLine("--- Field context ---")
+            appendLine("Starred finds: ${starred.size}")
+            starred.take(8).forEach { s ->
+                appendLine(
+                    "  ★ id=${s.id} ${s.metalType.label} · grid ${s.gridX.toInt()},${s.gridY.toInt()}" +
+                        if (s.notes.isNotBlank()) " · ${s.notes.take(60)}" else "",
+                )
+            }
+            appendLine("Open digs: ${openDigs.size}")
+            openDigs.take(8).forEach { log ->
+                appendLine("  dig targetId=${log.targetId} depth=${log.depthCentimeters ?: "?"}")
+            }
+            if (verifiedNearby.isNotEmpty()) {
+                appendLine("Verified outcomes nearby: ${verifiedNearby.size}")
+                verifiedNearby.take(6).forEach { s ->
+                    appendLine("  id=${s.id} ${s.outcome.label} · ${s.metalType.label}")
+                }
+            }
+            appendLine()
+            appendLine("Suggested order: (1) focused/inspected cell if any, (2) top candidates by score,")
+            appendLine("(3) starred finds without outcomes, (4) finish open digs.")
+            appendLine("Budget: ~10–15 min per check point including walk time.")
+            appendLine()
+            appendLine("False-positive risks: modern disturbance, natural benches, plow furrows,")
+            appendLine("drainage, and canopy edge artifacts can mimic cultural flat/raised platforms.")
+            appendLine()
+            appendLine("Offline draft only — not a cloud plan. LiDAR does not prove buried metal.")
+        }.trimEnd()
+    }
 
     /**
      * Nearest-neighbor order of starred finds (or all georeferenced if none starred),
