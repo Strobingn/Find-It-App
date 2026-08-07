@@ -23,8 +23,11 @@ class AiWorkspaceConfigTest {
     }
 
     @Test
-    fun activeAiPanelKeepsBuiltInQuestions() {
-        assertEquals(5, AI_BUILT_IN_QUESTIONS.size)
+    fun activeAiPanelKeepsExpandedFieldQuestions() {
+        // Field Closure Pack expands the original five prompts into sixteen focused
+        // field-analysis prompts. Keep this explicit so the pack cannot silently
+        // disappear when the AI panel is refactored.
+        assertEquals(16, AI_BUILT_IN_QUESTIONS.size)
         assertEquals(AI_BUILT_IN_QUESTIONS.size, AI_BUILT_IN_QUESTIONS.distinct().size)
         assertTrue(AI_BUILT_IN_QUESTIONS.all(String::isNotBlank))
     }
