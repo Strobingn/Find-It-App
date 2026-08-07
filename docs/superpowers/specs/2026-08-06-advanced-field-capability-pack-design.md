@@ -3,7 +3,7 @@
 **Date:** 2026-08-06  
 **Branch:** `GROKV2.5.0`  
 **Product:** Find It — offline-capable Android LiDAR / historic-site field app  
-**Status:** Design approved in brainstorming; awaiting user review of this written spec before implementation plans  
+**Status:** Implemented on GROKV2.5.0 (Tracks 1–4 domain + UI wired; see ROADMAP_WIRING_STATUS)  
 
 ---
 

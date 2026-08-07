@@ -97,11 +97,11 @@ Home + Terrain quality banners; ethics on mark/dig; offline assist drafts; VIZ/N
 
 | Item | Reason |
 |------|--------|
-| ARCore Geospatial / VPS cloud localization | Needs Google Cloud key + coverage; outdoor woods often unsupported |
+| ARCore Geospatial live Earth session / API key cloud config | Decision + degrade wired (`GeospatialPoseProvider`); full VPS Earth tracking needs device session + Google config |
 | Cloud multi-device sync delivery | External service; local queue + conflict resolver ready |
-| Neural historic-map CV (deep OCR / vectorization) | Ink-threshold extractor ships; DL models not bundled |
-| Two-epoch change detection | Not started |
-| Large-mosaic stress / release-gate device matrix | Open product QA |
+| Neural historic-map on-device DL weights | Local ink + **cloud enhance optional** wired; heavy on-device models not bundled |
+| Two-epoch dual live-grid residual map | Candidate delta + align math + UI; dual simultaneous live DEMs residual optional enhancement |
+| Large-mosaic multi-tile live open stress | **MosaicStressSuite** in Tools; full multi-tile open instrumentation still benefits from real large fixtures |
 | QR camera-scan import product | Text/payload handoff only |
 
 ---

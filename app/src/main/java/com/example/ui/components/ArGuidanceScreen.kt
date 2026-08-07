@@ -61,6 +61,7 @@ import com.example.data.field.FieldNavigation
 import com.example.data.field.NavigationTarget
 import com.example.geospatial.ArCoreAvailability
 import com.example.geospatial.ArCoreWorldAnchor
+import com.example.geospatial.GeospatialPoseProvider
 import com.example.geospatial.MeasurementFormat
 import com.example.geospatial.trueToMagneticBearingDegrees
 import java.util.concurrent.Executors
@@ -161,7 +162,32 @@ fun ArGuidanceScreen(
 
     val useCamera = cameraGranted && !cameraFailed && !forceFallback
     val arCoreSupported = remember(context) { ArCoreAvailability.isSupported(context) }
+    val geospatialOnClasspath = remember { GeospatialPoseProvider.isGeospatialApiOnClasspath() }
     var useWorldAnchor by remember { mutableStateOf(true) }
+    val geospatialDecision = remember(
+        arCoreSupported,
+        geospatialOnClasspath,
+        deviceLatitude,
+        headingDegrees,
+    ) {
+        GeospatialPoseProvider.decideMode(
+            arCoreInstalled = arCoreSupported,
+            geospatialApiAvailable = geospatialOnClasspath,
+            // Woods-first product: do not assume VPS until a live Earth session confirms it.
+            vpsCoverageLikely = false,
+            hasGps = deviceLatitude != null && deviceLongitude != null,
+            hasHeading = headingDegrees != null,
+        )
+    }
+    val poseSample = remember(geospatialDecision, deviceLatitude, deviceLongitude, headingDegrees, deviceAccuracyMeters) {
+        GeospatialPoseProvider.sample(
+            decision = geospatialDecision,
+            deviceLat = deviceLatitude,
+            deviceLon = deviceLongitude,
+            headingDegrees = headingDegrees,
+            accuracyMeters = deviceAccuracyMeters,
+        )
+    }
     val worldAnchor = remember(
         deviceLatitude,
         deviceLongitude,
@@ -297,12 +323,11 @@ fun ArGuidanceScreen(
                     }
                     Text(
                         buildString {
-                            if (useCamera) append("Camera") else append("Compass fallback")
+                            append(GeospatialPoseProvider.modeLabel(poseSample.mode))
                             append(" · ")
-                            append(
-                                worldAnchor?.modeLabel
-                                    ?: if (useCamera) "hold phone upright" else "no camera",
-                            )
+                            if (useCamera) append("Camera") else append("No camera")
+                            append(" · ")
+                            append(poseSample.label)
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

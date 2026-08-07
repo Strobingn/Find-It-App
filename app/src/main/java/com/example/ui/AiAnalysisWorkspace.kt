@@ -197,6 +197,7 @@ fun AiAnalysisWorkspace(
     val showHistoricTargets = rememberSaveable { mutableStateOf(AI_HISTORIC_TARGETS_DEFAULT_VISIBLE) }
     val showCloudTargets = rememberSaveable { mutableStateOf(true) }
     val showDatasetComparison = rememberSaveable { mutableStateOf(false) }
+    val showTwoEpochCompare = rememberSaveable { mutableStateOf(false) }
     val pendingLocalLayer = remember { mutableStateOf<TerrainDerivedLayer?>(null) }
     val localBitmapAtRequest = remember { mutableStateOf(aiState.localLayerBitmap) }
     val sourceRenderLabel = aiSourceVisualizationLabel(visualizationMode)
@@ -613,6 +614,11 @@ fun AiAnalysisWorkspace(
                             modifier = Modifier.height(CompactButtonHeight).testTag("ai_compare_datasets_button"),
                             contentPadding = CompactButtonPadding,
                         ) { Text("Compare datasets", style = MaterialTheme.typography.labelSmall) }
+                        OutlinedButton(
+                            onClick = { showTwoEpochCompare.value = true },
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_two_epoch_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) { Text("Two-epoch Δ", style = MaterialTheme.typography.labelSmall) }
                     }
                     Text("${signals.size} saved", style = MaterialTheme.typography.labelMedium)
                 }
@@ -863,6 +869,14 @@ fun AiAnalysisWorkspace(
             datasets = analyzedDatasets,
             onDismiss = { showDatasetComparison.value = false },
             onDeleteDataset = viewModel::deleteDatasetSnapshot,
+        )
+    }
+    if (showTwoEpochCompare.value) {
+        TwoEpochCompareDialog(
+            datasets = analyzedDatasets,
+            liveGridA = grid.takeIf { it.width > 2 },
+            liveGridB = null, // second live grid not dual-loaded; residual when same session re-import
+            onDismiss = { showTwoEpochCompare.value = false },
         )
     }
 }

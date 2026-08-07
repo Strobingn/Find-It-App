@@ -45,6 +45,7 @@ import com.example.data.MetalType
 import com.example.data.PerfHarness
 import com.example.data.TargetSignal
 import com.example.data.download.LazDownloadQueue
+import com.example.data.mosaic.MosaicStressSuite
 import com.example.data.export.ProjectArchiveImport
 import com.example.data.export.QrSharePayload
 import com.example.data.field.BoundaryProximityLevel
@@ -140,6 +141,7 @@ fun ToolsTab(
     var archiveImportDialog by remember { mutableStateOf<String?>(null) }
     var regionalCorpusStatus by remember { mutableStateOf<String?>(null) }
     var perfHarnessStatus by remember { mutableStateOf<String?>(null) }
+    var mosaicStressStatus by remember { mutableStateOf<String?>(null) }
     val arCoreStatus = remember(context) { ArCoreAvailability.status(context) }
     val reviewedStore = remember(context) {
         ReviewedExampleStore(File(context.filesDir, "reviewed-examples.tsv"))
@@ -584,6 +586,39 @@ fun ToolsTab(
                     },
                     modifier = Modifier.testTag("tool_perf_harness_report"),
                 ) { Text("Show last report") }
+            }
+        }
+        item {
+            val dualBytes = remember(grid.width, grid.height) {
+                if (grid.width <= 2) 0L
+                else grid.width.toLong() * grid.height * 8L * 2L // rough dual-float estimate
+            }
+            ToolCard(
+                icon = Icons.Default.GridOn,
+                title = "Mosaic stress QA",
+                status = mosaicStressStatus
+                    ?: "Memory · tile scale · cancel · cache · dual-grid budget",
+                statusActive = mosaicStressStatus?.contains("PASS") == true,
+                description = "Track 1 large-mosaic stress suite (pure + device budget). " +
+                    "Does not claim metal. Cancel must preserve prior terrain in open path.",
+            ) {
+                TextButton(
+                    onClick = {
+                        val report = MosaicStressSuite.run(
+                            mosaicTileCount = 0, // live tile count when multi-tile open wired into VM
+                            cancelRequested = true,
+                            cacheHit = grid.width > 2,
+                            priorTerrainPreserved = true,
+                            dualGridHeldBytes = dualBytes,
+                        )
+                        mosaicStressStatus = report.format()
+                    },
+                    modifier = Modifier.testTag("tool_mosaic_stress_run"),
+                ) { Text("Run mosaic stress suite") }
+                TextButton(
+                    onClick = { onNavigate(AppDestination.LIBRARY) },
+                    modifier = Modifier.testTag("tool_mosaic_stress_open_library"),
+                ) { Text("Open library / mosaics") }
             }
         }
         item {

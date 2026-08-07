@@ -101,10 +101,12 @@ import com.example.data.historicmap.GeoReferencer
 import com.example.data.historicmap.HistoricMapAgreementScorer
 import com.example.data.historicmap.HistoricMapControlPoint
 import com.example.data.historicmap.HistoricMapFeature
-import com.example.data.historicmap.HistoricMapFeatureExtractor
+import com.example.ai.GeminiConversationTurn
+import com.example.ai.TerrainAiGateway
 import com.example.data.historicmap.HistoricMapGeoreference
 import com.example.data.historicmap.MapFeatureAgreement
 import com.example.data.historicmap.MapFeatureType
+import com.example.data.historicmap.MapVectorizationGateway
 import com.example.data.field.BoundaryVertex
 import com.example.data.field.BreadcrumbTrack
 import com.example.data.field.FieldWaypoint
@@ -618,7 +620,7 @@ fun TerrainGoogleMapScreen(
         }
     }
 
-    fun autoExtractHistoricFeatures() {
+    fun autoExtractHistoricFeatures(cloudEnhance: Boolean = false) {
         val active = historicMaps.firstOrNull { it.id == activeHistoricMapId } ?: return
         val bitmap = historicBitmaps[active.id]?.takeIf { !it.isRecycled }
         if (bitmap == null) {
@@ -631,24 +633,61 @@ fun TerrainGoogleMapScreen(
             historicMapMessage = "Fit control points first — auto-extract needs a georeference transform."
             return
         }
-        historicMapMessage = "Auto-extracting features…"
+        historicMapMessage = if (cloudEnhance) "Local ink + cloud enhance…" else "Auto-extracting (local ink)…"
+        val appCtx = context.applicationContext
         scope.launch(Dispatchers.Default) {
             val w = bitmap.width
             val h = bitmap.height
             val pixels = IntArray(w * h)
             bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-            val result = HistoricMapFeatureExtractor.extract(
+            var result = MapVectorizationGateway.extractLocal(
                 pixels = pixels,
                 width = w,
                 height = h,
                 mapId = active.id,
                 transform = transform,
             )
+            if (cloudEnhance) {
+                runCatching {
+                    withContext(Dispatchers.Main) { historicMapMessage = "Cloud map vector enhance…" }
+                    val gateway = TerrainAiGateway(appCtx)
+                    val answer = gateway.generate(
+                        conversation = listOf(
+                            GeminiConversationTurn(
+                                role = "user",
+                                text = MapVectorizationGateway.cloudUserPrompt(
+                                    result,
+                                    "site map ${active.displayName} · ${active.confidence.label}",
+                                ),
+                            ),
+                        ),
+                        systemContext = MapVectorizationGateway.cloudSystemPrompt(),
+                        image = null,
+                    )
+                    result = MapVectorizationGateway.mergeCloudAnswer(
+                        local = result,
+                        answerText = answer.text,
+                        mapId = active.id,
+                        providerLabel = answer.provider.label,
+                        fallbackReason = answer.fallbackReason,
+                    )
+                }.onFailure { err ->
+                    withContext(Dispatchers.Main) {
+                        historicMapMessage =
+                            "Cloud enhance failed — kept local drafts. ${err.localizedMessage ?: ""}"
+                    }
+                }
+            }
             withContext(Dispatchers.IO) {
                 result.features.forEach { historicMapFeatureDao.upsert(it.toEntity()) }
             }
             withContext(Dispatchers.Main) {
-                historicMapMessage = result.note
+                val mode = if (result.mode == MapVectorizationGateway.Mode.CLOUD_ENHANCE) {
+                    "Mode: Cloud"
+                } else {
+                    "Mode: Local"
+                }
+                historicMapMessage = "$mode · ${result.note}"
             }
         }
     }
@@ -932,7 +971,8 @@ fun TerrainGoogleMapScreen(
                         ?: MapFeatureType.ROAD
                     addHistoricPointFeatureAtLastTap(type)
                 },
-                onAutoExtractFeatures = { autoExtractHistoricFeatures() },
+                onAutoExtractFeatures = { autoExtractHistoricFeatures(cloudEnhance = false) },
+                onCloudEnhanceFeatures = { autoExtractHistoricFeatures(cloudEnhance = true) },
                 onDeleteMapFeature = { deleteHistoricFeature(it) },
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 92.dp, end = 12.dp).width(280.dp),
             )
@@ -1314,6 +1354,7 @@ private fun HistoricMapPanel(
     onAddFeatureFromControlPoints: () -> Unit = {},
     onAddPointFeatureAtLastTap: () -> Unit = {},
     onAutoExtractFeatures: () -> Unit = {},
+    onCloudEnhanceFeatures: () -> Unit = {},
     onDeleteMapFeature: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -1590,7 +1631,16 @@ private fun HistoricMapPanel(
                         .fillMaxWidth()
                         .testTag("historic_feature_auto_extract"),
                 ) {
-                    Text("Auto-extract roads / walls / structures")
+                    Text("Auto-extract (local ink)")
+                }
+                OutlinedButton(
+                    onClick = onCloudEnhanceFeatures,
+                    enabled = active.controlPoints.size >= 2 || active.transformStorage != null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("historic_feature_cloud_enhance"),
+                ) {
+                    Text("Enhance online (cloud optional)")
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
