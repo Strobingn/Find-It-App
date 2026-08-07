@@ -241,57 +241,6 @@ private fun FindItHomeScreen(
             }
 
             item {
-                val recent = remember(viewModel) { viewModel.listRecentProjects() }
-                if (recent.isNotEmpty()) {
-                    Text(
-                        text = "RECENT PROJECTS",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    recent.take(5).forEach { project ->
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 8.dp),
-                            onClick = onOpenWorkspace,
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    Icons.Default.UploadFile,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
-                                Spacer(Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        project.displayName,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Text(
-                                        "Tap workspace → Import to reopen",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
                 Text(
                     text = "QUICK START",
                     style = MaterialTheme.typography.labelLarge,
