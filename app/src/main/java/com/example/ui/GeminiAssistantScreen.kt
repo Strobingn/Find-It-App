@@ -57,18 +57,21 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.ai.AiTargetClassifier
 import com.example.ai.FieldAiCopilot
 import com.example.ai.FieldAiFeature
 import com.example.ai.FieldAiSessionPack
 import com.example.ai.GeminiApiClient
 import com.example.ai.GeminiConversationTurn
 import com.example.ai.GeminiTerrainImageEncoder
+import com.example.ai.AiTargetClassifier
 import com.example.ai.OpenAiApiClient
 import com.example.ai.TerrainAiGateway
 import com.example.ai.TerrainAiProvider
 import com.example.ai.TerrainVisionSession
 import com.example.ai.TerrainVisionSnapshot
+import com.example.analysis.ReviewedCandidateExample
+import com.example.analysis.ReviewedExampleStore
+import com.example.analysis.ReviewedVerdict
 import com.example.analysis.TerrainDerivedLayer
 import com.example.analysis.TerrainDerivedLayerCache
 import com.example.analysis.TerrainFeatureCandidate
@@ -79,15 +82,18 @@ import com.example.analysis.VerifiedFeedback
 import com.example.analysis.VerifiedFeedbackPoint
 import com.example.analysis.ml.CandidateFeatures
 import com.example.analysis.ml.FeatureContribution
+import com.example.analysis.ml.HardNegativeMiner
 import com.example.analysis.ml.ModelRegistry
 import com.example.analysis.ml.RankerModelStore
 import com.example.analysis.ml.RankerTrainer
 import com.example.analysis.ml.RankerTrainingExample
+import com.example.analysis.ml.SpatialFoldSplitter
 import com.example.data.AppMemoryBudget
 import com.example.data.ElevationGrid
 import com.example.data.ai.AnomalyClusterer
 import com.example.data.ai.AnomalyClassification
 import com.example.data.ai.TerrainSessionContext
+import com.example.data.historicmap.MapTerrainAgreement
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
@@ -205,6 +211,11 @@ data class AiTerrainState(
     val pendingStructuredNotes: String? = null,
     /** Title of the last Field AI feature that completed successfully. */
     val lastFieldFeature: String? = null,
+    /**
+     * Latest historic-map vs terrain agreement (0..1). When set, [AiTerrainViewModel.rank]
+     * applies a capped [MapTerrainAgreement.rankingAdjustment] to model probabilities.
+     */
+    val historicMapAgreementScore: Float? = null,
 )
 
 class AiTerrainViewModel(application: Application) : AndroidViewModel(application) {
@@ -217,6 +228,8 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     private var modelRegistry: ModelRegistry = rankerStore.load()
     private val ids = AtomicLong(1L)
     private var localAnalysisJob: Job? = null
+    private fun reviewedStore() =
+        ReviewedExampleStore(File(appContext.filesDir, "reviewed-examples.tsv"))
     private val _state = MutableStateFlow(
         AiTerrainState(
             messages = listOf(
@@ -230,6 +243,16 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         ).withProviderStatus(),
     )
     val state: StateFlow<AiTerrainState> = _state.asStateFlow()
+
+    fun setHistoricMapAgreementScore(score: Float?) {
+        if (_state.value.historicMapAgreementScore == score) return
+        val current = _state.value
+        val ranked = current.localResult?.let { rank(it, score) }
+        _state.value = current.copy(
+            historicMapAgreementScore = score,
+            rankedCandidates = ranked ?: current.rankedCandidates,
+        )
+    }
 
     fun saveOpenAiKey(value: String) {
         val saved = OpenAiApiClient.saveDeviceApiKey(appContext, value)
@@ -256,23 +279,30 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /** Scores and re-orders candidates with the active ranker; null when no model is active. */
-    private fun rank(result: TerrainIntelligenceResult): List<RankedCandidate>? {
+    private fun rank(
+        result: TerrainIntelligenceResult,
+        agreementScore: Float? = _state.value.historicMapAgreementScore,
+    ): List<RankedCandidate>? {
         val model = modelRegistry.activeModel ?: return null
+        val adjustment = agreementScore?.let { MapTerrainAgreement.rankingAdjustment(it) } ?: 0f
         return result.candidates.map { candidate ->
             val vector = CandidateFeatures.extract(candidate, result.layers)
+            val probability = (model.probability(vector.values) + adjustment).coerceIn(0f, 1f)
             RankedCandidate(
                 candidate = candidate,
-                probability = model.probability(vector.values),
+                probability = probability,
                 contributions = model.contributions(vector.values).take(3),
             )
         }.sortedByDescending { it.probability }
     }
 
     /**
-     * Trains a new explainable ranker from this dataset's field-verified outcomes: every confirmed
-     * or rejected check within matching distance of a candidate becomes one labeled example, the
-     * trained model is activated through the registry, and the registry is persisted so the same
-     * ranking survives restarts.
+     * Trains a new explainable ranker from field-reviewed examples.
+     *
+     * Prefers [ReviewedExampleStore] (PRODUCTIVE / REJECTED), matched to current candidates by
+     * distance. Falls back to in-memory [VerifiedFeedback] when the store is empty. Uses
+     * [SpatialFoldSplitter] for holdout sizing and [HardNegativeMiner] to overweight the
+     * highest-scoring rejections. The trained model is activated and persisted.
      */
     fun trainRankerFromFeedback() {
         val result = _state.value.localResult
@@ -283,49 +313,226 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
             )
             return
         }
-        val examples = _state.value.verifiedFeedback.mapNotNull { point ->
-            val nearest = result.candidates.minByOrNull { candidate ->
-                val dx = candidate.xPercent - point.xPercent
-                val dy = candidate.yPercent - point.yPercent
-                dx * dx + dy * dy
-            } ?: return@mapNotNull null
-            val dx = nearest.xPercent - point.xPercent
-            val dy = nearest.yPercent - point.yPercent
-            if (dx * dx + dy * dy > VerifiedFeedback.MATCH_DISTANCE_SQUARED) return@mapNotNull null
-            RankerTrainingExample(
-                features = CandidateFeatures.extract(nearest, result.layers).values,
-                productive = point.confirmed,
-            )
-        }
-        val confirmed = examples.count { it.productive }
-        val rejected = examples.size - confirmed
-        if (confirmed == 0 || rejected == 0) {
-            _state.value = _state.value.copy(
-                rankerMessage = "Need at least one confirmed and one rejected field check near a " +
-                    "candidate — matched $confirmed confirmed and $rejected rejected.",
-            )
-            return
-        }
         _state.value = _state.value.copy(isTrainingRanker = true, rankerMessage = null)
         viewModelScope.launch {
-            val training = withContext(Dispatchers.Default) {
-                RankerTrainer.train(
-                    examples = examples,
-                    modelVersion = "field-checks-${System.currentTimeMillis()}",
-                    featureNames = CandidateFeatures.FEATURE_NAMES,
+            try {
+                val trainingOutcome = withContext(Dispatchers.Default) {
+                    buildAndTrainRanker(result)
+                }
+                if (trainingOutcome == null) {
+                    _state.value = _state.value.copy(
+                        isTrainingRanker = false,
+                        rankerMessage = "Need at least one productive and one rejected field check " +
+                            "near a candidate (store or verified feedback).",
+                    )
+                    return@launch
+                }
+                modelRegistry = modelRegistry.activate(trainingOutcome.ranker)
+                rankerStore.save(modelRegistry)
+                _state.value = _state.value.copy(
+                    isTrainingRanker = false,
+                    rankerVersion = trainingOutcome.ranker.modelVersion,
+                    rankedCandidates = rank(result),
+                    rankerMessage = trainingOutcome.message,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    isTrainingRanker = false,
+                    rankerMessage = error.localizedMessage ?: "Ranker training failed",
                 )
             }
-            modelRegistry = modelRegistry.activate(training.ranker)
-            rankerStore.save(modelRegistry)
-            _state.value = _state.value.copy(
-                isTrainingRanker = false,
-                rankerVersion = training.ranker.modelVersion,
-                rankedCandidates = rank(result),
-                rankerMessage = "Trained on ${examples.size} field checks " +
-                    "($confirmed confirmed, $rejected rejected) · accuracy " +
-                    String.format(Locale.US, "%.0f%%", training.accuracy * 100f),
+        }
+    }
+
+    private data class RankerTrainOutcome(
+        val ranker: com.example.analysis.ml.ExplainableRanker,
+        val message: String,
+    )
+
+    /**
+     * Builds labeled training examples from the reviewed-example store (preferred) or verified
+     * feedback, mines hard negatives, splits spatial folds, trains, and formats the status line.
+     */
+    private fun buildAndTrainRanker(result: TerrainIntelligenceResult): RankerTrainOutcome? {
+        val storeExamples = runCatching { reviewedStore().readAll() }.getOrDefault(emptyList())
+        val datasetKey = result.datasetKey
+        val datasetMatched = storeExamples.filter { it.datasetKey == datasetKey }
+        // Prefer regional corpus when reviewed examples cluster inside a catalog region.
+        val region = com.example.analysis.ml.RegionalCorpus.detectRegion(
+            storeExamples.mapNotNull { it.latitude }.averageOrNull(),
+            storeExamples.mapNotNull { it.longitude }.averageOrNull(),
+        )
+        val regionalMatched = region?.let {
+            com.example.analysis.ml.RegionalCorpus.filter(storeExamples, it)
+        }.orEmpty()
+        val labeledFromStore = when {
+            hasBothVerdicts(datasetMatched) -> datasetMatched
+            region != null && hasBothVerdicts(regionalMatched) -> regionalMatched
+            hasBothVerdicts(storeExamples) -> storeExamples
+            else -> emptyList()
+        }.filter {
+            it.verdict == ReviewedVerdict.PRODUCTIVE || it.verdict == ReviewedVerdict.REJECTED
+        }
+
+        data class LocatedExample(
+            val training: RankerTrainingExample,
+            val latitude: Double?,
+            val longitude: Double?,
+            val xPercent: Float,
+            val yPercent: Float,
+            val scoreAtReview: Float?,
+            val productive: Boolean,
+        )
+
+        fun matchCandidate(xPercent: Float, yPercent: Float): TerrainFeatureCandidate? {
+            val nearest = result.candidates.minByOrNull { candidate ->
+                val dx = candidate.xPercent - xPercent
+                val dy = candidate.yPercent - yPercent
+                dx * dx + dy * dy
+            } ?: return null
+            val dx = nearest.xPercent - xPercent
+            val dy = nearest.yPercent - yPercent
+            if (dx * dx + dy * dy > VerifiedFeedback.MATCH_DISTANCE_SQUARED) return null
+            return nearest
+        }
+
+        val located: List<LocatedExample> = if (labeledFromStore.isNotEmpty()) {
+            labeledFromStore.mapNotNull { review ->
+                val nearest = matchCandidate(review.xPercent, review.yPercent) ?: return@mapNotNull null
+                LocatedExample(
+                    training = RankerTrainingExample(
+                        features = CandidateFeatures.extract(nearest, result.layers).values,
+                        productive = review.verdict == ReviewedVerdict.PRODUCTIVE,
+                    ),
+                    latitude = review.latitude,
+                    longitude = review.longitude,
+                    xPercent = review.xPercent,
+                    yPercent = review.yPercent,
+                    scoreAtReview = review.scoreAtReview,
+                    productive = review.verdict == ReviewedVerdict.PRODUCTIVE,
+                )
+            }
+        } else {
+            // Fallback: in-memory verified feedback derived at last Analyze.
+            _state.value.verifiedFeedback.mapNotNull { point ->
+                val nearest = matchCandidate(point.xPercent, point.yPercent) ?: return@mapNotNull null
+                LocatedExample(
+                    training = RankerTrainingExample(
+                        features = CandidateFeatures.extract(nearest, result.layers).values,
+                        productive = point.confirmed,
+                    ),
+                    latitude = null,
+                    longitude = null,
+                    xPercent = point.xPercent,
+                    yPercent = point.yPercent,
+                    scoreAtReview = null,
+                    productive = point.confirmed,
+                )
+            }
+        }
+
+        val confirmed = located.count { it.productive }
+        val rejected = located.size - confirmed
+        if (confirmed == 0 || rejected == 0) return null
+
+        // Hard-negative mining: highest scoreAtReview among rejections (model was most wrong).
+        val rejectedLocated = located.filter { !it.productive }
+        val hardNegatives = HardNegativeMiner.select(
+            rejectedExamples = rejectedLocated,
+            score = { it.scoreAtReview ?: 0f },
+            limit = minOf(5, rejectedLocated.size),
+        )
+        // Overweight hard negatives by duplicating them once in the training multiset.
+        val trainingExamples = located.map { it.training } + hardNegatives.map { it.training }
+
+        val foldCount = 4
+        val folds = SpatialFoldSplitter.split(located, foldCount) { ex ->
+            SpatialFoldSplitter.FoldLocation(
+                latitude = ex.latitude,
+                longitude = ex.longitude,
+                xPercent = ex.xPercent,
+                yPercent = ex.yPercent,
             )
         }
+        val foldSizes = folds.map { it.size }
+        // Prefer a holdout fold that has both classes; otherwise train on all for accuracy.
+        val holdoutIndex = folds.indices
+            .filter { folds[it].isNotEmpty() }
+            .minByOrNull { folds[it].size }
+        val holdout = holdoutIndex?.let { folds[it] }.orEmpty()
+        val holdoutHasBoth = holdout.any { it.productive } && holdout.any { !it.productive }
+        val trainSplit = if (holdoutHasBoth && holdoutIndex != null) {
+            folds.filterIndexed { index, _ -> index != holdoutIndex }.flatten()
+        } else {
+            located
+        }
+        val trainHasBoth = trainSplit.any { it.productive } && trainSplit.any { !it.productive }
+        val examplesForTrainer = if (trainHasBoth) {
+            trainSplit.map { it.training } + hardNegatives.map { it.training }
+        } else {
+            trainingExamples
+        }
+
+        val regionTag = region?.id ?: "global"
+        val training = RankerTrainer.train(
+            examples = examplesForTrainer,
+            modelVersion = "field-checks-$regionTag-${System.currentTimeMillis()}",
+            featureNames = CandidateFeatures.FEATURE_NAMES,
+        )
+
+        // When we held out a fold with both classes, retrain the production model on all data.
+        val production = if (holdoutHasBoth && trainSplit.size < located.size) {
+            RankerTrainer.train(
+                examples = trainingExamples,
+                modelVersion = training.ranker.modelVersion,
+                featureNames = CandidateFeatures.FEATURE_NAMES,
+            )
+        } else {
+            training
+        }
+
+        val accuracy = if (holdoutHasBoth && holdout.isNotEmpty()) {
+            // Estimate accuracy on the spatial holdout with the holdout-trained model.
+            val correct = holdout.count { example ->
+                val p = training.ranker.probability(example.training.features)
+                (p >= 0.5f) == example.productive
+            }
+            correct.toFloat() / holdout.size
+        } else {
+            production.accuracy
+        }
+
+        val sourceLabel = when {
+            labeledFromStore.isEmpty() -> "verified feedback"
+            region != null && regionalMatched.size == labeledFromStore.size ->
+                "regional corpus (${region.displayName})"
+            else -> "reviewed store"
+        }
+        val message = "Trained on ${trainingExamples.size} examples from $sourceLabel " +
+            "($confirmed productive, $rejected rejected, ${hardNegatives.size} hard negatives) · " +
+            "spatial folds ${foldSizes.joinToString("/")} · accuracy " +
+            String.format(Locale.US, "%.0f%%", accuracy * 100f)
+
+        return RankerTrainOutcome(ranker = production.ranker, message = message)
+    }
+
+    private fun List<Double>.averageOrNull(): Double? =
+        if (isEmpty()) null else average()
+
+    private fun hasBothVerdicts(examples: List<ReviewedCandidateExample>): Boolean {
+        var productive = false
+        var rejected = false
+        for (example in examples) {
+            when (example.verdict) {
+                ReviewedVerdict.PRODUCTIVE -> productive = true
+                ReviewedVerdict.REJECTED -> rejected = true
+                ReviewedVerdict.AMBIGUOUS -> Unit
+            }
+            if (productive && rejected) return true
+        }
+        return false
     }
 
     /** Deactivates the trained ranker and drops all retained versions from the device. */
@@ -605,6 +812,8 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     onProviderStage = { stage ->
                         _state.value = _state.value.copy(cloudStage = stage)
                     },
+                    featureName = "chat",
+                    conversationId = com.example.ai.SentryAiMonitor.currentConversationId(),
                 )
                 val cloudTargets = if (image != null) {
                     parseCloudMapTargets(answer.text, viewport.bounds)
@@ -793,6 +1002,8 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     onProviderStage = { stage ->
                         _state.value = _state.value.copy(cloudStage = stage)
                     },
+                    featureName = feature.name,
+                    conversationId = com.example.ai.SentryAiMonitor.currentConversationId(),
                 )
                 val cloudTargets = if (usedImage) {
                     parseCloudMapTargets(answer.text, viewport.bounds)
@@ -807,7 +1018,6 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                 } else {
                     null
                 }
-                // Pack-3 structured tags (parsers land with FieldAiCopilot / merge).
                 val navTargetIds = FieldAiCopilot.parseNavTargetIds(answer.text)
                 val vizMode = FieldAiCopilot.parseVizMode(answer.text)
                 val structuredFind = feature == FieldAiFeature.VOICE_STRUCTURED_FIND ||
@@ -876,6 +1086,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearConversation() {
+        com.example.ai.SentryAiMonitor.beginConversation()
         _state.value = _state.value.copy(
             messages = listOf(
                 AiMessage(
@@ -1398,6 +1609,45 @@ private fun LocalCandidateSummary(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        // Feature 15 — penalty badges from local AI evidence / notes
+                        val penaltyLabels = buildList {
+                            candidate.evidence.forEach { line ->
+                                val lower = line.lowercase()
+                                when {
+                                    "natural-feature penalty" in lower -> add("Natural penalty")
+                                    "modern-disturbance penalty" in lower -> add("Modern penalty")
+                                    "penalty" in lower -> add(line.take(28))
+                                }
+                            }
+                            candidate.note.split(" · ").map { it.trim() }.filter { part ->
+                                val lower = part.lowercase()
+                                "natural" in lower || "modern" in lower || "hollow" in lower ||
+                                    "drainage" in lower || "rough" in lower || "fade" in lower
+                            }.take(2).forEach { add(it.take(32)) }
+                        }.distinct()
+                        if (penaltyLabels.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                penaltyLabels.forEach { label ->
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.errorContainer,
+                                        modifier = Modifier.testTag("penalty_badge"),
+                                    ) {
+                                        Text(
+                                            label,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

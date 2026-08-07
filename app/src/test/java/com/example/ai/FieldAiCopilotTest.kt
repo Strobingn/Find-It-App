@@ -184,4 +184,61 @@ class FieldAiCopilotTest {
         assertFalse(FieldAiFeature.PHOTO_CATALOG_ASSIST.prefersViewportImage)
         assertTrue(FieldAiFeature.COVERAGE_GAP_AI.prefersViewportImage)
     }
+
+    @Test
+    fun digBrief_includesFocusedCandidateAndHardRule() {
+        val focused = pack.copy(
+            selectedCandidateSummary = "Foundation / building platform · score=82% · x=40% y=55%",
+            inspectedCellSummary = "Cell x=40% y=55% elev≈120 m",
+        )
+        val prompt = FieldAiCopilot.buildUserPrompt(FieldAiFeature.DIG_BRIEF, focused)
+        assertTrue(prompt.contains("Focused candidate", ignoreCase = true))
+        assertTrue(prompt.contains("Foundation / building platform"))
+        assertTrue(prompt.contains("Inspected cell", ignoreCase = true))
+        assertTrue(prompt.contains("LiDAR", ignoreCase = true))
+    }
+
+    @Test
+    fun evidenceChain_prioritizesFocusedCandidate() {
+        val focused = pack.copy(
+            selectedCandidateSummary = "Cellar hole · score=71% · x=12% y=33%",
+        )
+        val prompt = FieldAiCopilot.buildUserPrompt(FieldAiFeature.EVIDENCE_CHAIN, focused)
+        assertTrue(prompt.contains("Focused candidate", ignoreCase = true))
+        assertTrue(prompt.contains("Cellar hole"))
+        assertTrue(prompt.contains("Prioritize", ignoreCase = true))
+    }
+
+    @Test
+    fun photoCatalog_includesPhotoInventorySection() {
+        val withMedia = pack.copy(
+            signals = listOf(
+                com.example.data.TargetSignal(
+                    id = 42L,
+                    gridX = 10f,
+                    gridY = 20f,
+                    metalType = com.example.data.MetalType.IRON,
+                    signalStrength = 40f,
+                    photoUris = listOf("content://photo/1", "content://photo/2"),
+                    notes = "flat iron near wall",
+                ),
+            ),
+        )
+        val prompt = FieldAiCopilot.buildUserPrompt(FieldAiFeature.PHOTO_CATALOG_ASSIST, withMedia)
+        assertTrue(prompt.contains("Photo inventory", ignoreCase = true))
+        assertTrue(prompt.contains("photos=2"))
+        assertTrue(prompt.contains("id=42"))
+    }
+
+    @Test
+    fun sessionFacts_includesQualityAndMediaCounts() {
+        val rich = pack.copy(
+            terrainQualitySummary = "Ground quality · valid 98% · georef",
+            visualizationMode = 3,
+        )
+        val prompt = FieldAiCopilot.buildUserPrompt(FieldAiFeature.FIELD_REPORT, rich)
+        assertTrue(prompt.contains("Ground quality"))
+        assertTrue(prompt.contains("Visualization mode: 3"))
+        assertTrue(prompt.contains("Media:", ignoreCase = true))
+    }
 }

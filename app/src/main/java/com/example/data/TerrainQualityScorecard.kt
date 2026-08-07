@@ -1,154 +1,87 @@
 package com.example.data
 
-import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.max
+import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
+import kotlin.math.roundToInt
 
 /**
- * Compact ground/CRS quality summary for the active elevation grid.
+ * Lightweight honesty scorecard for the active elevation grid: how complete the bare-earth
+ * surface is, how much canopy is present, and whether the raster is georeferenced.
  *
- * Used by the Terrain workspace banner (valid coverage, canopy spikes, cell density,
- * footprint, and georeference status) so operators can trust or distrust a LAZ surface
- * before spending field time on it.
+ * Does **not** claim metal, age, dig depth, or ownership — only surface-data quality.
  */
-data class TerrainQualityScorecard(
-    val gridWidth: Int,
-    val gridHeight: Int,
-    val cellSizeMeters: Float,
-    val validCellFraction: Float, // 0..1 from validData
-    val canopySpikeFraction: Float, // fraction of valid cells with meaningful canopy
-    val footprintWidthMeters: Float,
-    val footprintHeightMeters: Float,
+data class TerrainQuality(
+    val validPercent: Float,
+    val canopyPercent: Float,
     val crs: String,
     val datum: String,
-    val georeferenced: Boolean,
-    val terrainSummary: String,
+    val isGeoreferenced: Boolean,
+    val summary: String,
+    val width: Int,
+    val height: Int,
+    val cellSizeMeters: Float,
 ) {
-    /** Approximate cell density (cells per square meter). */
-    val densityCellsPerM2: Float
-        get() {
-            val cell = cellSizeMeters
-            if (!cell.isFinite() || cell <= 0f) return 0f
-            return 1f / (cell * cell)
-        }
-
-    /** Short one-liner for the Terrain tab footer banner. */
-    fun bannerLine(): String {
-        val crsShort = shortCrs(crs)
-        val georef = if (georeferenced) "georef yes" else "georef no"
-        val cell = formatMeters(cellSizeMeters)
-        val footW = formatMeters(footprintWidthMeters)
-        val footH = formatMeters(footprintHeightMeters)
-        val validPct = (validCellFraction.coerceIn(0f, 1f) * 100f).toInt()
-        val canopyPct = (canopySpikeFraction.coerceIn(0f, 1f) * 100f).toInt()
-        return String.format(
-            Locale.US,
-            "%s · %s · %s · %s×%s · valid %d%% · canopy %d%%",
-            crsShort,
-            georef,
-            cell,
-            footW,
-            footH,
-            validPct,
-            canopyPct,
-        )
-    }
-
-    /** Multi-line detail for a quality card / export. */
-    fun scorecardLines(): List<String> {
-        val density = if (densityCellsPerM2 > 0f) {
-            String.format(Locale.US, "%.3f cells/m²", densityCellsPerM2)
+    /** One-line banner for Home / Terrain status cards. */
+    fun bannerLine(): String = buildString {
+        append("Ground quality · valid ${validPercent.roundToInt()}%")
+        if (canopyPercent >= 1f) append(" · canopy ${canopyPercent.roundToInt()}%")
+        if (isGeoreferenced) {
+            append(" · georef")
         } else {
-            "n/a"
+            append(" · local grid (not georeferenced)")
         }
-        return listOf(
-            "Grid: ${gridWidth}×${gridHeight}",
-            "Cell size: ${formatMeters(cellSizeMeters)}",
-            "Footprint: ${formatMeters(footprintWidthMeters)} × ${formatMeters(footprintHeightMeters)}",
-            "Valid cells: ${String.format(Locale.US, "%.1f%%", validCellFraction.coerceIn(0f, 1f) * 100f)}",
-            "Canopy spikes: ${String.format(Locale.US, "%.1f%%", canopySpikeFraction.coerceIn(0f, 1f) * 100f)}",
-            "Density: $density",
-            "CRS: $crs",
-            "Datum: $datum",
-            "Georeferenced: ${if (georeferenced) "yes" else "no"}",
-            "Summary: ${terrainSummary.ifBlank { "—" }}",
-        )
+        val shortCrs = crs.take(48)
+        if (shortCrs.isNotBlank()) append(" · ").append(shortCrs)
     }
 
     companion object {
-        private fun shortCrs(crs: String): String {
-            val trimmed = crs.trim().ifBlank { "CRS?" }
-            val paren = trimmed.indexOf('(')
-            val base = if (paren > 0) trimmed.substring(0, paren).trim() else trimmed
-            return base.take(28).ifBlank { "CRS?" }
-        }
-
-        private fun formatMeters(meters: Float): String {
-            if (!meters.isFinite() || meters < 0f) return "—"
-            return when {
-                meters < 1f -> String.format(Locale.US, "%.2f m", meters)
-                meters < 10f -> String.format(Locale.US, "%.1f m", meters)
-                else -> String.format(Locale.US, "%.0f m", meters)
+        /**
+         * Build a scorecard from an elevation grid + metadata.
+         * [summary] is the existing terrain summary string (site name / open message).
+         */
+        fun from(
+            grid: ElevationGrid,
+            crs: String,
+            datum: String,
+            georeferenced: Boolean,
+            summary: String,
+        ): TerrainQuality {
+            val size = (grid.width * grid.height).coerceAtLeast(1)
+            var validCount = 0
+            var canopyCount = 0
+            val canopyThreshold = (grid.cellSizeMeters * 0.5f).coerceAtLeast(0.5f)
+            for (i in 0 until size) {
+                if (grid.validData.getOrElse(i) { true }) {
+                    validCount++
+                    if (grid.canopySpikes.getOrElse(i) { 0f } >= canopyThreshold) {
+                        canopyCount++
+                    }
+                }
             }
-        }
-    }
-}
-
-object TerrainQuality {
-    /**
-     * Build a [TerrainQualityScorecard] from an elevation grid plus geo metadata fields.
-     *
-     * Valid fraction uses [ElevationGrid.validData]. Canopy fraction is the share of valid
-     * cells whose canopy spike exceeds ~2% of cell size (floored at 1 m for the threshold base).
-     */
-    fun from(
-        grid: ElevationGrid,
-        crs: String,
-        datum: String,
-        georeferenced: Boolean,
-        summary: String,
-    ): TerrainQualityScorecard {
-        val width = grid.width
-        val height = grid.height
-        val cell = grid.cellSizeMeters.let { if (it.isFinite() && it > 0f) it else 1f }
-        val total = width * height
-        val validMask = grid.validData
-        val canopy = grid.canopySpikes
-        val spikeThreshold = 0.02f * max(1f, cell)
-
-        var validCount = 0
-        var canopySpikeCount = 0
-        val limit = minOf(total, validMask.size, canopy.size)
-        for (i in 0 until limit) {
-            if (!validMask[i]) continue
-            validCount++
-            if (abs(canopy[i]) > spikeThreshold) {
-                canopySpikeCount++
-            }
+            val validPct = 100f * validCount / size
+            val canopyPct = if (validCount > 0) 100f * canopyCount / validCount else 0f
+            return TerrainQuality(
+                validPercent = validPct,
+                canopyPercent = canopyPct,
+                crs = crs,
+                datum = datum,
+                isGeoreferenced = georeferenced,
+                summary = summary,
+                width = grid.width,
+                height = grid.height,
+                cellSizeMeters = grid.cellSizeMeters,
+            )
         }
 
-        val validFraction = if (total > 0) validCount.toFloat() / total.toFloat() else 0f
-        val canopyFraction = if (validCount > 0) {
-            canopySpikeCount.toFloat() / validCount.toFloat()
-        } else {
-            0f
-        }
-
-        val footprintW = (width - 1).coerceAtLeast(1) * cell
-        val footprintH = (height - 1).coerceAtLeast(1) * cell
-
-        return TerrainQualityScorecard(
-            gridWidth = width,
-            gridHeight = height,
-            cellSizeMeters = cell,
-            validCellFraction = validFraction.coerceIn(0f, 1f),
-            canopySpikeFraction = canopyFraction.coerceIn(0f, 1f),
-            footprintWidthMeters = footprintW,
-            footprintHeightMeters = footprintH,
-            crs = crs,
-            datum = datum,
-            georeferenced = georeferenced,
-            terrainSummary = summary,
+        fun from(
+            grid: ElevationGrid,
+            metadata: GeoSpatialMetadata,
+            summary: String,
+        ): TerrainQuality = from(
+            grid = grid,
+            crs = metadata.crs,
+            datum = metadata.datum,
+            georeferenced = metadata.isGeoreferenced,
+            summary = summary,
         )
     }
 }

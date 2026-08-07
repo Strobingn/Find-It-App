@@ -666,8 +666,15 @@ Ten fully wired product features on branch `KIMIV6`. See [docs/FEATURES_SITE_PAC
 | 9 | Boundary proximity GPS alert | **Done** |
 | 10 | Confirm-write AI metal/outcome tags | **Done** |
 
+## Field Closure Pack (20) — 2026-08
+
+Phase 0 wiring audit + 20 roadmap-gap features (waves 1–4). See [docs/FEATURES_FIELD_CLOSURE_PACK.md](docs/FEATURES_FIELD_CLOSURE_PACK.md) and design [docs/superpowers/specs/2026-08-05-field-closure-pack-20-design.md](docs/superpowers/specs/2026-08-05-field-closure-pack-20-design.md).
+
+Includes: dig media timeline, boundary edit, Home basemap/scorecard/recent/debrief, GeoPackage + share/QR/archive inspect, dual-surface blink, viewport clip refine, COPC soft-fail, penalty badges, compass nav polish, nav playlist, this-trip filter, ethics stickies.
+
 ## Decision log
 
+- **2026-08-05:** Field Closure Pack (20) + Phase 0 wiring audit on GROKV6.
 - **2026-08-05:** Site Package Pack ships dual-surface re-decode, boundary clip refine, relative Z-under-find, class filters, mosaic open UX, clipped LAS, site package zip, field PDF enhancements, boundary GPS alerts, and AI confirm-write — never auto-write finds; LiDAR still never claims metal or dig depth.
 - **2026-07-26:** Historic human-activity detection remains the central product objective.
 - **2026-07-26:** Performance work must preserve working features and analytical accuracy.

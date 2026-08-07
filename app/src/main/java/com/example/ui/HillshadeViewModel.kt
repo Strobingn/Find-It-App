@@ -8,6 +8,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.analysis.FeatureTypeCalibration
 import com.example.analysis.MetalDetectingTargetType
+import com.example.analysis.ReviewedCandidateExample
+import com.example.analysis.ReviewedExampleStore
 import com.example.analysis.TerrainDerivedLayerCache
 import com.example.analysis.TerrainDerivedLayers
 import com.example.analysis.TerrainIntelligenceEngine
@@ -16,6 +18,7 @@ import com.example.data.DemGenerator
 import com.example.data.DetectionSource
 import com.example.data.ElevationGrid
 import com.example.data.GroundSurfaceMode
+import com.example.data.TerrainQuality
 import com.example.data.basemap.OfflineBasemapRegion
 import com.example.data.basemap.OfflineBasemapStatus
 import com.example.data.AppTerrainStorage
@@ -39,7 +42,6 @@ import com.example.data.LazTerrainMemoryCache
 import com.example.data.LazSpatialIndex
 import com.example.data.LazTerrainReader
 import com.example.data.LidarImportOptions
-import com.example.data.LogSignalResult
 import com.example.data.MetalType
 import com.example.data.NormalizedRasterBounds
 import com.example.data.PointClassPreset
@@ -50,15 +52,15 @@ import com.example.data.TerrainGpuSceneBuilder
 import com.example.data.TerrainImportSource
 import com.example.data.TerrainPerformanceSession
 import com.example.data.TerrainSessionStore
-import com.example.data.TerrainQuality
-import com.example.data.TerrainQualityScorecard
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
 import com.example.data.gridForHillshadePreview
 import com.example.data.hillshadeDebounceMs
 import com.example.data.previewMaxSideForZoom
+import com.example.data.export.AnnotatedMapBundle
 import com.example.data.export.ClippedLasWriter
 import com.example.data.export.DEFAULT_ETHICS_FOOTER
+import com.example.data.export.GeoPackageWriter
 import com.example.data.export.ProjectExportFiles
 import com.example.data.export.ProjectExportRenderer
 import com.example.data.export.ProjectExportSnapshot
@@ -145,6 +147,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     // are visible here (homesite overlay) without re-running the extraction.
     private val terrainDerivedLayerCache = TerrainDerivedLayerCache(File(application.cacheDir, "terrain-intelligence-v2"))
 
+    /** Append-only field-review store shared with [AiTerrainViewModel] for ranker training. */
+    private val reviewedStore by lazy {
+        ReviewedExampleStore(File(getApplication<Application>().filesDir, "reviewed-examples.tsv"))
+    }
+
     // Guard flag to prevent saveSettings() from overwriting DB values with defaults before loading completes
     private var isSettingsLoaded = false
     private var restoreImportedTerrainOnStart = false
@@ -195,8 +202,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val contourIntervalMeters = _contourIntervalMeters.asStateFlow()
     private val _activeTerrainSummary = MutableStateFlow("Import a LAZ/LAS tile to begin")
     val activeTerrainSummary = _activeTerrainSummary.asStateFlow()
-    private val _terrainQuality = MutableStateFlow<TerrainQualityScorecard?>(null)
-    val terrainQuality: StateFlow<TerrainQualityScorecard?> = _terrainQuality.asStateFlow()
     private val _canRefineTerrain = MutableStateFlow(false)
     val canRefineTerrain = _canRefineTerrain.asStateFlow()
     private val _isRefiningTerrain = MutableStateFlow(false)
@@ -235,8 +240,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private var renderJob: Job? = null
     private var siteGenerationJob: Job? = null
     private var renderGeneration = 0L
-    private var refineJob: Job? = null
-    private var refineGeneration = 0L
     /** Identity of the last hillshade params that produced [_hillshadeBitmap]. */
     private var lastHillshadeCacheKey: HillshadeCacheKey? = null
     private var lastPreviewMaxSide: Int = Int.MAX_VALUE
@@ -273,6 +276,17 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
      */
     private val _featureTypeCalibration = MutableStateFlow<Map<MetalDetectingTargetType, Float>>(emptyMap())
     val featureTypeCalibration: StateFlow<Map<MetalDetectingTargetType, Float>> = _featureTypeCalibration.asStateFlow()
+
+    /**
+     * Latest historic-map vs terrain relief agreement (0..1), published by the map tab when an
+     * aligned overlay is scored. Null means no adjustment is applied to ranking.
+     */
+    private val _historicMapAgreementScore = MutableStateFlow<Float?>(null)
+    val historicMapAgreementScore: StateFlow<Float?> = _historicMapAgreementScore.asStateFlow()
+
+    fun setHistoricMapAgreementScore(score: Float?) {
+        _historicMapAgreementScore.value = score
+    }
 
     private val _analyzedDatasets = MutableStateFlow<List<AnalyzedDatasetEntity>>(emptyList())
     val analyzedDatasets: StateFlow<List<AnalyzedDatasetEntity>> = _analyzedDatasets.asStateFlow()
@@ -313,6 +327,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         GeoSpatialLibrary.localGrid(name = "No terrain loaded", columns = 2, rows = 2),
     )
     val activeGeoMetadata: StateFlow<GeoSpatialMetadata> = _activeGeoMetadata.asStateFlow()
+    /** Ground-quality scorecard for Home / Terrain banners; null when no real grid is loaded. */
+    private val _terrainQuality = MutableStateFlow<TerrainQuality?>(null)
+    val terrainQuality: StateFlow<TerrainQuality?> = _terrainQuality.asStateFlow()
     private val _currentLat = MutableStateFlow<Double?>(null)
     val currentLat: StateFlow<Double?> = _currentLat.asStateFlow()
     private val _currentLon = MutableStateFlow<Double?>(null)
@@ -346,8 +363,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     // Zoom threshold for auto-rendering
     private val AUTO_RENDER_ZOOM_THRESHOLD = 2.5f
     private val MAX_MARKER_GPS_AGE_MILLIS = 60_000L
-    /** Warn before logging another marker within this distance of an existing find. */
-    private val PROXIMITY_WARN_METERS = 8.0
 
     init {
         observeSurveyLayers(_activeTerrainKey.value)
@@ -1005,19 +1020,16 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /** Recomputes the ground/CRS quality banner for the Terrain workspace after a grid changes. */
     private fun publishTerrainQuality(
         grid: ElevationGrid,
-        metadata: GeoSpatialLibrary.GeoSpatialMetadata,
+        metadata: GeoSpatialMetadata,
         summary: String,
     ) {
-        _terrainQuality.value = TerrainQuality.from(
-            grid = grid,
-            crs = metadata.crs,
-            datum = metadata.datum,
-            georeferenced = metadata.isGeoreferenced,
-            summary = summary,
-        )
+        _terrainQuality.value = if (grid.width > 2 && grid.height > 2) {
+            TerrainQuality.from(grid, metadata, summary)
+        } else {
+            null
+        }
     }
 
     fun recommendedAiRefineResolution(): Int {
@@ -1038,6 +1050,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refineTerrain(viewport: NormalizedRasterBounds, rasterResolution: Int = 1_024) {
         val source = terrainSource ?: return
+        if (_isRefiningTerrain.value) return
         val requestedViewport = viewport.sanitized()
         if (currentSourceBounds == NormalizedRasterBounds.Full && isEffectivelyWholeTerrain(requestedViewport)) {
             // The overview is already a raster of the entire original point cloud. Reopening a
@@ -1062,9 +1075,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             ?.path
             ?.let(::File)
             ?.takeIf(File::isFile)
-        // Cancel any in-flight refine so a newer zoom/refine request wins (stale-work prevention).
-        val generation = ++refineGeneration
-        refineJob?.cancel()
         _isRefiningTerrain.value = true
         _terrainRefinementProgress.value = TerrainRefinementProgress(
             fraction = 0.03f,
@@ -1072,7 +1082,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         )
         _terrainDetailMessage.value =
             "Opening ${options.rasterResolution} px source detail for this viewport…"
-        refineJob = viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) {
             var decodedNow = false
             var loadedFromCache = false
             val result = runCatching {
@@ -1159,9 +1169,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
             }.getOrNull()
-            if (generation != refineGeneration) return@launch
             withContext(Dispatchers.Main.immediate) {
-                if (generation != refineGeneration) return@withContext
                 if (result == null) {
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
@@ -1189,7 +1197,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     _isRefiningTerrain.value = false
                 }
             }
-            if (decodedNow && result != null && sourceFile != null && generation == refineGeneration) {
+            if (decodedNow && result != null && sourceFile != null) {
                 // The image is already visible. Persist the result afterward so disk I/O does not
                 // extend the user-visible Refine wait.
                 runCatching { refinementDiskCache.put(sourceFile, options, result) }
@@ -1246,6 +1254,62 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         // Boundary focus is in full-footprint normalized space; nest against Full, not a prior refine.
         currentSourceBounds = NormalizedRasterBounds.Full
         refineTerrain(bounds, recommendedAiRefineResolution())
+    }
+
+    /**
+     * Clip-refine to an arbitrary normalized map rectangle (viewport or user AOI), not only a
+     * survey polygon. Full-footprint space; nests against Full.
+     */
+    fun refineToNormalizedRect(bounds: NormalizedRasterBounds) {
+        if (!_canRefineTerrain.value) {
+            _terrainDetailMessage.value = "Open a LAZ/LAS source before clip refine."
+            return
+        }
+        currentSourceBounds = NormalizedRasterBounds.Full
+        refineTerrain(bounds.sanitized(), recommendedAiRefineResolution())
+        _terrainDetailMessage.value = "Refining map-rectangle AOI from source LiDAR…"
+    }
+
+    /** Ordered multi-stop navigation playlist (e.g. from AI NAV_TARGET tags). */
+    private val _navPlaylistIds = MutableStateFlow<List<Long>>(emptyList())
+    val navPlaylistIds: StateFlow<List<Long>> = _navPlaylistIds.asStateFlow()
+    private val _navPlaylistIndex = MutableStateFlow(0)
+    val navPlaylistIndex: StateFlow<Int> = _navPlaylistIndex.asStateFlow()
+
+    fun setNavPlaylist(ids: List<Long>) {
+        val unique = ids.distinct()
+        _navPlaylistIds.value = unique
+        _navPlaylistIndex.value = 0
+        activateNavPlaylistStop(0)
+    }
+
+    fun clearNavPlaylist() {
+        _navPlaylistIds.value = emptyList()
+        _navPlaylistIndex.value = 0
+    }
+
+    fun navPlaylistNext() {
+        val ids = _navPlaylistIds.value
+        if (ids.isEmpty()) return
+        val next = (_navPlaylistIndex.value + 1).coerceAtMost(ids.lastIndex)
+        _navPlaylistIndex.value = next
+        activateNavPlaylistStop(next)
+    }
+
+    fun navPlaylistSkip() = navPlaylistNext()
+
+    private fun activateNavPlaylistStop(index: Int) {
+        val id = _navPlaylistIds.value.getOrNull(index) ?: return
+        val signal = allLoggedSignals.firstOrNull { it.id == id } ?: return
+        val lat = signal.latitude ?: signal.gpsLatitude ?: return
+        val lon = signal.longitude ?: signal.gpsLongitude ?: return
+        setNavigationTarget(
+            NavigationTarget(
+                label = signal.metalType.label,
+                latitude = lat,
+                longitude = lon,
+            ),
+        )
     }
 
     /**
@@ -1440,76 +1504,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _sunAzimuth.value = ((value % 360f) + 360f) % 360f
         scheduleRender()
     }
-
-    /**
-     * Field lighting presets for hillshade inspection.
-     * NW (315°) and SE (135°) emphasize opposite sides of earthworks; Overhead flattens shadows.
-     */
-    fun applyLightingPreset(preset: LightingPreset) {
-        when (preset) {
-            LightingPreset.NORTHWEST -> {
-                _sunAzimuth.value = 315f
-                _sunAltitude.value = 35f
-            }
-            LightingPreset.SOUTHEAST -> {
-                _sunAzimuth.value = 135f
-                _sunAltitude.value = 35f
-            }
-            LightingPreset.OVERHEAD -> {
-                _sunAzimuth.value = 180f
-                _sunAltitude.value = 75f
-            }
-        }
-        scheduleRender(immediate = true)
-    }
-
-    /** High-contrast field night palette (palette index 2). */
-    fun setFieldNightContrast(enabled: Boolean) {
-        _paletteType.value = if (enabled) 2 else 1
-        scheduleRender(immediate = true)
-    }
-
-    fun listRecentProjects(): List<com.example.data.RecentTerrainProject> =
-        terrainSessionStore.listRecent()
-
-    fun saveViewportBookmark(name: String = "Bookmark") {
-        val prefs = getApplication<Application>().getSharedPreferences("viewport_bookmarks", 0)
-        val key = _activeTerrainKey.value
-        prefs.edit()
-            .putFloat("$key.zoom", _viewportZoom.value)
-            .putFloat("$key.panX", _viewportPanX.value)
-            .putFloat("$key.panY", _viewportPanY.value)
-            .putString("$key.name", name)
-            .apply()
-    }
-
-    fun restoreViewportBookmark(): Boolean {
-        val prefs = getApplication<Application>().getSharedPreferences("viewport_bookmarks", 0)
-        val key = _activeTerrainKey.value
-        if (!prefs.contains("$key.zoom")) return false
-        _viewportZoom.value = prefs.getFloat("$key.zoom", 1f)
-        _viewportPanX.value = prefs.getFloat("$key.panX", 0f)
-        _viewportPanY.value = prefs.getFloat("$key.panY", 0f)
-        _viewportRestoreToken.value = _viewportRestoreToken.value + 1
-        return true
-    }
-
-    /** Centers the sweep crosshair on the average grid position of georeferenced finds. */
-    fun frameFinds(): Boolean {
-        val points = _loggedSignals.value.mapNotNull { signal ->
-            if (signal.latitude != null && signal.longitude != null) {
-                signal.gridX to signal.gridY
-            } else {
-                null
-            }
-        }
-        if (points.isEmpty()) return false
-        val cx = points.map { it.first }.average().toFloat()
-        val cy = points.map { it.second }.average().toFloat()
-        setSweepPosition(cx, cy)
-        return true
-    }
-
     fun updateSunAltitude(value: Float) { _sunAltitude.value = value.coerceIn(5f, 85f); scheduleRender() }
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
     fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
@@ -1563,50 +1557,19 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _currentLon.value = coordinate?.second
     }
 
-    fun logCurrentSignal(forceDespiteProximity: Boolean = false): LogSignalResult {
+    fun logCurrentSignal() {
         val markerTime = System.currentTimeMillis()
         val hasFreshDeviceFix = _deviceLocationRecordedAtMillis.value?.let { fixTime ->
             markerTime - fixTime in 0L..MAX_MARKER_GPS_AGE_MILLIS
         } == true
-        val lat = _currentLat.value
-        val lon = _currentLon.value
-        val nearby = if (lat != null && lon != null) {
-            _loggedSignals.value
-                .mapNotNull { existing ->
-                    val eLat = existing.latitude ?: return@mapNotNull null
-                    val eLon = existing.longitude ?: return@mapNotNull null
-                    val d = com.example.data.field.FieldNavigation.distanceMeters(lat, lon, eLat, eLon)
-                    if (d <= PROXIMITY_WARN_METERS) existing to d else null
-                }
-                .minByOrNull { it.second }
-        } else {
-            null
-        }
-        if (nearby != null && !forceDespiteProximity) {
-            return LogSignalResult(
-                signal = TargetSignal(
-                    gridX = _sweepX.value,
-                    gridY = _sweepY.value,
-                    metalType = MetalType.MANUAL_MARKER,
-                    signalStrength = 0f,
-                    latitude = lat,
-                    longitude = lon,
-                    source = DetectionSource.MANUAL,
-                    timestamp = markerTime,
-                    terrainKey = _activeTerrainKey.value,
-                ),
-                nearbyFind = nearby.first,
-                nearbyDistanceMeters = nearby.second,
-            )
-        }
         val signal = TargetSignal(
             gridX = _sweepX.value,
             gridY = _sweepY.value,
             metalType = MetalType.MANUAL_MARKER,
             signalStrength = 0f,
             depthCm = null,
-            latitude = lat,
-            longitude = lon,
+            latitude = _currentLat.value,
+            longitude = _currentLon.value,
             gpsLatitude = _deviceLatitude.value.takeIf { hasFreshDeviceFix },
             gpsLongitude = _deviceLongitude.value.takeIf { hasFreshDeviceFix },
             gpsAccuracyMeters = _deviceLocationAccuracyMeters.value
@@ -1624,24 +1587,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 payload = "terrain=${signal.terrainKey};status=${signal.status}",
             )
         }
-        return LogSignalResult(signal = signal)
-    }
-
-    fun toggleStarred(signal: TargetSignal) {
-        updateLoggedSignal(signal.copy(starred = !signal.starred))
-    }
-
-    /** Nearest georeferenced find to the current device GPS, if any. */
-    fun nearestFindFromDevice(): Pair<TargetSignal, Double>? {
-        val lat = _deviceLatitude.value ?: return null
-        val lon = _deviceLongitude.value ?: return null
-        return _loggedSignals.value
-            .mapNotNull { signal ->
-                val sLat = signal.latitude ?: return@mapNotNull null
-                val sLon = signal.longitude ?: return@mapNotNull null
-                signal to com.example.data.field.FieldNavigation.distanceMeters(lat, lon, sLat, sLon)
-            }
-            .minByOrNull { it.second }
     }
 
     fun updateLoggedSignal(signal: TargetSignal) {
@@ -1653,7 +1598,31 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 operation = SyncOperation.UPSERT,
                 payload = "terrain=${signal.terrainKey};status=${signal.status};outcome=${signal.outcome.name}",
             )
+            // Field-checked outcomes feed the ranker training store (UNVERIFIED is not a review).
+            if (signal.outcome != VerificationOutcome.UNVERIFIED) {
+                val example = ReviewedCandidateExample.fromSignal(
+                    signal = signal,
+                    scoreAtReview = (signal.signalStrength / 100f).coerceIn(0f, 1f),
+                )
+                if (example != null) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { reviewedStore.append(example) }
+                    }
+                }
+            }
         }
+    }
+
+    fun toggleStarred(signal: TargetSignal) {
+        updateLoggedSignal(signal.copy(starred = !signal.starred))
+    }
+
+    /** Plain-language cell summary for AI field pack (Question the cell / evidence). */
+    private val _inspectedCellSummary = MutableStateFlow("")
+    val inspectedCellSummary: StateFlow<String> = _inspectedCellSummary.asStateFlow()
+
+    fun setInspectedCellSummary(summary: String) {
+        _inspectedCellSummary.value = summary
     }
 
     fun deleteLoggedSignal(signal: TargetSignal) {
@@ -1896,6 +1865,27 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
+     * Standalone GeoTIFF of the full-source bare-earth grid. Null when the terrain has no
+     * real geographic bounds (local-only grids cannot be placed safely in GIS).
+     */
+    suspend fun buildGeoTiffBytes(): ByteArray? = renderMutex.withLock {
+        withContext(Dispatchers.Default) {
+            val fullResult = overviewTerrain
+            val exportGrid = fullResult?.grid ?: _elevationGrid.value
+            val metadata = fullResult?.geoMetadata ?: _activeGeoMetadata.value
+            val bounds = metadata.bounds ?: return@withContext null
+            if (exportGrid.width < 2 || exportGrid.height < 2) return@withContext null
+            GeoTiffWriter.writeElevation(
+                grid = exportGrid,
+                westLongitude = bounds.minLon,
+                northLatitude = bounds.maxLat,
+                cellWidthDegrees = (bounds.maxLon - bounds.minLon) / (exportGrid.width - 1),
+                cellHeightDegrees = (bounds.maxLat - bounds.minLat) / (exportGrid.height - 1),
+            )
+        }
+    }
+
+    /**
      * QGIS-ready bundle: GeoTIFF of the full-source bare-earth grid, the targets as a
      * shapefile, and a .qgs that opens both. Null when the terrain has no real bounds.
      */
@@ -1938,6 +1928,23 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             projectName = _activeGeoMetadata.value.siteName,
             files = entries,
             createdAtMillis = System.currentTimeMillis(),
+        )
+    }
+
+    /** Minimal GeoPackage of logged finds (attributes + gpkg_contents). */
+    suspend fun buildGeoPackageBytes(): ByteArray = withContext(Dispatchers.Default) {
+        GeoPackageWriter.writeFinds(
+            projectName = _activeGeoMetadata.value.siteName,
+            signals = _loggedSignals.value,
+        )
+    }
+
+    /** Zip of annotated terrain PNG + README for field handoff. */
+    suspend fun buildAnnotatedMapBundleBytes(): ByteArray {
+        val projectFiles = buildProjectExportFiles()
+        return AnnotatedMapBundle.write(
+            projectName = _activeGeoMetadata.value.siteName,
+            annotatedPng = projectFiles.terrainPng,
         )
     }
 
@@ -2267,21 +2274,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         try {
             val terrainCache = LazTerrainCache(LazTerrainMemoryCache(), diskCache)
             val coordinator = TerrainDecodeCoordinator(terrainCache)
-            val source = TerrainImportSource(
-                uri = Uri.fromFile(file).toString(),
-                displayName = displayName,
-                options = preferredOptions,
-            )
             val outcome = coordinator.decode(
                 file = file,
                 displayName = displayName,
                 options = preferredOptions,
-                onPreview = { preview ->
-                    withContext(Dispatchers.Main.immediate) {
-                        TerrainPerformanceSession.publish(preview.gpuScene)
-                        setCustomTerrain(result = preview.terrain, source = source)
-                    }
-                },
                 onStage = { stage ->
                     withContext(Dispatchers.Main.immediate) {
                         _activeTerrainSummary.value = stage
@@ -2289,19 +2285,96 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 },
             )
             TerrainPerformanceSession.publish(outcome.gpuScene)
-            setCustomTerrain(result = outcome.terrain, source = source)
-            // If a sparse/preview path still returns exactOutcome, promote to full product.
-            val exactJob = outcome.exactOutcome
-            if (exactJob != null) {
-                viewModelScope.launch {
-                    val exact = runCatching { exactJob.await() }.getOrNull() ?: return@launch
-                    TerrainPerformanceSession.publish(exact.gpuScene)
-                    setCustomTerrain(result = exact.terrain, source = source)
-                }
-            }
+            setCustomTerrain(
+                result = outcome.terrain,
+                source = TerrainImportSource(
+                    uri = Uri.fromFile(file).toString(),
+                    displayName = displayName,
+                    options = preferredOptions,
+                ),
+            )
         } catch (error: Throwable) {
             _activeTerrainSummary.value =
                 "Could not restore ${displayName}: ${error.localizedMessage ?: "decode failed"}"
+        }
+    }
+
+    /**
+     * One-tap reopen of a saved LAZ/LAS from the home recent-projects strip.
+     * Looks up [displayName] (or file name) in the durable lidar store, then decodes via the
+     * same [TerrainDecodeCoordinator] path as cold-start restore / library open.
+     */
+    fun reopenSavedLidar(displayName: String) {
+        viewModelScope.launch {
+            val application = getApplication<Application>()
+            _activeTerrainSummary.value = "Opening $displayName…"
+            val dataset = withContext(Dispatchers.IO) {
+                val store = AppTerrainStorage.lidarStore(application)
+                store.list().firstOrNull {
+                    it.displayName.equals(displayName, ignoreCase = true) ||
+                        it.file.name.equals(displayName, ignoreCase = true) ||
+                        it.file.nameWithoutExtension.equals(
+                            displayName.substringBeforeLast('.'),
+                            ignoreCase = true,
+                        )
+                }
+            }
+            if (dataset == null || !dataset.file.isFile) {
+                _activeTerrainSummary.value = "Could not find saved LiDAR: $displayName"
+                return@launch
+            }
+            val file = dataset.file
+            val name = dataset.displayName
+            val preferredOptions = LidarImportOptions(
+                groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+                rasterResolution = LidarImportOptions.DEFAULT_OVERVIEW_RESOLUTION,
+                smoothingRadius = 0,
+            )
+            val diskCache = AppTerrainStorage.decodedTerrainCache(application)
+            val cached = withContext(Dispatchers.IO) {
+                diskCache.get(file, preferredOptions)
+            }
+            if (cached != null) {
+                val scene = withContext(Dispatchers.Default) {
+                    TerrainGpuSceneBuilder.build(cached.grid)
+                }
+                TerrainPerformanceSession.publish(scene)
+                setCustomTerrain(
+                    result = cached,
+                    source = TerrainImportSource(
+                        uri = Uri.fromFile(file).toString(),
+                        displayName = name,
+                        options = preferredOptions,
+                    ),
+                )
+                return@launch
+            }
+            try {
+                val terrainCache = LazTerrainCache(LazTerrainMemoryCache(), diskCache)
+                val coordinator = TerrainDecodeCoordinator(terrainCache)
+                val outcome = coordinator.decode(
+                    file = file,
+                    displayName = name,
+                    options = preferredOptions,
+                    onStage = { stage ->
+                        withContext(Dispatchers.Main.immediate) {
+                            _activeTerrainSummary.value = stage
+                        }
+                    },
+                )
+                TerrainPerformanceSession.publish(outcome.gpuScene)
+                setCustomTerrain(
+                    result = outcome.terrain,
+                    source = TerrainImportSource(
+                        uri = Uri.fromFile(file).toString(),
+                        displayName = name,
+                        options = preferredOptions,
+                    ),
+                )
+            } catch (error: Throwable) {
+                _activeTerrainSummary.value =
+                    "Could not open $name: ${error.localizedMessage ?: "decode failed"}"
+            }
         }
     }
 
@@ -2342,7 +2415,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         renderJob?.cancel()
-        refineJob?.cancel()
         locationJob?.cancel()
         compassHeadingJob?.cancel()
         basemapJob?.cancel()
@@ -2356,12 +2428,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         saveSettingsJob?.cancel()
         super.onCleared()
     }
-}
-
-enum class LightingPreset {
-    NORTHWEST,
-    SOUTHEAST,
-    OVERHEAD,
 }
 
 /** Memo key for skipping redundant hillshade work when sliders settle on the same values. */

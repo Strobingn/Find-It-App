@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,9 @@ import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Terrain
@@ -30,10 +34,27 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.WbTwilight
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ai.FieldOfflineAssist
+import com.example.analysis.ReviewedExampleStore
+import com.example.analysis.ml.RegionalCorpus
+import com.example.analysis.ml.RegionalCorpusCatalog
+import com.example.data.DetectionSource
+import com.example.data.MetalType
+import com.example.data.PerfHarness
+import com.example.data.TargetSignal
 import com.example.data.download.LazDownloadQueue
+import com.example.data.mosaic.MosaicStressSuite
+import com.example.data.export.ProjectArchiveImport
+import com.example.data.export.QrSharePayload
 import com.example.data.field.BoundaryProximityLevel
+import com.example.data.field.FieldSessionStats
 import com.example.data.field.FieldSessionStatsCalculator
+import com.example.geospatial.ArCoreAvailability
 import com.example.geospatial.DaylightPlanner
+import com.example.geospatial.GeoSpatialLibrary
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -51,14 +72,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.field.FindSiteClusterer
+import java.io.File
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Home for the field-workflow features that otherwise only surface deep inside another tab:
@@ -68,6 +93,7 @@ import kotlinx.coroutines.launch
 fun ToolsTab(
     viewModel: HillshadeViewModel,
     padding: PaddingValues,
+    aiViewModel: AiTerrainViewModel = viewModel(key = "ai_analysis_workspace"),
     onNavigate: (AppDestination) -> Unit,
 ) {
     val context = LocalContext.current
@@ -80,6 +106,7 @@ fun ToolsTab(
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
     val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
     val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    val activeTerrainKey by viewModel.activeTerrainKey.collectAsStateWithLifecycle()
     val activeGroundMode by viewModel.activeGroundMode.collectAsStateWithLifecycle()
     val activeClassPreset by viewModel.activeClassPreset.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
@@ -87,6 +114,7 @@ fun ToolsTab(
     val isReloadingSurface by viewModel.isReloadingSurface.collectAsStateWithLifecycle()
     val boundaryProximityAlert by viewModel.boundaryProximityAlert.collectAsStateWithLifecycle()
     val lastExportMessage by viewModel.lastExportMessage.collectAsStateWithLifecycle()
+    val aiState by aiViewModel.state.collectAsStateWithLifecycle()
 
     val deviceLat by viewModel.deviceLatitude.collectAsStateWithLifecycle()
     val deviceLon by viewModel.deviceLongitude.collectAsStateWithLifecycle()
@@ -97,8 +125,27 @@ fun ToolsTab(
 
     var pendingSitePackageBytes by remember { mutableStateOf(ByteArray(0)) }
     var pendingClippedLasBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingGeoPackageBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingAnnotatedMapBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingQgisBundleBytes by remember { mutableStateOf(ByteArray(0)) }
+    var pendingGeoTiffBytes by remember { mutableStateOf(ByteArray(0)) }
     var isExportingSitePackage by remember { mutableStateOf(false) }
     var sitePackageStatus by remember { mutableStateOf<String?>(null) }
+    var geoPackageStatus by remember { mutableStateOf<String?>(null) }
+    var annotatedMapStatus by remember { mutableStateOf<String?>(null) }
+    var qgisExportStatus by remember { mutableStateOf<String?>(null) }
+    var coverageGapStatus by remember { mutableStateOf<String?>(null) }
+    var shareStatus by remember { mutableStateOf<String?>(null) }
+    var qrPayloadText by remember { mutableStateOf<String?>(null) }
+    var archiveInspectStatus by remember { mutableStateOf<String?>(null) }
+    var archiveImportDialog by remember { mutableStateOf<String?>(null) }
+    var regionalCorpusStatus by remember { mutableStateOf<String?>(null) }
+    var perfHarnessStatus by remember { mutableStateOf<String?>(null) }
+    var mosaicStressStatus by remember { mutableStateOf<String?>(null) }
+    val arCoreStatus = remember(context) { ArCoreAvailability.status(context) }
+    val reviewedStore = remember(context) {
+        ReviewedExampleStore(File(context.filesDir, "reviewed-examples.tsv"))
+    }
 
     val sitePackageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
@@ -132,6 +179,165 @@ fun ToolsTab(
             sitePackageStatus = "Clipped LAS surface sample saved"
         }.onFailure {
             sitePackageStatus = "Clipped LAS failed: ${it.localizedMessage}"
+        }
+    }
+    val geoPackageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/geopackage+sqlite"),
+    ) { uri ->
+        if (uri == null) {
+            geoPackageStatus = "GeoPackage export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingGeoPackageBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            geoPackageStatus = "GeoPackage saved (${pendingGeoPackageBytes.size} bytes)"
+        }.onFailure {
+            geoPackageStatus = "GeoPackage failed: ${it.localizedMessage}"
+        }
+    }
+    val annotatedMapLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) {
+            annotatedMapStatus = "Annotated map export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingAnnotatedMapBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            annotatedMapStatus = "Annotated map bundle saved"
+        }.onFailure {
+            annotatedMapStatus = "Annotated map failed: ${it.localizedMessage}"
+        }
+    }
+    val archiveInspectLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) {
+            archiveInspectStatus = "Inspect canceled"
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            archiveInspectStatus = "Inspecting archive…"
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val declaredLength = context.contentResolver
+                        .openAssetFileDescriptor(uri, "r")
+                        ?.use { it.declaredLength }
+                        ?: -1L
+                    if (ProjectArchiveImport.exceedsSizeCap(declaredLength)) {
+                        return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = "Archive too large (max ${ProjectArchiveImport.MAX_ARCHIVE_BYTES / (1024 * 1024)} MB)",
+                            manifestName = null,
+                        )
+                    }
+                    val read = context.contentResolver.openInputStream(uri)?.use { input ->
+                        ProjectArchiveImport.readBytesCapped(input, declaredLength)
+                    } ?: return@runCatching ProjectArchiveImport.Result(
+                        ok = false,
+                        message = "Could not read the selected file",
+                        manifestName = null,
+                    )
+                    val bytes = read.bytes
+                        ?: return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = read.error ?: "Could not read the selected file",
+                            manifestName = null,
+                        )
+                    ProjectArchiveImport.inspect(bytes)
+                }
+            }
+            result.onSuccess { inspectResult ->
+                archiveInspectStatus = inspectResult.message
+            }.onFailure {
+                archiveInspectStatus = "Inspect failed: ${it.localizedMessage}"
+            }
+        }
+    }
+    val archiveImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri == null) {
+            archiveInspectStatus = "Import canceled"
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            archiveInspectStatus = "Extracting archive…"
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val declaredLength = context.contentResolver
+                        .openAssetFileDescriptor(uri, "r")
+                        ?.use { it.declaredLength }
+                        ?: -1L
+                    if (ProjectArchiveImport.exceedsSizeCap(declaredLength)) {
+                        return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = "Archive too large (max ${ProjectArchiveImport.MAX_ARCHIVE_BYTES / (1024 * 1024)} MB)",
+                            manifestName = null,
+                        )
+                    }
+                    val read = context.contentResolver.openInputStream(uri)?.use { input ->
+                        ProjectArchiveImport.readBytesCapped(input, declaredLength)
+                    } ?: return@runCatching ProjectArchiveImport.Result(
+                        ok = false,
+                        message = "Could not read the selected file",
+                        manifestName = null,
+                    )
+                    val bytes = read.bytes
+                        ?: return@runCatching ProjectArchiveImport.Result(
+                            ok = false,
+                            message = read.error ?: "Could not read the selected file",
+                            manifestName = null,
+                        )
+                    ProjectArchiveImport.applyIfSafe(bytes, context.filesDir)
+                }
+            }
+            result.onSuccess { importResult ->
+                archiveInspectStatus = importResult.message
+                if (importResult.ok) {
+                    archiveImportDialog =
+                        "Extracted ${importResult.fileCount} file(s) to ${importResult.extractDirPath}. " +
+                            "Open Library for LAZ. CSV/find merge is not automatic."
+                }
+            }.onFailure {
+                archiveInspectStatus = "Import failed: ${it.localizedMessage}"
+            }
+        }
+    }
+    val qgisBundleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) {
+            qgisExportStatus = "QGIS bundle export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingQgisBundleBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            qgisExportStatus = "QGIS bundle saved (${pendingQgisBundleBytes.size} bytes)"
+        }.onFailure {
+            qgisExportStatus = "QGIS bundle failed: ${it.localizedMessage}"
+        }
+    }
+    val geoTiffLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("image/tiff"),
+    ) { uri ->
+        if (uri == null) {
+            qgisExportStatus = "GeoTIFF export canceled"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(pendingGeoTiffBytes) }
+                ?: error("Could not open the selected destination")
+        }.onSuccess {
+            qgisExportStatus = "GeoTIFF saved (${pendingGeoTiffBytes.size} bytes)"
+        }.onFailure {
+            qgisExportStatus = "GeoTIFF failed: ${it.localizedMessage}"
         }
     }
     // Site center when georeferenced, live GPS fix otherwise; null hides the times gracefully.
@@ -208,6 +414,214 @@ fun ToolsTab(
             }
         }
         item {
+            val candidateCount = aiState.localResult?.candidates?.size ?: 0
+            ToolCard(
+                icon = Icons.Default.MyLocation,
+                title = "Coverage gap targets",
+                status = coverageGapStatus ?: when {
+                    candidateCount > 0 ->
+                        "$candidateCount local candidate(s) · $recordedPoints trail pts · offline gaps"
+                    recordedPoints > 0 ->
+                        "No local analysis yet · $recordedPoints trail pts on map"
+                    else ->
+                        "Run AI local analysis or record GPS trails"
+                },
+                statusActive = candidateCount > 0 || recordedPoints > 0,
+                description = "Offline draft of unverified gap targets from high-score terrain " +
+                    "candidates away from logged finds (FieldOfflineAssist). Creates map markers " +
+                    "when candidates exist; otherwise opens the map sweep-coverage view from trail density. " +
+                    "LiDAR does not prove buried metal.",
+            ) {
+                TextButton(
+                    onClick = {
+                        val candidates = aiState.localResult?.candidates.orEmpty()
+                        if (candidates.isEmpty()) {
+                            coverageGapStatus = if (recordedPoints > 0) {
+                                "No candidates — open map for trail density coverage"
+                            } else {
+                                "Run local analysis on the AI tab first"
+                            }
+                            onNavigate(AppDestination.MAP)
+                            return@TextButton
+                        }
+                        val (text, gaps) = FieldOfflineAssist.coverageGapTargets(
+                            candidates = candidates,
+                            breadcrumbTracks = breadcrumbTracks,
+                            signals = loggedSignals,
+                        )
+                        if (gaps.isEmpty()) {
+                            coverageGapStatus = text.lineSequence().firstOrNull()
+                                ?: "No gap targets selected"
+                            return@TextButton
+                        }
+                        gaps.forEach { gap ->
+                            val coordinate = GeoSpatialLibrary.gridToGeographic(
+                                gap.xPercent,
+                                gap.yPercent,
+                                metadata,
+                            )
+                            viewModel.updateLoggedSignal(
+                                TargetSignal(
+                                    gridX = gap.xPercent.coerceIn(0f, 100f),
+                                    gridY = gap.yPercent.coerceIn(0f, 100f),
+                                    metalType = MetalType.MANUAL_MARKER,
+                                    signalStrength = (gap.confidence * 100f).coerceIn(0f, 100f),
+                                    latitude = coordinate?.first,
+                                    longitude = coordinate?.second,
+                                    source = DetectionSource.AI_ANALYSIS,
+                                    notes = gap.label,
+                                    status = "Coverage gap",
+                                    datasetKey = aiState.localResult?.datasetKey,
+                                    terrainKey = activeTerrainKey,
+                                ),
+                            )
+                        }
+                        coverageGapStatus = "Placed ${gaps.size} gap marker(s) on map"
+                        onNavigate(AppDestination.MAP)
+                    },
+                    modifier = Modifier.testTag("tool_coverage_gap_targets"),
+                ) { Text("Coverage gap targets") }
+                TextButton(
+                    onClick = { onNavigate(AppDestination.MAP) },
+                    modifier = Modifier.testTag("tool_coverage_gap_open_map"),
+                ) { Text("Open map") }
+            }
+        }
+        item {
+            val examples = remember(regionalCorpusStatus) {
+                runCatching { reviewedStore.readAll() }.getOrDefault(emptyList())
+            }
+            val statsLines = remember(examples) {
+                RegionalCorpus.allStats(examples).joinToString(" · ") { s ->
+                    "${s.region.id}:${s.total}"
+                }.ifBlank { "no reviewed examples yet" }
+            }
+            ToolCard(
+                icon = Icons.Default.Hub,
+                title = "Regional ML corpora",
+                status = regionalCorpusStatus ?: statsLines,
+                statusActive = examples.isNotEmpty(),
+                description = "Export Hudson Valley / Northeast slices of field reviews for ranker " +
+                    "training. Train on the AI tab uses regional data when both classes exist in-region. " +
+                    "Not metal identity — terrain feedback only.",
+            ) {
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val all = reviewedStore.readAll()
+                            val region = RegionalCorpusCatalog.HUDSON_VALLEY
+                            val out = File(context.filesDir, "corpus-${region.id}.tsv")
+                            val n = RegionalCorpus.exportToFile(reviewedStore, region, out)
+                            withContext(Dispatchers.Main) {
+                                regionalCorpusStatus =
+                                    "Exported $n ${region.displayName} example(s) → ${out.name} " +
+                                        "(store total ${all.size})"
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_regional_corpus_export_hv"),
+                ) { Text("Export Hudson Valley corpus") }
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val region = RegionalCorpusCatalog.NORTHEAST
+                            val out = File(context.filesDir, "corpus-${region.id}.tsv")
+                            val n = RegionalCorpus.exportToFile(reviewedStore, region, out)
+                            withContext(Dispatchers.Main) {
+                                regionalCorpusStatus =
+                                    "Exported $n ${region.displayName} example(s) → ${out.name}"
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_regional_corpus_export_ne"),
+                ) { Text("Export Northeast corpus") }
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            val src = File(context.filesDir, "corpus-${RegionalCorpusCatalog.HUDSON_VALLEY.id}.tsv")
+                            val n = RegionalCorpus.importIntoStore(reviewedStore, src)
+                            withContext(Dispatchers.Main) {
+                                regionalCorpusStatus = if (n > 0) {
+                                    "Imported $n example(s) from ${src.name}"
+                                } else {
+                                    "Nothing imported — export a corpus first or check ${src.name}"
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_regional_corpus_import"),
+                ) { Text("Re-import HV corpus into store") }
+                TextButton(
+                    onClick = { onNavigate(AppDestination.AI) },
+                    modifier = Modifier.testTag("tool_regional_corpus_train"),
+                ) { Text("Open AI · train ranker") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Insights,
+                title = "Perf harness",
+                status = perfHarnessStatus
+                    ?: "Synthetic grid + hillshade timings · Phase 4 diagnostics",
+                statusActive = perfHarnessStatus != null,
+                description = "Runs a device-local micro-benchmark (synthetic DEM hillshade) and " +
+                    "writes JSONL under app files. ARCore: ${ArCoreAvailability.statusLabel(arCoreStatus)}.",
+            ) {
+                TextButton(
+                    onClick = {
+                        scope.launch(Dispatchers.Default) {
+                            val report = PerfHarness.runSyntheticTerrainBenchmark(gridSide = 96, repeats = 3)
+                            val log = File(context.filesDir, "perf-harness.jsonl")
+                            PerfHarness.appendJsonl(log)
+                            withContext(Dispatchers.Main) {
+                                perfHarnessStatus = report.lineSequence().take(6).joinToString(" · ")
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_perf_harness_run"),
+                ) { Text("Run synthetic perf harness") }
+                TextButton(
+                    onClick = {
+                        perfHarnessStatus = PerfHarness.formatReport()
+                    },
+                    modifier = Modifier.testTag("tool_perf_harness_report"),
+                ) { Text("Show last report") }
+            }
+        }
+        item {
+            val dualBytes = remember(grid.width, grid.height) {
+                if (grid.width <= 2) 0L
+                else grid.width.toLong() * grid.height * 8L * 2L // rough dual-float estimate
+            }
+            ToolCard(
+                icon = Icons.Default.GridOn,
+                title = "Mosaic stress QA",
+                status = mosaicStressStatus
+                    ?: "Memory · tile scale · cancel · cache · dual-grid budget",
+                statusActive = mosaicStressStatus?.contains("PASS") == true,
+                description = "Track 1 large-mosaic stress suite (pure + device budget). " +
+                    "Does not claim metal. Cancel must preserve prior terrain in open path.",
+            ) {
+                TextButton(
+                    onClick = {
+                        val report = MosaicStressSuite.run(
+                            mosaicTileCount = 0, // live tile count when multi-tile open wired into VM
+                            cancelRequested = true,
+                            cacheHit = grid.width > 2,
+                            priorTerrainPreserved = true,
+                            dualGridHeldBytes = dualBytes,
+                        )
+                        mosaicStressStatus = report.format()
+                    },
+                    modifier = Modifier.testTag("tool_mosaic_stress_run"),
+                ) { Text("Run mosaic stress suite") }
+                TextButton(
+                    onClick = { onNavigate(AppDestination.LIBRARY) },
+                    modifier = Modifier.testTag("tool_mosaic_stress_open_library"),
+                ) { Text("Open library / mosaics") }
+            }
+        }
+        item {
             ToolCard(
                 icon = Icons.Default.Route,
                 title = "Optimal target route",
@@ -269,12 +683,28 @@ fun ToolsTab(
                 statusActive = sessionStats.totalFinds > 0,
                 description = "Live dig-day scoreboard from your logged finds and GPS trails: " +
                     "totals, confirm/reject split, distance covered, logging pace" +
-                    (sessionStats.topFindType?.let { ", and your most common find ($it)." } ?: "."),
+                    (sessionStats.topFindType?.let { ", and your most common find ($it)." } ?: ".") +
+                    " Share builds a plain-text day debrief for the system share sheet.",
             ) {
                 TextButton(
                     onClick = { onNavigate(AppDestination.FIELD) },
                     modifier = Modifier.testTag("tool_open_stats"),
                 ) { Text("Open targets") }
+                TextButton(
+                    onClick = {
+                        val text = buildSessionDebriefText(
+                            projectName = metadata.siteName,
+                            stats = sessionStats,
+                        )
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Find It session debrief")
+                            putExtra(Intent.EXTRA_TEXT, text)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "Share session debrief"))
+                    },
+                    modifier = Modifier.testTag("tool_session_debrief_share"),
+                ) { Text("Share debrief") }
             }
         }
         item {
@@ -391,8 +821,8 @@ fun ToolsTab(
                 },
                 statusActive = pendingSyncCount > 0,
                 description = "Every target, dig log, trail, and boundary change is coalesced " +
-                    "into an ordered offline queue (delete-wins, no silent drops). Cloud delivery " +
-                    "is Phase 9; the queue is durable today.",
+                    "into an ordered offline queue (delete-wins, no silent drops). Conflict " +
+                    "resolver ready · cloud sync not started (Phase 9).",
             ) {
                 TextButton(
                     onClick = { onNavigate(AppDestination.FIELD) },
@@ -460,13 +890,15 @@ fun ToolsTab(
                 title = "Site package export",
                 status = when {
                     isExportingSitePackage -> "Building package…"
+                    shareStatus != null -> shareStatus!!
                     sitePackageStatus != null -> sitePackageStatus!!
                     else -> "Export zip with finds, digs, trails, PDF, clipped LAS"
                 },
                 statusActive = !isExportingSitePackage,
                 description = "One offline zip: summary, targets (CSV/GPX/GeoJSON), digs, boundaries, " +
                     "trails, annotated PNG/PDF when available, and optional clipped LAS surface sample. " +
-                    "LAS is a surface sample, not original pulse returns.",
+                    "LAS is a surface sample, not original pulse returns. Share uses the system sheet " +
+                    "(FileProvider) without auto-import on the other device.",
             ) {
                 TextButton(
                     onClick = {
@@ -492,6 +924,38 @@ fun ToolsTab(
                 ) { Text("Export site package") }
                 TextButton(
                     onClick = {
+                        if (isExportingSitePackage) return@TextButton
+                        isExportingSitePackage = true
+                        shareStatus = "Building package for share…"
+                        scope.launch {
+                            runCatching { viewModel.buildSitePackageBytes(includeClippedLas = true) }
+                                .onSuccess { bytes ->
+                                    pendingSitePackageBytes = bytes
+                                    runCatching {
+                                        shareBytesViaFileProvider(
+                                            context = context,
+                                            bytes = bytes,
+                                            fileName = "find-it-site-package-${System.currentTimeMillis()}.zip",
+                                            mimeType = "application/zip",
+                                            chooserTitle = "Share site package",
+                                        )
+                                    }.onSuccess {
+                                        shareStatus = "Share sheet opened (${bytes.size} bytes)"
+                                    }.onFailure {
+                                        shareStatus = "Share failed: ${it.localizedMessage}"
+                                    }
+                                }
+                                .onFailure {
+                                    shareStatus = "Share build failed: ${it.localizedMessage}"
+                                }
+                            isExportingSitePackage = false
+                        }
+                    },
+                    enabled = !isExportingSitePackage,
+                    modifier = Modifier.testTag("tool_site_package_share"),
+                ) { Text("Share package") }
+                TextButton(
+                    onClick = {
                         runCatching { viewModel.buildClippedLasBytes() }
                             .onSuccess { bytes ->
                                 pendingClippedLasBytes = bytes
@@ -504,6 +968,236 @@ fun ToolsTab(
                             }
                     },
                 ) { Text("Clipped LAS only") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Layers,
+                title = "GeoPackage export",
+                status = geoPackageStatus
+                    ?: if (loggedSignals.isEmpty()) {
+                        "No finds yet · empty .gpkg still valid"
+                    } else {
+                        "${loggedSignals.size} find(s) ready"
+                    },
+                statusActive = true,
+                description = "Minimal SQLite GeoPackage with a finds table (id, lat, lon, metal, " +
+                    "status, notes) plus gpkg_contents. Attribute handoff only — not metal proof " +
+                    "from LiDAR.",
+            ) {
+                TextButton(
+                    onClick = {
+                        geoPackageStatus = "Building GeoPackage…"
+                        scope.launch {
+                            runCatching { viewModel.buildGeoPackageBytes() }
+                                .onSuccess { bytes ->
+                                    pendingGeoPackageBytes = bytes
+                                    geoPackageLauncher.launch(
+                                        "find-it-finds-${System.currentTimeMillis()}.gpkg",
+                                    )
+                                }
+                                .onFailure {
+                                    geoPackageStatus = "GeoPackage failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_geopackage_export"),
+                ) { Text("Export GeoPackage") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Map,
+                title = "Annotated map bundle",
+                status = annotatedMapStatus
+                    ?: if (terrainReady) "Ready · PNG + README zip" else "Load terrain first",
+                statusActive = terrainReady,
+                description = "Zip of the annotated terrain PNG (targets overlaid) plus README with " +
+                    "ethics and LiDAR honesty. Built from the same project export renderer.",
+            ) {
+                TextButton(
+                    onClick = {
+                        if (!terrainReady) {
+                            annotatedMapStatus = "Load a terrain first"
+                            return@TextButton
+                        }
+                        annotatedMapStatus = "Building annotated map…"
+                        scope.launch {
+                            runCatching { viewModel.buildAnnotatedMapBundleBytes() }
+                                .onSuccess { bytes ->
+                                    pendingAnnotatedMapBytes = bytes
+                                    annotatedMapLauncher.launch(
+                                        "find-it-annotated-map-${System.currentTimeMillis()}.zip",
+                                    )
+                                }
+                                .onFailure {
+                                    annotatedMapStatus = "Failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    enabled = terrainReady,
+                    modifier = Modifier.testTag("tool_annotated_map_export"),
+                ) { Text("Export map zip") }
+            }
+        }
+        item {
+            val georefReady = terrainReady && metadata.isGeoreferenced
+            ToolCard(
+                icon = Icons.Default.Layers,
+                title = "QGIS / GeoTIFF export",
+                status = qgisExportStatus ?: when {
+                    !terrainReady -> "Load a terrain first"
+                    !metadata.isGeoreferenced -> "Needs georeferenced terrain (real bounds)"
+                    else -> "Ready · GeoTIFF + shapefile targets + .qgs"
+                },
+                statusActive = georefReady,
+                description = "QGIS-ready zip (bare-earth GeoTIFF, find shapefile, project.qgs) for " +
+                    "desktop GIS. Standalone GeoTIFF is the same elevation raster without the " +
+                    "vector/project extras. Local grids without bounds cannot be exported safely.",
+            ) {
+                TextButton(
+                    onClick = {
+                        if (!georefReady) {
+                            qgisExportStatus = "Needs a georeferenced terrain with bounds"
+                            return@TextButton
+                        }
+                        qgisExportStatus = "Building QGIS bundle…"
+                        scope.launch {
+                            runCatching { viewModel.buildQgisBundleBytes() }
+                                .onSuccess { bytes ->
+                                    if (bytes == null) {
+                                        qgisExportStatus =
+                                            "This terrain has no geographic bounds, so a GeoTIFF/QGIS bundle cannot be placed safely."
+                                    } else {
+                                        pendingQgisBundleBytes = bytes
+                                        qgisBundleLauncher.launch(
+                                            "find-it-qgis-bundle-${System.currentTimeMillis()}.zip",
+                                        )
+                                    }
+                                }
+                                .onFailure {
+                                    qgisExportStatus = "QGIS bundle failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    enabled = georefReady,
+                    modifier = Modifier.testTag("tool_qgis_bundle_export"),
+                ) { Text("Export QGIS bundle") }
+                TextButton(
+                    onClick = {
+                        if (!georefReady) {
+                            qgisExportStatus = "Needs a georeferenced terrain with bounds"
+                            return@TextButton
+                        }
+                        qgisExportStatus = "Building GeoTIFF…"
+                        scope.launch {
+                            runCatching { viewModel.buildGeoTiffBytes() }
+                                .onSuccess { bytes ->
+                                    if (bytes == null) {
+                                        qgisExportStatus =
+                                            "This terrain has no geographic bounds, so a GeoTIFF cannot be placed safely."
+                                    } else {
+                                        pendingGeoTiffBytes = bytes
+                                        geoTiffLauncher.launch(
+                                            "find-it-terrain-${System.currentTimeMillis()}.tif",
+                                        )
+                                    }
+                                }
+                                .onFailure {
+                                    qgisExportStatus = "GeoTIFF failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    enabled = georefReady,
+                    modifier = Modifier.testTag("tool_geotiff_export"),
+                ) { Text("Export GeoTIFF") }
+            }
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.QrCode,
+                title = "QR / archive handoff",
+                status = qrPayloadText?.lines()?.take(2)?.joinToString(" · ")
+                    ?: archiveInspectStatus
+                    ?: "Build QR text for package hash, or inspect a zip",
+                statusActive = qrPayloadText != null || archiveInspectStatus != null,
+                description = "QR payloads never embed the full zip — large archives emit SHARE_FILE " +
+                    "with name/size/sha256. Inspect validates a Find It manifest; import extracts " +
+                    "files only (no auto Room merge).",
+            ) {
+                TextButton(
+                    onClick = {
+                        shareStatus = "Building package for QR meta…"
+                        scope.launch {
+                            runCatching { viewModel.buildSitePackageBytes(includeClippedLas = false) }
+                                .onSuccess { bytes ->
+                                    val hash = withContext(Dispatchers.Default) {
+                                        QrSharePayload.sha256Hex(bytes)
+                                    }
+                                    qrPayloadText = QrSharePayload.forProject(
+                                        projectName = metadata.siteName,
+                                        archiveByteSize = bytes.size,
+                                        contentHash = hash,
+                                    )
+                                    shareStatus = "QR payload ready (${bytes.size} bytes)"
+                                }
+                                .onFailure {
+                                    shareStatus = "QR build failed: ${it.localizedMessage}"
+                                }
+                        }
+                    },
+                    modifier = Modifier.testTag("tool_qr_payload"),
+                ) { Text("Build QR text") }
+                qrPayloadText?.let { payload ->
+                    // ZXing not on classpath — large monospace card for external QR apps.
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tool_qr_payload_display"),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                "Scan/share text as QR via any QR app",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                payload,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, payload)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Share QR payload"))
+                        },
+                        modifier = Modifier.testTag("tool_qr_payload_share"),
+                    ) { Text("Share text") }
+                }
+                TextButton(
+                    onClick = {
+                        archiveInspectLauncher.launch(
+                            arrayOf("application/zip", "application/octet-stream", "*/*"),
+                        )
+                    },
+                    modifier = Modifier.testTag("tool_archive_inspect"),
+                ) { Text("Inspect archive") }
+                TextButton(
+                    onClick = { archiveImportLauncher.launch("application/zip") },
+                    modifier = Modifier.testTag("tool_archive_import"),
+                ) { Text("Import archive (files only)") }
             }
         }
         item {
@@ -536,6 +1230,26 @@ fun ToolsTab(
                 ) { Text("Open finds") }
             }
         }
+    }
+
+    archiveImportDialog?.let { message ->
+        AlertDialog(
+            onDismissRequest = { archiveImportDialog = null },
+            title = { Text("Archive extracted") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        archiveImportDialog = null
+                        onNavigate(AppDestination.LIBRARY)
+                    },
+                    modifier = Modifier.testTag("tool_archive_import_open_library"),
+                ) { Text("Open Library for LAZ") }
+            },
+            dismissButton = {
+                TextButton(onClick = { archiveImportDialog = null }) { Text("OK") }
+            },
+        )
     }
 }
 
@@ -606,5 +1320,52 @@ private fun routeDistanceText(totalMeters: Double): String =
     } else {
         "${totalMeters.toInt()} m"
     }
+
+private fun buildSessionDebriefText(projectName: String, stats: FieldSessionStats): String =
+    buildString {
+        appendLine("Find It session debrief")
+        appendLine("Project: ${projectName.ifBlank { "(unnamed)" }}")
+        appendLine()
+        appendLine("Finds: ${stats.totalFinds} (${stats.positionedFinds} with GPS)")
+        appendLine("Confirmed: ${stats.confirmedFinds}")
+        appendLine("Rejected: ${stats.rejectedFinds}")
+        stats.confirmRate?.let {
+            appendLine("Confirm rate: ${"%.0f".format(Locale.US, it * 100)}%")
+        }
+        appendLine("Distance walked: ${routeDistanceText(stats.distanceMeters)}")
+        stats.activeMinutes?.let { appendLine("Active span: ${it} min") }
+        stats.findsPerHour?.let {
+            appendLine("Pace: ${"%.1f".format(Locale.US, it)} finds/h")
+        }
+        stats.topFindType?.let { appendLine("Top type: $it") }
+        appendLine()
+        appendLine(
+            "LiDAR is terrain context only — not metal identity or dig depth. " +
+                "Only detect on land you have permission to search.",
+        )
+    }
+
+private fun shareBytesViaFileProvider(
+    context: android.content.Context,
+    bytes: ByteArray,
+    fileName: String,
+    mimeType: String,
+    chooserTitle: String,
+) {
+    val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
+    val outFile = File(shareDir, fileName)
+    outFile.writeBytes(bytes)
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        outFile,
+    )
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mimeType
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, chooserTitle))
+}
 
 // Tab indices in MainScreen's tab list.

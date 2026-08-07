@@ -19,6 +19,7 @@
 local.properties
 app/google-services.json
 .env
+sentry.properties
 debug.keystore
 trace_processor
 *.perfetto-trace

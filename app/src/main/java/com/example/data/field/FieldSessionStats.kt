@@ -28,6 +28,30 @@ data class FieldSessionStats(
             return if (decided > 0) confirmedFinds.toFloat() / decided else null
         }
 
+    /** Plain-text day debrief suitable for [android.content.Intent.ACTION_SEND]. */
+    fun toShareText(siteName: String? = null): String = buildString {
+        appendLine("Find It · field session debrief")
+        siteName?.takeIf { it.isNotBlank() }?.let { appendLine("Site: $it") }
+        appendLine("Finds: $totalFinds ($positionedFinds with GPS)")
+        appendLine("Confirmed: $confirmedFinds · Rejected: $rejectedFinds")
+        confirmRate?.let { appendLine("Confirm rate: ${(it * 100).toInt()}%") }
+        appendLine(
+            "Distance walked: ${
+                when {
+                    distanceMeters >= 1000.0 -> String.format("%.2f km", distanceMeters / 1000.0)
+                    else -> String.format("%.0f m", distanceMeters)
+                }
+            }",
+        )
+        activeMinutes?.let { appendLine("Active span: ${it} min") }
+        findsPerHour?.let { appendLine("Pace: ${String.format("%.1f", it)} finds/h") }
+        topFindType?.let { appendLine("Top find type: $it") }
+        appendLine()
+        append(
+            "LiDAR ranks surface morphology and historic context — not buried metal, age, or dig depth.",
+        )
+    }
+
     companion object {
         /** Sessions shorter than this report no finds/hour - the rate would be noise. */
         const val MIN_RATEABLE_MINUTES = 10L

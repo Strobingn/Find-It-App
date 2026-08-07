@@ -171,12 +171,23 @@ class TerrainDecodeCoordinator(
         onStage("Streaming selected COPC byte ranges…")
         val terrain = withContext(Dispatchers.IO) {
             val context = currentCoroutineContext()
-            val laz = LazTerrainReader.readRemote(
-                url = url,
-                rangeCacheFile = rangeCache,
-                options = options,
-                shouldContinue = { context.isActive },
-            ) ?: error("Could not stream COPC point cloud")
+            val laz = runCatching {
+                LazTerrainReader.readRemote(
+                    url = url,
+                    rangeCacheFile = rangeCache,
+                    options = options,
+                    shouldContinue = { context.isActive },
+                )
+            }.getOrElse { ex ->
+                // Soft-fail path: surface a clear message instead of crashing the open pipeline.
+                throw java.io.IOException(
+                    "COPC stream failed (network, range, or format). Try again or download LAZ. " +
+                        (ex.message ?: ex::class.java.simpleName),
+                    ex,
+                )
+            } ?: throw java.io.IOException(
+                "COPC stream returned no terrain. Check selection bounds and connectivity.",
+            )
             DemGenerator.TerrainLoadResult(
                 grid = laz.grid,
                 summary = "COPC range stream · ${laz.note}",

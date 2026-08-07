@@ -1,6 +1,10 @@
 package com.example.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +26,8 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -67,6 +73,7 @@ import com.example.data.MetalType
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
+import java.util.Locale
 
 /**
  * Built-in AI field prompts for metal-detecting / historic-site work.
@@ -216,10 +223,11 @@ fun AiCloudPanel(
     ) -> Unit = { _, _, _, _, _ -> },
     /** Overrides the session pack built from [terrainSummary]/[grid]/[metadata] below, if supplied. */
     fieldSessionPack: FieldAiSessionPack? = null,
+    onClearFocusedCandidate: () -> Unit = {},
     onApplyLighting: (azimuth: Float, altitude: Float) -> Unit = { _, _ -> },
     onApplyVizMode: (Int) -> Unit = {},
     /** Ids stay on assistantViewModel.state until the Finds tab reads and consumes them — this is
-     * only a hook for callers that want to react locally (e.g. switch tabs) when applied. */
+     * only a hook for callers that want to react locally (e.g. switch tabs / set playlist) when applied. */
     onApplyNavTargets: (List<Long>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -304,6 +312,58 @@ fun AiCloudPanel(
         )
     }
 
+    var speechError by remember { mutableStateOf<String?>(null) }
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val spoken = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (spoken.isBlank()) {
+            if (result.resultCode != android.app.Activity.RESULT_OK) {
+                speechError = "Speech recognition canceled or returned no text."
+            }
+            return@rememberLauncherForActivityResult
+        }
+        speechError = null
+        draft = spoken
+        val pack = baseFieldPack.copy(freeformNotes = spoken)
+        assistantViewModel.runFieldAiFeature(
+            feature = FieldAiFeature.VOICE_STRUCTURED_FIND,
+            pack = pack,
+            viewport = viewport,
+            attachViewportImage = false,
+            terrainKey = terrainKey,
+        )
+    }
+
+    fun launchStructuredFindDictation() {
+        speechError = null
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Describe the find for structured logging")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        val canHandle = intent.resolveActivity(context.packageManager) != null
+        if (!canHandle) {
+            speechError = "No speech recognition app is available on this device."
+            return
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            speechError = "Speech recognition is not available."
+        } catch (error: Exception) {
+            speechError = error.localizedMessage ?: "Could not start speech recognition."
+        }
+    }
+
     LazyColumn(
         modifier = modifier
             .imePadding()
@@ -347,6 +407,27 @@ fun AiCloudPanel(
                             modifier = Modifier.height(CompactButtonHeight),
                             contentPadding = CompactButtonPadding,
                         ) { Text("Keys", style = MaterialTheme.typography.labelSmall) }
+                        IconButton(
+                            onClick = {
+                                val reply = lastModelMessage?.text?.takeIf { it.isNotBlank() } ?: return@IconButton
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "Find It AI reply")
+                                    putExtra(Intent.EXTRA_TEXT, reply)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share AI reply"))
+                            },
+                            enabled = lastModelMessage?.text?.isNotBlank() == true,
+                            modifier = Modifier
+                                .height(CompactButtonHeight)
+                                .testTag("ai_share_last_reply"),
+                        ) {
+                            Icon(
+                                Icons.Default.Share,
+                                contentDescription = "Share last AI reply",
+                                modifier = Modifier.height(18.dp),
+                            )
+                        }
                         IconButton(onClick = assistantViewModel::clearConversation, modifier = Modifier.height(CompactButtonHeight)) {
                             Icon(Icons.Default.DeleteSweep, contentDescription = "Clear conversation", modifier = Modifier.height(18.dp))
                         }
@@ -457,6 +538,62 @@ fun AiCloudPanel(
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
+                // Session-pack readiness: what context will ride with the next field-pack run.
+                val readiness = remember(baseFieldPack) {
+                    buildList {
+                        if (baseFieldPack.inspectedCellSummary.isNotBlank()) add("Cell")
+                        if (baseFieldPack.selectedCandidateSummary.isNotBlank()) add("Focus")
+                        if (baseFieldPack.secondaryTerrainSummary.isNotBlank() ||
+                            baseFieldPack.secondaryTerrainContext.isNotBlank()
+                        ) {
+                            add("Secondary")
+                        }
+                        if (baseFieldPack.localResult != null) add("Local AI")
+                        val photos = baseFieldPack.signals.sumOf { it.photoUris.size }
+                        if (photos > 0) add("Photos $photos")
+                        if (baseFieldPack.signals.any { it.starred }) {
+                            add("★${baseFieldPack.signals.count { it.starred }}")
+                        }
+                        if (baseFieldPack.terrainQualitySummary.isNotBlank()) add("Quality")
+                    }
+                }
+                if (readiness.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .testTag("ai_pack_readiness"),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Context:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        readiness.forEach { label ->
+                            AssistChip(
+                                onClick = {},
+                                enabled = false,
+                                label = {
+                                    Text(label, style = MaterialTheme.typography.labelSmall)
+                                },
+                                modifier = Modifier.height(CompactButtonHeight),
+                            )
+                        }
+                        if (baseFieldPack.selectedCandidateSummary.isNotBlank()) {
+                            TextButton(
+                                onClick = onClearFocusedCandidate,
+                                modifier = Modifier
+                                    .height(CompactButtonHeight)
+                                    .testTag("ai_clear_focus_candidate"),
+                                contentPadding = CompactButtonPadding,
+                            ) {
+                                Text("Clear focus", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -541,6 +678,32 @@ fun AiCloudPanel(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                OutlinedButton(
+                    onClick = { launchStructuredFindDictation() },
+                    enabled = !state.isSending && state.activeProvider != null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(CompactButtonHeight)
+                        .testTag("ai_voice_structured_dictate"),
+                    contentPadding = CompactButtonPadding,
+                ) {
+                    Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.height(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Dictate for structured find", style = MaterialTheme.typography.labelSmall)
+                }
+                Text(
+                    "Uses device speech recognition",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                speechError?.let { err ->
+                    Text(
+                        err,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("ai_voice_structured_error"),
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -550,7 +713,34 @@ fun AiCloudPanel(
                     OutlinedButton(
                         onClick = {
                             val pack = baseFieldPack
-                            val draft = FieldOfflineAssist.returnTripDraft(
+                            val candidates = pack.localResult?.candidates
+                                ?: state.localResult?.candidates
+                                ?: emptyList()
+                            val offlineDraft = FieldOfflineAssist.digBriefDraft(
+                                candidates = candidates,
+                                signals = pack.signals,
+                                excavationLogs = pack.excavationLogs,
+                                selectedCandidateSummary = pack.selectedCandidateSummary,
+                                inspectedCellSummary = pack.inspectedCellSummary,
+                            )
+                            assistantViewModel.postOfflineAssist(
+                                title = "Offline dig brief",
+                                body = offlineDraft,
+                                terrainKey = terrainKey,
+                            )
+                        },
+                        enabled = !state.isSending,
+                        modifier = Modifier
+                            .height(CompactButtonHeight)
+                            .testTag("ai_offline_dig_brief"),
+                        contentPadding = CompactButtonPadding,
+                    ) {
+                        Text("Offline dig brief", style = MaterialTheme.typography.labelSmall)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val pack = baseFieldPack
+                            val offlineDraft = FieldOfflineAssist.returnTripDraft(
                                 signals = pack.signals,
                                 excavationLogs = pack.excavationLogs,
                                 deviceLat = pack.deviceLatitude,
@@ -558,7 +748,7 @@ fun AiCloudPanel(
                             )
                             assistantViewModel.postOfflineAssist(
                                 title = "Offline return-trip",
-                                body = draft,
+                                body = offlineDraft,
                                 terrainKey = terrainKey,
                             )
                         },
@@ -648,8 +838,8 @@ fun AiCloudPanel(
                     FilledTonalButton(
                         onClick = {
                             // Confirm apply: callback for local hooks; keep ids on state so the
-                            // Finds tab (shared AiTerrainViewModel) can set navigationTarget and
-                            // clear via onConsumeNavTargets. Clearing here would drop the handoff.
+                            // Finds tab (shared AiTerrainViewModel) can set navigation playlist
+                            // and clear via consumeNavTargets. Clearing here would drop the handoff.
                             onApplyNavTargets(navIds)
                         },
                         enabled = !state.isSending,

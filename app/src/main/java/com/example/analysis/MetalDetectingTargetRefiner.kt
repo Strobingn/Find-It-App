@@ -1,5 +1,6 @@
 package com.example.analysis
 
+import com.example.data.historicmap.MapTerrainAgreement
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -113,6 +114,11 @@ object MetalDetectingTargetRefiner {
         feedback: List<VerifiedFeedbackPoint> = emptyList(),
         /** Per-type threshold bias from [FeatureTypeCalibration]; see that object for how it's derived. */
         calibration: Map<MetalDetectingTargetType, Float> = emptyMap(),
+        /**
+         * Optional historic-map vs terrain agreement (0..1). When non-null, applies a capped
+         * [MapTerrainAgreement.rankingAdjustment] to every target score. Null is a no-op.
+         */
+        historicMapAgreementScore: Float? = null,
     ): List<MetalDetectingTarget> {
         val layers = result.layers
         val width = layers.width
@@ -310,7 +316,15 @@ object MetalDetectingTargetRefiner {
         appendTargets(output, MetalDetectingTargetType.STONE_WALL, wall, width, height, 0.68f, 5f, feedback, ctx, biasFor(MetalDetectingTargetType.STONE_WALL))
         appendTargets(output, MetalDetectingTargetType.OLD_HOMESITE, homesite, width, height, 0.66f, 14f, feedback, ctx, biasFor(MetalDetectingTargetType.OLD_HOMESITE))
 
+        val adjustment = historicMapAgreementScore?.let { MapTerrainAgreement.rankingAdjustment(it) }
         return suppressNearbyDuplicates(output)
+            .map { target ->
+                if (adjustment == null) {
+                    target
+                } else {
+                    target.copy(score = (target.score + adjustment).coerceIn(0f, 1f))
+                }
+            }
             .sortedByDescending { it.score }
             .take(MAX_TOTAL)
     }

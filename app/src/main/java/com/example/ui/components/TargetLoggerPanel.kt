@@ -41,7 +41,6 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
@@ -80,7 +79,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.example.data.LogSignalResult
 import com.example.data.SurfaceZSample
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
@@ -90,6 +88,7 @@ import com.example.data.field.ExcavationLogEntry
 import com.example.data.field.FieldNavigation
 import com.example.data.field.FieldWaypoint
 import com.example.data.field.FindSiteClusterer
+import com.example.data.field.NavigationTarget
 import com.example.data.field.OptimizedFieldRoute
 import com.example.data.field.PendingSyncEntry
 import com.example.data.field.SurveyBoundary
@@ -111,11 +110,13 @@ import com.example.geospatial.MeasurementFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.cos
+import kotlin.math.roundToInt
 
 @Composable
 fun TargetLoggerPanel(
@@ -137,8 +138,7 @@ fun TargetLoggerPanel(
     onStartBreadcrumb: () -> Unit,
     onPauseBreadcrumb: () -> Unit,
     onClearBreadcrumbs: () -> Unit,
-    /** Logs current sweep; pass force=true after user confirms a proximity warning. */
-    onLogSignal: (forceDespiteProximity: Boolean) -> LogSignalResult,
+    onLogSignal: () -> Unit,
     onDeleteSignal: (TargetSignal) -> Unit,
     onUpdateSignal: (TargetSignal) -> Unit,
     onToggleStarred: (TargetSignal) -> Unit = {},
@@ -153,13 +153,17 @@ fun TargetLoggerPanel(
     onCreateBoundaryFromTrail: (BreadcrumbTrack) -> Unit = {},
     onCreateBoundaryAroundGps: () -> Unit = {},
     onDeleteSurveyBoundary: (SurveyBoundary) -> Unit = {},
+    onUpdateBoundary: (SurveyBoundary) -> Unit = {},
     onMarkSyncSent: (Long) -> Unit = {},
     onClearSyncQueue: () -> Unit = {},
     /** Relative bare-earth surface context under a find — never dig/metal depth. */
     surfaceZForSignal: (TargetSignal) -> SurfaceZSample? = { null },
-    /** AI-suggested nav targets handed off from the Assist tab's shared AiTerrainViewModel. */
-    pendingNavTargetIds: List<Long> = emptyList(),
-    onConsumeNavTargets: () -> Unit = {},
+    /** Multi-stop playlist (e.g. AI NAV_TARGET order). */
+    navPlaylistIds: List<Long> = emptyList(),
+    navPlaylistIndex: Int = 0,
+    onSetNavPlaylist: (List<Long>) -> Unit = {},
+    onNavPlaylistNext: () -> Unit = {},
+    onClearNavPlaylist: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -180,20 +184,9 @@ fun TargetLoggerPanel(
     var binarySuccessMessage by remember { mutableStateOf("") }
     var pendingProjectBytes by remember { mutableStateOf(ByteArray(0)) }
     var navigationTarget by remember { mutableStateOf<TargetSignal?>(null) }
+    var showArForFind by remember { mutableStateOf(false) }
     var plannedRoute by remember { mutableStateOf<OptimizedFieldRoute?>(null) }
-    var pendingProximity by remember { mutableStateOf<LogSignalResult?>(null) }
-    var logMessage by remember { mutableStateOf<String?>(null) }
     val routeStopCount = loggedSignals.count { it.latitude != null && it.longitude != null }
-
-    fun attemptLog(force: Boolean = false) {
-        val result = onLogSignal(force)
-        if (result.nearbyFind != null && !force) {
-            pendingProximity = result
-            return
-        }
-        pendingProximity = null
-        logMessage = "Logged ${result.signal.metalType.label}"
-    }
     val planRoute: () -> Unit = {
         scope.launch {
             val waypoints = loggedSignals.mapNotNull { signal ->
@@ -214,15 +207,6 @@ fun TargetLoggerPanel(
     LaunchedEffect(loggedSignals) {
         navigationTarget?.let { active ->
             if (loggedSignals.none { it.id == active.id }) navigationTarget = null
-        }
-    }
-    // Apply first AI NAV_TARGET that matches a geo-located find; consume so it is not re-applied.
-    LaunchedEffect(pendingNavTargetIds, loggedSignals) {
-        val firstId = pendingNavTargetIds.firstOrNull() ?: return@LaunchedEffect
-        val match = loggedSignals.firstOrNull { it.id == firstId }
-        if (match != null && match.latitude != null && match.longitude != null) {
-            navigationTarget = match
-            onConsumeNavTargets()
         }
     }
     DisposableEffect(Unit) {
@@ -383,6 +367,47 @@ fun TargetLoggerPanel(
         }
     }
 
+    var thisTripOnly by remember { mutableStateOf(false) }
+    var starredOnly by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(FindSortMode.STARRED_FIRST) }
+    val displayedSignals = remember(
+        loggedSignals,
+        thisTripOnly,
+        starredOnly,
+        sortMode,
+        deviceLatitude,
+        deviceLongitude,
+    ) {
+        val cutoff = System.currentTimeMillis() - 8L * 60L * 60L * 1000L
+        val filtered = loggedSignals.filter { signal ->
+            (!thisTripOnly || signal.timestamp >= cutoff) &&
+                (!starredOnly || signal.starred)
+        }
+        when (sortMode) {
+            FindSortMode.STARRED_FIRST -> filtered.sortedWith(
+                compareByDescending<TargetSignal> { it.starred }.thenByDescending { it.timestamp },
+            )
+            FindSortMode.NEWEST -> filtered.sortedByDescending { it.timestamp }
+            FindSortMode.NEAREST -> {
+                val lat = deviceLatitude
+                val lon = deviceLongitude
+                if (lat == null || lon == null) {
+                    filtered.sortedByDescending { it.timestamp }
+                } else {
+                    filtered.sortedBy { signal ->
+                        val sLat = signal.latitude ?: signal.gpsLatitude
+                        val sLon = signal.longitude ?: signal.gpsLongitude
+                        if (sLat == null || sLon == null) {
+                            Double.MAX_VALUE
+                        } else {
+                            FieldNavigation.distanceMeters(lat, lon, sLat, sLon)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -400,48 +425,19 @@ fun TargetLoggerPanel(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Surface(
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("ethics_dig_disclaimer"),
-                ) {
-                    Text(
-                        "Ethics: only detect on land you have permission to search. " +
-                            "LiDAR does not prove buried metal or ownership. " +
-                            "Verify laws and access before digging.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    )
-                }
-                if (pendingNavTargetIds.isNotEmpty()) {
-                    val matched = loggedSignals.any { it.id == pendingNavTargetIds.first() && it.latitude != null }
-                    if (!matched) {
-                        Text(
-                            "AI navigation pending: ${pendingNavTargetIds.size} stop(s) — " +
-                                "no matching geo-located find yet for id ${pendingNavTargetIds.first()}.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.testTag("ai_nav_pending_unmatched"),
-                        )
-                    }
-                }
+                Text(
+                    "Ethics: only search land you have permission to access. LiDAR is not ownership or metal proof.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("ethics_sticky_mark"),
+                )
                 Button(
-                    onClick = { attemptLog(force = false) },
+                    onClick = onLogSignal,
                     modifier = Modifier.fillMaxWidth().height(52.dp).testTag("log_signal_button"),
                 ) {
                     Icon(Icons.Default.AddLocationAlt, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Log current position")
-                }
-                logMessage?.let { message ->
-                    Text(
-                        message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
                 }
                 OutlinedButton(
                     onClick = { showProjectExport = true },
@@ -461,6 +457,37 @@ fun TargetLoggerPanel(
                     Spacer(Modifier.width(8.dp))
                     Text("Plan target route · $routeStopCount stops")
                 }
+                OutlinedButton(
+                    onClick = {
+                        val ordered = loggedSignals
+                            .filter { it.latitude != null && it.longitude != null }
+                            .sortedByDescending { it.signalStrength }
+                            .map { it.id }
+                        onSetNavPlaylist(ordered)
+                    },
+                    enabled = routeStopCount >= 1,
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("nav_playlist_from_finds"),
+                ) {
+                    Text("Nav playlist from finds · $routeStopCount")
+                }
+                if (navPlaylistIds.isNotEmpty()) {
+                    Text(
+                        "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("nav_playlist_status"),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = onNavPlaylistNext,
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("nav_playlist_next"),
+                        ) { Text("Next stop") }
+                        OutlinedButton(
+                            onClick = onClearNavPlaylist,
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("nav_playlist_clear"),
+                        ) { Text("Clear playlist") }
+                    }
+                }
             }
         }
 
@@ -479,13 +506,6 @@ fun TargetLoggerPanel(
         }
 
         val recordedBreadcrumbPoints = breadcrumbTracks.sumOf { it.points.size }
-        val trailDistanceMeters = remember(breadcrumbTracks) {
-            breadcrumbTracks.sumOf { track ->
-                track.points.zipWithNext { a, b ->
-                    FieldNavigation.distanceMeters(a.latitude, a.longitude, b.latitude, b.longitude)
-                }.sum()
-            }
-        }
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             modifier = Modifier.fillMaxWidth(),
@@ -495,11 +515,7 @@ fun TargetLoggerPanel(
                 Text(
                     when {
                         isBreadcrumbRecording -> "Recording ${recordedBreadcrumbPoints} GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"}. Trails are saved with this terrain project."
-                        recordedBreadcrumbPoints > 0 -> {
-                            val dist = MeasurementFormat.length(trailDistanceMeters.toFloat())
-                            "$recordedBreadcrumbPoints GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"} · " +
-                                "${breadcrumbTracks.size} trail${if (breadcrumbTracks.size == 1) "" else "s"} · $dist walked"
-                        }
+                        recordedBreadcrumbPoints > 0 -> "$recordedBreadcrumbPoints saved GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"} across ${breadcrumbTracks.size} trail${if (breadcrumbTracks.size == 1) "" else "s"}."
                         else -> "Record a project-scoped path for offline field checking. GPS jitter is filtered automatically."
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -531,12 +547,15 @@ fun TargetLoggerPanel(
             boundaries = surveyBoundaries,
             breadcrumbTracks = breadcrumbTracks,
             hasGpsFix = deviceLatitude != null && deviceLongitude != null,
+            deviceLatitude = deviceLatitude,
+            deviceLongitude = deviceLongitude,
             onCreateFromTrail = onCreateBoundaryFromTrail,
             onCreateAroundGps = {
                 if (deviceLatitude == null || deviceLongitude == null) onEnableGps()
                 onCreateBoundaryAroundGps()
             },
             onDelete = onDeleteSurveyBoundary,
+            onUpdateBoundary = onUpdateBoundary,
         )
 
         OfflineSyncQueueCard(
@@ -555,7 +574,38 @@ fun TargetLoggerPanel(
                 gpsEnabled = gpsEnabled,
                 onEnableGps = onEnableGps,
                 onStop = { navigationTarget = null },
+                onOpenAr = { showArForFind = true },
             )
+            if (showArForFind) {
+                val lat = target.latitude ?: target.gpsLatitude
+                val lon = target.longitude ?: target.gpsLongitude
+                if (lat != null && lon != null) {
+                    ArGuidanceDialog(
+                        target = NavigationTarget(
+                            label = "${target.metalType.label} · ${target.status}",
+                            latitude = lat,
+                            longitude = lon,
+                        ),
+                        deviceLatitude = deviceLatitude,
+                        deviceLongitude = deviceLongitude,
+                        deviceAccuracyMeters = deviceAccuracyMeters,
+                        headingDegrees = compassHeadingDegrees,
+                        playlistLabel = if (navPlaylistIds.isNotEmpty()) {
+                            "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}"
+                        } else {
+                            null
+                        },
+                        onNextStop = if (navPlaylistIds.size > 1) {
+                            { onNavPlaylistNext() }
+                        } else {
+                            null
+                        },
+                        onDismiss = { showArForFind = false },
+                    )
+                } else {
+                    showArForFind = false
+                }
+            }
         }
 
         if (exportMessage != null) {
@@ -564,124 +614,6 @@ fun TargetLoggerPanel(
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
             )
-        }
-
-        var outcomeFilter by remember { mutableStateOf<VerificationOutcome?>(null) }
-        var typeFilter by remember { mutableStateOf<String?>(null) }
-        var starredOnly by remember { mutableStateOf(false) }
-        var sortMode by remember { mutableStateOf(FindSortMode.STARRED_FIRST) }
-        val typeOptions = remember(loggedSignals) {
-            loggedSignals.map { it.metalType.label }.distinct().sorted()
-        }
-        val filteredSignals = remember(
-            loggedSignals,
-            outcomeFilter,
-            typeFilter,
-            starredOnly,
-            sortMode,
-            deviceLatitude,
-            deviceLongitude,
-        ) {
-            val filtered = loggedSignals.filter { signal ->
-                (outcomeFilter == null || signal.outcome == outcomeFilter) &&
-                    (typeFilter == null || signal.metalType.label == typeFilter) &&
-                    (!starredOnly || signal.starred)
-            }
-            when (sortMode) {
-                FindSortMode.STARRED_FIRST -> filtered.sortedWith(
-                    compareByDescending<TargetSignal> { it.starred }
-                        .thenByDescending { it.timestamp },
-                )
-                FindSortMode.NEWEST -> filtered.sortedByDescending { it.timestamp }
-                FindSortMode.NEAREST -> {
-                    val lat = deviceLatitude
-                    val lon = deviceLongitude
-                    if (lat == null || lon == null) {
-                        filtered.sortedByDescending { it.timestamp }
-                    } else {
-                        filtered.sortedBy { signal ->
-                            val sLat = signal.latitude
-                            val sLon = signal.longitude
-                            if (sLat == null || sLon == null) {
-                                Double.MAX_VALUE
-                            } else {
-                                FieldNavigation.distanceMeters(lat, lon, sLat, sLon)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (loggedSignals.isNotEmpty()) {
-            Text("Filter finds", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                FilterChip(
-                    selected = starredOnly,
-                    onClick = { starredOnly = !starredOnly },
-                    label = { Text("Starred only") },
-                    leadingIcon = {
-                        Icon(
-                            if (starredOnly) Icons.Default.Star else Icons.Default.StarBorder,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    },
-                    modifier = Modifier.testTag("filter_starred_only"),
-                )
-                FilterChip(
-                    selected = outcomeFilter == null,
-                    onClick = { outcomeFilter = null },
-                    label = { Text("All outcomes") },
-                )
-                VerificationOutcome.entries.forEach { outcome ->
-                    FilterChip(
-                        selected = outcomeFilter == outcome,
-                        onClick = { outcomeFilter = if (outcomeFilter == outcome) null else outcome },
-                        label = { Text(outcome.label) },
-                    )
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    "Sort",
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.align(Alignment.CenterVertically),
-                )
-                FindSortMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = sortMode == mode,
-                        onClick = { sortMode = mode },
-                        label = { Text(mode.label) },
-                        modifier = Modifier.testTag("sort_${mode.name}"),
-                    )
-                }
-            }
-            if (typeOptions.size > 1) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    FilterChip(
-                        selected = typeFilter == null,
-                        onClick = { typeFilter = null },
-                        label = { Text("All types") },
-                    )
-                    typeOptions.forEach { label ->
-                        FilterChip(
-                            selected = typeFilter == label,
-                            onClick = { typeFilter = if (typeFilter == label) null else label },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-            }
         }
 
         if (loggedSignals.isEmpty()) {
@@ -694,13 +626,6 @@ fun TargetLoggerPanel(
                 )
             }
         } else {
-            if (filteredSignals.isEmpty()) {
-                Text(
-                    "No finds match the current filters.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { confirmClear = true },
@@ -720,11 +645,65 @@ fun TargetLoggerPanel(
                 }
             }
 
+            // Filters: this trip, starred only, sort mode
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = thisTripOnly,
+                    onClick = { thisTripOnly = !thisTripOnly },
+                    label = { Text("This trip") },
+                    modifier = Modifier.testTag("filter_this_trip"),
+                )
+                FilterChip(
+                    selected = starredOnly,
+                    onClick = { starredOnly = !starredOnly },
+                    label = { Text("Starred only") },
+                    leadingIcon = {
+                        Icon(
+                            if (starredOnly) Icons.Default.Star else Icons.Default.StarBorder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                    modifier = Modifier.testTag("filter_starred_only"),
+                )
+                FindSortMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = sortMode == mode,
+                        onClick = { sortMode = mode },
+                        label = { Text(mode.label) },
+                        modifier = Modifier.testTag("sort_${mode.name.lowercase()}"),
+                    )
+                }
+            }
+            Text(
+                "${displayedSignals.size} of ${loggedSignals.size} find${if (loggedSignals.size == 1) "" else "s"}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (displayedSignals.isEmpty()) {
+                Text(
+                    when {
+                        starredOnly && thisTripOnly -> "No starred finds in the last 8 hours."
+                        starredOnly -> "No starred finds yet. Tap the star on a find to prioritize it."
+                        thisTripOnly -> "No finds in the last 8 hours. Clear This trip to see older finds."
+                        else -> "No finds logged yet."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+            }
+
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().weight(1f).testTag("logged_signals_list"),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(filteredSignals, key = { it.id }) { signal ->
+                items(displayedSignals, key = { it.id }) { signal ->
                     SignalCard(
                         signal = signal,
                         onEdit = { editingSignal = signal },
@@ -736,58 +715,10 @@ fun TargetLoggerPanel(
                         onToggleStarred = { onToggleStarred(signal) },
                         digLogCount = excavationLogs.count { it.targetId == signal.id },
                         onOpenDigLogs = { digLogSignal = signal },
-                        onShare = {
-                            val lat = signal.latitude
-                            val lon = signal.longitude
-                            val text = if (lat != null && lon != null) {
-                                "${signal.metalType.label}\n${String.format(Locale.US, "%.6f, %.6f", lat, lon)}\n" +
-                                    "Grid ${signal.gridX.toInt()}, ${signal.gridY.toInt()}"
-                            } else {
-                                "${signal.metalType.label}\nLocal grid ${signal.gridX.toInt()}, ${signal.gridY.toInt()}\n(no geographic coordinates)"
-                            }
-                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, text)
-                                putExtra(Intent.EXTRA_SUBJECT, "Find-It target")
-                            }
-                            context.startActivity(Intent.createChooser(intent, "Share coordinates"))
-                        },
                     )
                 }
             }
         }
-    }
-
-    pendingProximity?.let { pending ->
-        val nearby = pending.nearbyFind
-        val distance = pending.nearbyDistanceMeters
-        AlertDialog(
-            onDismissRequest = { pendingProximity = null },
-            title = { Text("Nearby find") },
-            text = {
-                Text(
-                    if (nearby != null && distance != null) {
-                        "Another find (${nearby.metalType.label}) is only " +
-                            "${MeasurementFormat.length(distance)} away. Log this position anyway?"
-                    } else {
-                        "Another find is nearby. Log this position anyway?"
-                    },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = { attemptLog(force = true) },
-                    modifier = Modifier.testTag("proximity_log_anyway"),
-                ) {
-                    Text("Log anyway")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingProximity = null }) {
-                    Text("Cancel")
-                }
-            },
-        )
     }
 
     editingSignal?.let { signal ->
@@ -799,6 +730,7 @@ fun TargetLoggerPanel(
             } else {
                 null
             },
+            compassHeadingDegrees = compassHeadingDegrees,
             onDismiss = { editingSignal = null },
             onSave = {
                 onUpdateSignal(it)
@@ -938,6 +870,7 @@ private fun FieldNavigationCard(
     gpsEnabled: Boolean,
     onEnableGps: () -> Unit,
     onStop: () -> Unit,
+    onOpenAr: () -> Unit = {},
 ) {
     val targetLatitude = target.latitude
     val targetLongitude = target.longitude
@@ -1053,10 +986,19 @@ private fun FieldNavigationCard(
                 )
             }
             Text(
-                "Compass guidance is for field checking. Calibrate the phone and verify the target against the terrain before excavating.",
+                "Compass / AR guidance is for field checking. Calibrate the phone and verify the target against the terrain before excavating. LiDAR does not prove buried metal.",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
+            Button(
+                onClick = onOpenAr,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("open_ar_guidance_field"),
+            ) {
+                Text("Open AR guidance")
+            }
         }
     }
 }
@@ -1079,7 +1021,6 @@ private fun SignalCard(
     onToggleStarred: () -> Unit = {},
     digLogCount: Int = 0,
     onOpenDigLogs: () -> Unit = {},
-    onShare: () -> Unit = {},
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -1095,15 +1036,18 @@ private fun SignalCard(
                 tint = Color(signal.metalType.colorHex),
             )
             Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(signal.metalType.label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
+                    Text(signal.metalType.label, fontWeight = FontWeight.Bold)
                     if (signal.starred) {
                         Spacer(Modifier.width(6.dp))
                         Icon(
                             Icons.Default.Star,
                             contentDescription = "Starred",
-                            tint = Color(0xFFFFC107),
+                            tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp),
                         )
                     }
@@ -1170,7 +1114,11 @@ private fun SignalCard(
                 Icon(
                     if (signal.starred) Icons.Default.Star else Icons.Default.StarBorder,
                     contentDescription = if (signal.starred) "Unstar find" else "Star find",
-                    tint = if (signal.starred) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = if (signal.starred) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
             IconButton(onClick = onEdit, modifier = Modifier.size(48.dp)) {
@@ -1186,9 +1134,6 @@ private fun SignalCard(
             IconButton(onClick = onOpenDigLogs, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Construction, contentDescription = "Dig logs")
             }
-            IconButton(onClick = onShare, modifier = Modifier.size(48.dp).testTag("share_find_coords")) {
-                Icon(Icons.Default.Share, contentDescription = "Share coordinates")
-            }
             IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Delete find")
             }
@@ -1201,6 +1146,7 @@ private fun EditSignalDialog(
     signal: TargetSignal,
     excavationLogs: List<ExcavationLogEntry> = emptyList(),
     surfaceZSample: SurfaceZSample? = null,
+    compassHeadingDegrees: Float? = null,
     onDismiss: () -> Unit,
     onSave: (TargetSignal) -> Unit,
     onSaveExcavationLog: (ExcavationLogEntry) -> Unit = {},
@@ -1302,7 +1248,8 @@ private fun EditSignalDialog(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
             }
-            photoUris = (photoUris + uri.toString()).distinct().take(10)
+            val encoded = encodeDirectionalPhotoUri(uri.toString(), compassHeadingDegrees)
+            photoUris = (photoUris + encoded).distinct().take(10)
         }
     }
     var notes by remember(signal.id) { mutableStateOf(signal.notes) }
@@ -1381,17 +1328,18 @@ private fun EditSignalDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text("Photos (${photoUris.size}/10)", style = MaterialTheme.typography.titleSmall)
-                photoUris.forEach { photoUri ->
+                photoUris.forEachIndexed { index, photoUri ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            photoUri.substringAfterLast('/').takeLast(32),
+                            directionalPhotoLabel(index + 1, photoUri),
                             modifier = Modifier.weight(1f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        // Match by full encoded string so bearing-tagged URIs remove cleanly.
                         TextButton(onClick = { photoUris = photoUris - photoUri }) { Text("Remove") }
                     }
                 }
@@ -1406,7 +1354,13 @@ private fun EditSignalDialog(
                 ) {
                     Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Add photo")
+                    Text(
+                        if (compassHeadingDegrees != null) {
+                            "Add photo · ${compassHeadingDegrees.roundToInt()}°"
+                        } else {
+                            "Add photo"
+                        },
+                    )
                 }
                 Text("Voice notes (${voiceNoteUris.size}/10)", style = MaterialTheme.typography.titleSmall)
                 voiceNoteUris.forEachIndexed { index, voiceUri ->
@@ -1520,6 +1474,7 @@ private fun EditSignalDialog(
                 }
                 ExcavationLogSection(
                     logs = excavationLogs,
+                    compassHeadingDegrees = compassHeadingDegrees,
                     onStart = onStartExcavationLog,
                     onSave = onSaveExcavationLog,
                     onDelete = onDeleteExcavationLog,
@@ -1560,22 +1515,157 @@ private fun EditSignalDialog(
 @Composable
 private fun ExcavationLogSection(
     logs: List<ExcavationLogEntry>,
+    compassHeadingDegrees: Float? = null,
     onStart: () -> ExcavationLogEntry?,
     onSave: (ExcavationLogEntry) -> Unit,
     onDelete: (ExcavationLogEntry) -> Unit,
 ) {
+    val context = LocalContext.current
     var editingLog by remember { mutableStateOf<ExcavationLogEntry?>(null) }
     var soilNotes by remember { mutableStateOf("") }
     var findsDescription by remember { mutableStateOf("") }
     var depthText by remember { mutableStateOf("") }
     var findsCountText by remember { mutableStateOf("0") }
+    var digPhotoUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var digVoiceNoteUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var digRecorder by remember { mutableStateOf<VoiceNoteRecorder?>(null) }
+    var isRecordingDigVoice by remember { mutableStateOf(false) }
+    var digRecordingMessage by remember { mutableStateOf<String?>(null) }
+    var digMediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var playingDigVoiceUri by remember { mutableStateOf<String?>(null) }
+
+    fun stopDigPlayback() {
+        digMediaPlayer?.let { player ->
+            runCatching { player.stop() }
+            player.release()
+        }
+        digMediaPlayer = null
+        playingDigVoiceUri = null
+    }
+
+    fun cancelDigRecording() {
+        digRecorder?.cancel()
+        digRecorder = null
+        isRecordingDigVoice = false
+    }
+
+    fun closeDigEditor() {
+        cancelDigRecording()
+        stopDigPlayback()
+        digRecordingMessage = null
+        editingLog = null
+    }
 
     fun openEditor(entry: ExcavationLogEntry) {
+        cancelDigRecording()
+        stopDigPlayback()
+        digRecordingMessage = null
         editingLog = entry
         soilNotes = entry.soilNotes
         findsDescription = entry.findsDescription
         depthText = entry.depthCentimeters?.toString().orEmpty()
         findsCountText = entry.findsCount.toString()
+        digPhotoUris = entry.photoUris
+        digVoiceNoteUris = entry.voiceNoteUris
+    }
+
+    fun startDigVoiceRecording(entry: ExcavationLogEntry) {
+        if (isRecordingDigVoice || digVoiceNoteUris.size >= 10) return
+        val directory = java.io.File(context.filesDir, "field-voice-notes").apply { mkdirs() }
+        val output = java.io.File(directory, "dig-${entry.id}-${System.currentTimeMillis()}.m4a")
+        val active = VoiceNoteRecorder(context, output)
+        runCatching { active.start() }
+            .onSuccess {
+                digRecorder = active
+                isRecordingDigVoice = true
+                digRecordingMessage = null
+            }
+            .onFailure {
+                active.cancel()
+                digRecordingMessage = it.localizedMessage ?: "Could not start the voice-note recorder."
+            }
+    }
+
+    fun stopDigVoiceRecording() {
+        val file = digRecorder?.stop()
+        digRecorder = null
+        isRecordingDigVoice = false
+        if (file == null) {
+            digRecordingMessage = "The voice note was too short or could not be saved."
+        } else {
+            digVoiceNoteUris = (digVoiceNoteUris + Uri.fromFile(file).toString()).distinct().take(10)
+            digRecordingMessage = "Voice note saved offline."
+        }
+    }
+
+    fun playDigVoiceNote(uriText: String) {
+        if (playingDigVoiceUri == uriText) {
+            stopDigPlayback()
+            return
+        }
+        stopDigPlayback()
+        val player = MediaPlayer()
+        runCatching {
+            player.setDataSource(context, Uri.parse(uriText))
+            player.setOnCompletionListener {
+                it.release()
+                if (digMediaPlayer === it) {
+                    digMediaPlayer = null
+                    playingDigVoiceUri = null
+                }
+            }
+            player.prepare()
+            player.start()
+        }.onSuccess {
+            digMediaPlayer = player
+            playingDigVoiceUri = uriText
+            digRecordingMessage = null
+        }.onFailure {
+            player.release()
+            digRecordingMessage = it.localizedMessage ?: "Could not play this voice note."
+        }
+    }
+
+    fun buildUpdatedEntry(entry: ExcavationLogEntry, complete: Boolean): ExcavationLogEntry {
+        val now = System.currentTimeMillis()
+        return entry.copy(
+            depthCentimeters = depthText.toIntOrNull(),
+            soilNotes = soilNotes.trim(),
+            findsDescription = findsDescription.trim(),
+            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+            photoUris = digPhotoUris,
+            voiceNoteUris = digVoiceNoteUris,
+            completedAtMillis = if (complete) now else entry.completedAtMillis,
+            updatedAtMillis = now,
+        )
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            digRecorder?.cancel()
+            digMediaPlayer?.release()
+        }
+    }
+
+    val digAudioPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val entry = editingLog
+        if (granted && entry != null) startDigVoiceRecording(entry) else {
+            digRecordingMessage = "Microphone permission is required to record a voice note."
+        }
+    }
+    val digPhotoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            val encoded = encodeDirectionalPhotoUri(uri.toString(), compassHeadingDegrees)
+            digPhotoUris = (digPhotoUris + encoded).distinct().take(10)
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1585,18 +1675,6 @@ private fun ExcavationLogSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Surface(
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                "Ethics: only dig where you have permission. LiDAR is not ownership or metal proof.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            )
-        }
         if (logs.isEmpty()) {
             Text(
                 "No dig logs yet for this target.",
@@ -1621,6 +1699,17 @@ private fun ExcavationLogSection(
                                 if (entry.findsCount > 0) append("${entry.findsCount} find(s)")
                                 else if (entry.soilNotes.isNotBlank()) append(entry.soilNotes.take(40))
                                 else append("No notes yet")
+                                if (entry.photoUris.isNotEmpty() || entry.voiceNoteUris.isNotEmpty()) {
+                                    append(" · ")
+                                    val parts = mutableListOf<String>()
+                                    if (entry.photoUris.isNotEmpty()) {
+                                        parts += "${entry.photoUris.size} photo${if (entry.photoUris.size == 1) "" else "s"}"
+                                    }
+                                    if (entry.voiceNoteUris.isNotEmpty()) {
+                                        parts += "${entry.voiceNoteUris.size} voice"
+                                    }
+                                    append(parts.joinToString(", "))
+                                }
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1633,6 +1722,12 @@ private fun ExcavationLogSection(
                 }
             }
         }
+        Text(
+            "Ethics: only search land you have permission to access. LiDAR is not ownership or metal proof.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag("ethics_sticky_dig"),
+        )
         OutlinedButton(
             onClick = {
                 val started = onStart()
@@ -1669,40 +1764,153 @@ private fun ExcavationLogSection(
                 label = { Text("Find count") },
                 modifier = Modifier.fillMaxWidth(),
             )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dig_media_section"),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Photos (${digPhotoUris.size}/10) · timeline order",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                digPhotoUris.forEachIndexed { index, photoUri ->
+                    val label = digPhotoTimelineLabel(index + 1, photoUri)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dig_photo_timeline_${index + 1}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            label,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        TextButton(onClick = { digPhotoUris = digPhotoUris - photoUri }) {
+                            Text("Remove")
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { digPhotoPicker.launch("image/*") },
+                    enabled = digPhotoUris.size < 10,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("dig_photo_add"),
+                ) {
+                    Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add dig photo")
+                }
+                Text(
+                    "Voice notes (${digVoiceNoteUris.size}/10)",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                digVoiceNoteUris.forEachIndexed { index, voiceUri ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Voice note ${index + 1}",
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        TextButton(onClick = { playDigVoiceNote(voiceUri) }) {
+                            Icon(
+                                if (playingDigVoiceUri == voiceUri) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                contentDescription = if (playingDigVoiceUri == voiceUri) {
+                                    "Stop voice note"
+                                } else {
+                                    "Play voice note"
+                                },
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(if (playingDigVoiceUri == voiceUri) "Stop" else "Play")
+                        }
+                        TextButton(
+                            onClick = {
+                                if (playingDigVoiceUri == voiceUri) stopDigPlayback()
+                                deleteVoiceNoteFile(context, voiceUri)
+                                digVoiceNoteUris = digVoiceNoteUris - voiceUri
+                            },
+                        ) { Text("Remove") }
+                    }
+                }
+                Button(
+                    onClick = {
+                        if (isRecordingDigVoice) {
+                            stopDigVoiceRecording()
+                        } else {
+                            val granted = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO,
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (granted) startDigVoiceRecording(entry) else {
+                                digAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                    },
+                    enabled = isRecordingDigVoice || digVoiceNoteUris.size < 10,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("dig_voice_add"),
+                ) {
+                    Icon(
+                        if (isRecordingDigVoice) Icons.Default.Stop else Icons.Default.Mic,
+                        contentDescription = null,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (isRecordingDigVoice) "Stop and save voice note" else "Record dig voice note")
+                }
+                digRecordingMessage?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (
+                            message.startsWith("Could") ||
+                            message.startsWith("Microphone") ||
+                            message.startsWith("The voice")
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
                     onClick = {
-                        val now = System.currentTimeMillis()
-                        val updated = entry.copy(
-                            depthCentimeters = depthText.toIntOrNull(),
-                            soilNotes = soilNotes.trim(),
-                            findsDescription = findsDescription.trim(),
-                            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-                            updatedAtMillis = now,
-                        )
-                        onSave(updated)
+                        if (isRecordingDigVoice) stopDigVoiceRecording()
+                        stopDigPlayback()
+                        onSave(buildUpdatedEntry(entry, complete = false))
                         editingLog = null
+                        digRecordingMessage = null
                     },
+                    enabled = !isRecordingDigVoice,
                     modifier = Modifier.weight(1f).height(48.dp).testTag("save_excavation_log_button"),
                 ) { Text("Save dig") }
                 OutlinedButton(
                     onClick = {
-                        val now = System.currentTimeMillis()
-                        val completed = entry.copy(
-                            depthCentimeters = depthText.toIntOrNull(),
-                            soilNotes = soilNotes.trim(),
-                            findsDescription = findsDescription.trim(),
-                            findsCount = findsCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
-                            completedAtMillis = now,
-                            updatedAtMillis = now,
-                        )
-                        onSave(completed)
+                        if (isRecordingDigVoice) stopDigVoiceRecording()
+                        stopDigPlayback()
+                        onSave(buildUpdatedEntry(entry, complete = true))
                         editingLog = null
+                        digRecordingMessage = null
                     },
+                    enabled = !isRecordingDigVoice,
                     modifier = Modifier.weight(1f).height(48.dp).testTag("complete_excavation_log_button"),
                 ) { Text("Complete dig") }
             }
-            TextButton(onClick = { editingLog = null }) { Text("Close dig editor") }
+            TextButton(onClick = { closeDigEditor() }) { Text("Close dig editor") }
         }
     }
 }
@@ -1712,11 +1920,17 @@ private fun SurveyBoundaryCard(
     boundaries: List<SurveyBoundary>,
     breadcrumbTracks: List<BreadcrumbTrack>,
     hasGpsFix: Boolean,
+    deviceLatitude: Double? = null,
+    deviceLongitude: Double? = null,
     onCreateFromTrail: (BreadcrumbTrack) -> Unit,
     onCreateAroundGps: () -> Unit,
     onDelete: (SurveyBoundary) -> Unit,
+    onUpdateBoundary: (SurveyBoundary) -> Unit = {},
 ) {
     val trailWithEnoughPoints = breadcrumbTracks.firstOrNull { it.points.size >= 3 }
+    var renameTarget by remember { mutableStateOf<SurveyBoundary?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         modifier = Modifier.fillMaxWidth().testTag("survey_boundary_card"),
@@ -1725,7 +1939,7 @@ private fun SurveyBoundaryCard(
             Text("Survey boundary", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
                 "Keep field work inside a permitted search area. Create from a GPS trail (≥3 points) " +
-                    "or a 100 m box around your current fix.",
+                    "or a 100 m box around your current fix. Edit name and vertices offline.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1737,19 +1951,76 @@ private fun SurveyBoundaryCard(
                 )
             } else {
                 boundaries.forEach { boundary ->
-                    Row(
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(boundary.displayName, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "${boundary.vertices.size} vertices",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(boundary.displayName, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${boundary.vertices.size} vertices",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { onDelete(boundary) }) { Text("Delete") }
                         }
-                        TextButton(onClick = { onDelete(boundary) }) { Text("Delete") }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    renameTarget = boundary
+                                    renameText = boundary.displayName
+                                },
+                                modifier = Modifier.testTag("boundary_edit_name_${boundary.id}"),
+                            ) { Text("Edit name") }
+                            if (boundary.vertices.size > 3) {
+                                TextButton(
+                                    onClick = {
+                                        onUpdateBoundary(
+                                            boundary.copy(vertices = boundary.vertices.dropLast(1)),
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("boundary_remove_vertex_${boundary.id}"),
+                                ) { Text("Remove last vertex") }
+                            }
+                            TextButton(
+                                onClick = {
+                                    val lat = deviceLatitude ?: return@TextButton
+                                    val lon = deviceLongitude ?: return@TextButton
+                                    onUpdateBoundary(
+                                        boundary.copy(
+                                            vertices = boundary.vertices + BoundaryVertex(lat, lon),
+                                        ),
+                                    )
+                                },
+                                enabled = hasGpsFix && deviceLatitude != null && deviceLongitude != null,
+                                modifier = Modifier.testTag("boundary_add_gps_vertex_${boundary.id}"),
+                            ) { Text("Add GPS vertex") }
+                            if (boundary.vertices.size >= 3) {
+                                TextButton(
+                                    onClick = {
+                                        val lat = deviceLatitude ?: return@TextButton
+                                        val lon = deviceLongitude ?: return@TextButton
+                                        val moved = boundary.vertices.dropLast(1) +
+                                            BoundaryVertex(lat, lon)
+                                        onUpdateBoundary(boundary.copy(vertices = moved))
+                                    },
+                                    enabled = hasGpsFix &&
+                                        deviceLatitude != null &&
+                                        deviceLongitude != null,
+                                    modifier = Modifier.testTag(
+                                        "boundary_move_last_vertex_${boundary.id}",
+                                    ),
+                                ) { Text("Move last vertex to GPS") }
+                            }
+                        }
                     }
                 }
             }
@@ -1766,6 +2037,37 @@ private fun SurveyBoundaryCard(
                 ) { Text("Around GPS") }
             }
         }
+    }
+
+    renameTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Edit boundary name") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it.take(80) },
+                    label = { Text("Display name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("boundary_rename_field"),
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val name = renameText.trim().ifBlank { target.displayName }
+                        onUpdateBoundary(target.copy(displayName = name))
+                        renameTarget = null
+                    },
+                    modifier = Modifier.testTag("boundary_rename_save"),
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -1784,10 +2086,11 @@ private fun OfflineSyncQueueCard(
             Text("Offline sync queue", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
                 if (entries.isEmpty()) {
-                    "Local field changes stay on-device. When a cloud endpoint is available (Phase 9), " +
-                        "queued upserts and deletes replay in order without duplicates."
+                    "Local field changes stay on-device. Conflict resolver ready · cloud sync not " +
+                        "started (Phase 9). Queued upserts/deletes will replay in order without duplicates."
                 } else {
-                    "${entries.size} change(s) waiting to sync. Oldest first; failed sends keep their attempt count."
+                    "${entries.size} change(s) waiting to sync. Oldest first; failed sends and " +
+                        "revision conflicts keep their attempt count / note."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2197,18 +2500,6 @@ private fun ExcavationLogsDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
-                Surface(
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        "Ethics: only dig where you have permission. LiDAR is not ownership or metal proof.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    )
-                }
                 if (logs.isEmpty() && !showForm) {
                     Text(
                         "No dig logs yet. Record each check or excavation so the full visit " +
@@ -2336,3 +2627,56 @@ private fun ExcavationLogsDialog(
 
 private fun formatDigLogTime(millis: Long): String =
     SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(millis))
+
+/**
+ * Stores a content/file URI with optional compass bearing so field photos keep direction.
+ * Format: `uri|bearing=123` — strip with [decodeDirectionalPhotoUri] for file ops.
+ */
+internal fun encodeDirectionalPhotoUri(uri: String, bearingDegrees: Float?): String {
+    if (bearingDegrees == null || !bearingDegrees.isFinite()) return uri
+    val clean = uri.substringBefore("|bearing=")
+    return "$clean|bearing=${bearingDegrees.roundToInt()}"
+}
+
+/** Returns the raw URI and optional bearing degrees from an encoded photo string. */
+internal fun decodeDirectionalPhotoUri(encoded: String): Pair<String, Float?> {
+    val marker = "|bearing="
+    val idx = encoded.lastIndexOf(marker)
+    if (idx < 0) return encoded to null
+    val uri = encoded.substring(0, idx)
+    val bearing = encoded.substring(idx + marker.length).toFloatOrNull()
+    return uri to bearing
+}
+
+/** Find-photo label: "Photo N · 123°" when bearing is present, else filename tail. */
+internal fun directionalPhotoLabel(order: Int, encoded: String): String {
+    val (uri, bearing) = decodeDirectionalPhotoUri(encoded)
+    val name = uri.substringAfterLast('/').takeLast(28).ifBlank { "#$order" }
+    return if (bearing != null) {
+        "Photo $order · ${bearing.roundToInt()}° · $name"
+    } else {
+        "Photo $order · $name"
+    }
+}
+
+/** Ordered dig-photo timeline label: "Photo N · bearing · name" and file lastModified when file://. */
+internal fun digPhotoTimelineLabel(order: Int, photoUri: String): String {
+    val (uri, bearing) = decodeDirectionalPhotoUri(photoUri)
+    val name = uri.substringAfterLast('/').takeLast(28).ifBlank { "#$order" }
+    val timePart = runCatching {
+        val parsed = Uri.parse(uri)
+        if (parsed.scheme.equals("file", ignoreCase = true)) {
+            val path = parsed.path ?: return@runCatching null
+            val file = File(path)
+            if (file.isFile && file.lastModified() > 0L) {
+                SimpleDateFormat("MMM d HH:mm", Locale.US).format(Date(file.lastModified()))
+            } else null
+        } else null
+    }.getOrNull()
+    return buildString {
+        append("Photo $order")
+        if (bearing != null) append(" · ${bearing.roundToInt()}°")
+        append(" · $name")
+        if (timePart != null) append(" · $timePart")
+    }
+}

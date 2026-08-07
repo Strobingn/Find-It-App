@@ -200,4 +200,41 @@ class FieldOfflineAssistTest {
         assertEquals(1, targets.size)
         assertEquals(0.8f, targets[0].confidence, 0.01f)
     }
+
+    @Test
+    fun digBriefDraft_emptyCandidates_message() {
+        val draft = FieldOfflineAssist.digBriefDraft(
+            candidates = emptyList(),
+            signals = emptyList(),
+            excavationLogs = emptyList(),
+        )
+        assertTrue(draft.contains("Offline dig brief", ignoreCase = true))
+        assertTrue(draft.contains("No terrain candidates", ignoreCase = true))
+        assertTrue(draft.contains("LiDAR", ignoreCase = true))
+    }
+
+    @Test
+    fun digBriefDraft_includesTopCandidatesAndFocus() {
+        val candidate = TerrainFeatureCandidate(
+            id = "c1",
+            type = TerrainFeatureType.FOUNDATION,
+            xPercent = 40f,
+            yPercent = 55f,
+            score = 0.82f,
+            radiusMeters = 8f,
+            evidence = listOf("Flat interior: 80%"),
+        )
+        val draft = FieldOfflineAssist.digBriefDraft(
+            candidates = listOf(candidate),
+            signals = listOf(signal(id = 9L, lat = 42.0, lon = -74.0, starred = true)),
+            excavationLogs = emptyList(),
+            selectedCandidateSummary = "Focused foundation at 40/55",
+            inspectedCellSummary = "Cell elev 120 m",
+        )
+        assertTrue(draft.contains("Focused foundation"))
+        assertTrue(draft.contains("Cell elev"))
+        assertTrue(draft.contains("40.0%") || draft.contains("40%"))
+        assertTrue(draft.contains("Starred finds: 1"))
+        assertTrue(draft.contains("id=9"))
+    }
 }

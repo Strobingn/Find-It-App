@@ -48,6 +48,8 @@ val openAiProxyToken = projectSecret("OPENAI_PROXY_TOKEN").ifBlank { projectSecr
 val geminiApiKey = projectSecret("GEMINI_API_KEY")
 val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
 val mapsApiKey = projectSecret("MAPS_API_KEY")
+// Optional: Sentry DSN for crash + AI performance monitoring (never commit real DSN to git).
+val sentryDsn = projectSecret("SENTRY_DSN")
 
 val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
 val releaseKeystoreFile = releaseKeystorePath?.takeIf { it.isNotBlank() }?.let { file(it) }
@@ -85,7 +87,11 @@ android {
     buildConfigField("String", "GEMINI_API_KEY", quotedBuildConfig(geminiApiKey))
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
     buildConfigField("String", "MAPS_API_KEY", quotedBuildConfig(mapsApiKey))
+    buildConfigField("String", "SENTRY_DSN", quotedBuildConfig(sentryDsn))
+    // Debug: sample more AI traces; release: lower default (overridable via Sentry init).
+    buildConfigField("double", "SENTRY_TRACES_SAMPLE_RATE", "1.0")
     manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+    manifestPlaceholders["SENTRY_DSN"] = sentryDsn
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -166,6 +172,14 @@ dependencies {
   implementation(libs.maps.compose)
   implementation(libs.okhttp)
   implementation(libs.play.services.maps)
+  implementation(libs.androidx.camera.camera2)
+  implementation(libs.androidx.camera.lifecycle)
+  implementation(libs.androidx.camera.view)
+  implementation(libs.androidx.camera.core)
+  // Optional outdoor world anchors — app runs without Play Services AR via compass projection.
+  implementation("com.google.ar:core:1.48.0")
+  // Crash + performance + manual gen_ai AI monitoring (no auto OpenAI/Gemini JS integrations on Android).
+  implementation("io.sentry:sentry-android:8.12.0")
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

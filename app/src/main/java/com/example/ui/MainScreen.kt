@@ -5,8 +5,10 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -28,14 +31,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ShowChart
-import androidx.compose.material.icons.filled.AddLocationAlt
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GpsFixed
-import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.GpsNotFixed
 import androidx.compose.material.icons.filled.HomeWork
 import androidx.compose.material.icons.filled.Landscape
@@ -47,7 +48,6 @@ import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.ZoomInMap
 import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -71,6 +71,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -80,7 +84,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 import com.example.R
 import android.media.AudioManager
 import android.media.ToneGenerator
@@ -88,15 +92,17 @@ import androidx.compose.runtime.DisposableEffect
 import com.example.analysis.HomesiteProbabilityMap
 import com.example.data.field.BoundaryProximityLevel
 import com.example.data.field.FieldNavigation
+import com.example.data.field.NavigationTarget
 import com.example.data.field.ProximityAlerter
 import com.example.analysis.TerrainCellInspector
 import com.example.analysis.TerrainViewshedAnalyzer
 import com.example.analysis.TerrainElevationProfiler
 import com.example.data.LidarSearchRequest
-import com.example.data.LogSignalResult
 import com.example.data.NormalizedRasterBounds
+import com.example.ui.components.ArGuidanceDialog
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.MeasurementFormat
+import com.example.geospatial.trueToMagneticBearingDegrees
 import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.HOMESITE_BINS
 import com.example.ui.components.LidarCanvasMode
@@ -111,13 +117,15 @@ import com.example.ui.components.TerrainCellInspectionPanel
 import com.example.ui.components.TerrainElevationProfilePanel
 import com.example.ui.components.TerrainGoogleMapScreen
 import com.example.ui.components.SurveyLayerImporter
+import com.example.ui.components.HorizonCard
 import com.example.ui.components.ViewshedCard
 import java.util.Locale
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** Kept for layout unit tests; primary nav always shows labels now (5 destinations). */
 internal fun usesCompactBottomNavigation(smallestScreenWidthDp: Int): Boolean = smallestScreenWidthDp < 600
@@ -246,9 +254,11 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 navigate(AppDestination.LIBRARY)
             }
             AppDestination.COMPARE -> CompareTab(viewModel, padding)
-            AppDestination.TOOLS -> ToolsTab(viewModel, padding) { dest ->
-                navigate(dest)
-            }
+            AppDestination.TOOLS -> ToolsTab(
+                viewModel = viewModel,
+                padding = padding,
+                onNavigate = { dest -> navigate(dest) },
+            )
         }
     }
 }
@@ -267,7 +277,6 @@ private fun TerrainTab(
     val surveyLayers by viewModel.surveyLayers.collectAsStateWithLifecycle()
     val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
     val elevationGrid by viewModel.elevationGrid.collectAsStateWithLifecycle()
-    val terrainQuality by viewModel.terrainQuality.collectAsStateWithLifecycle()
     val azimuth by viewModel.sunAzimuth.collectAsStateWithLifecycle()
     val altitude by viewModel.sunAltitude.collectAsStateWithLifecycle()
     val vegetation by viewModel.vegetationFilter.collectAsStateWithLifecycle()
@@ -299,32 +308,46 @@ private fun TerrainTab(
     val isReloadingSurface by viewModel.isReloadingSurface.collectAsStateWithLifecycle()
     val surfaceReloadMessage by viewModel.surfaceReloadMessage.collectAsStateWithLifecycle()
     val boundaryProximityAlert by viewModel.boundaryProximityAlert.collectAsStateWithLifecycle()
+    val terrainQuality by viewModel.terrainQuality.collectAsStateWithLifecycle()
     val surveyBoundaries by viewModel.surveyBoundaries.collectAsStateWithLifecycle()
     val vmViewportReset by viewModel.viewportResetKey.collectAsStateWithLifecycle()
     val vmViewportZoom by viewModel.viewportZoom.collectAsStateWithLifecycle()
     val vmViewportPanX by viewModel.viewportPanX.collectAsStateWithLifecycle()
     val vmViewportPanY by viewModel.viewportPanY.collectAsStateWithLifecycle()
     val vmViewportRestoreToken by viewModel.viewportRestoreToken.collectAsStateWithLifecycle()
-    val currentLat by viewModel.currentLat.collectAsStateWithLifecycle()
-    val currentLon by viewModel.currentLon.collectAsStateWithLifecycle()
-    val deviceLatitude by viewModel.deviceLatitude.collectAsStateWithLifecycle()
-    val deviceLongitude by viewModel.deviceLongitude.collectAsStateWithLifecycle()
-    val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
 
     val visibleBounds = remember { mutableStateOf(NormalizedRasterBounds.Full) }
     // Manual Detail / Refine only — no zoom-triggered auto refine (it hijacked pinch-zoom).
     val zoomLevel = rememberSaveable { mutableStateOf(1f) }
     val inspectedCell = remember { mutableStateOf<com.example.analysis.TerrainCellInspection?>(null) }
     val viewshedState = remember { mutableStateOf<com.example.analysis.TerrainViewshed?>(null) }
+    val horizonState = remember { mutableStateOf<com.example.analysis.TerrainHorizon?>(null) }
     var homesiteOverlayEnabled by rememberSaveable { mutableStateOf(false) }
     val homesiteCells = remember { mutableStateOf<FloatArray?>(null) }
     val homesiteStatus = remember { mutableStateOf<String?>(null) }
     val navigationTarget by viewModel.navigationTarget.collectAsStateWithLifecycle()
+    val deviceLatitude by viewModel.deviceLatitude.collectAsStateWithLifecycle()
+    val deviceLongitude by viewModel.deviceLongitude.collectAsStateWithLifecycle()
+    val deviceAccuracyMeters by viewModel.deviceLocationAccuracyMeters.collectAsStateWithLifecycle()
+    val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
+    val navPlaylistIds by viewModel.navPlaylistIds.collectAsStateWithLifecycle()
+    val navPlaylistIndex by viewModel.navPlaylistIndex.collectAsStateWithLifecycle()
+    var showArGuidance by rememberSaveable { mutableStateOf(false) }
     val navigationSolution = remember(navigationTarget, deviceLatitude, deviceLongitude) {
         val target = navigationTarget ?: return@remember null
         val lat = deviceLatitude ?: return@remember null
         val lon = deviceLongitude ?: return@remember null
         FieldNavigation.solve(lat, lon, target.latitude, target.longitude)
+    }
+    val magneticBearing = remember(navigationSolution, deviceLatitude, deviceLongitude) {
+        val solution = navigationSolution ?: return@remember null
+        val lat = deviceLatitude ?: return@remember null
+        val lon = deviceLongitude ?: return@remember null
+        trueToMagneticBearingDegrees(
+            trueBearingDegrees = solution.targetBearingDegrees,
+            latitude = lat,
+            longitude = lon,
+        )
     }
     // Arrival ping: one tone on entering 15 m, re-arms only after leaving past 30 m.
     val proximityAlerter = remember { ProximityAlerter() }
@@ -341,30 +364,8 @@ private fun TerrainTab(
             toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 500)
         }
     }
-    // "Mark GPS" quick action: log the current position, warning first if another find already
-    // sits nearby (same duplicate check TargetLoggerPanel's own logging path uses).
-    val nearestFind = remember(deviceLatitude, deviceLongitude, signals) {
-        viewModel.nearestFindFromDevice()
-    }
-    var markMessage by remember { mutableStateOf<String?>(null) }
-    var pendingProximity by remember { mutableStateOf<LogSignalResult?>(null) }
-    fun attemptMark(force: Boolean = false) {
-        val result = viewModel.logCurrentSignal(force)
-        if (result.nearbyFind != null && !force) {
-            pendingProximity = result
-            return
-        }
-        pendingProximity = null
-        markMessage = "Marked ${result.signal.metalType.label}"
-    }
-    LaunchedEffect(markMessage) {
-        if (markMessage != null) {
-            delay(2_000)
-            markMessage = null
-        }
-    }
-
     val viewshedComputing = remember { mutableStateOf(false) }
+    val horizonComputing = remember { mutableStateOf(false) }
     var isSelectingProfile by rememberSaveable { mutableStateOf(false) }
     var profileStartPoint by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     var profileEndPoint by remember { mutableStateOf<Pair<Float, Float>?>(null) }
@@ -473,12 +474,12 @@ private fun TerrainTab(
             onStopSweeping = {},
             gridSpacing = grid,
             geoMetadata = metadata,
-            currentLat = currentLat,
-            currentLon = currentLon,
+            currentLat = null,
+            currentLon = null,
             mode = LidarCanvasMode.EXPLORE,
             viewportResetKey = viewportResetKey,
             showSurveyCursor = false,
-            showCoordinateHud = true,
+            showCoordinateHud = false,
             initialZoom = vmViewportZoom,
             initialPanX = vmViewportPanX,
             initialPanY = vmViewportPanY,
@@ -504,8 +505,6 @@ private fun TerrainTab(
             profileStartPoint = profileStartPoint,
             profileEndPoint = profileEndPoint,
             onInspectPosition = { xPercent, yPercent ->
-                // Keep sweep + coordinate HUD aligned with the last tapped cell.
-                viewModel.setSweepPosition(xPercent, yPercent)
                 if (isSelectingProfile) {
                     if (profileStartPoint == null || profileEndPoint != null) {
                         profileStartPoint = xPercent to yPercent
@@ -517,13 +516,29 @@ private fun TerrainTab(
                     }
                 } else {
                     viewshedState.value = null
-                    inspectedCell.value = TerrainCellInspector.inspect(
+                    horizonState.value = null
+                    val inspection = TerrainCellInspector.inspect(
                         grid = elevationGrid,
                         metadata = metadata,
                         xPercent = xPercent,
                         yPercent = yPercent,
                         vegetationFilter = vegetation,
                         featureScaleMeters = featureScale,
+                    )
+                    inspectedCell.value = inspection
+                    viewModel.setInspectedCellSummary(
+                        buildString {
+                            append("Cell x=").append("%.1f".format(inspection.xPercent))
+                            append("% y=").append("%.1f".format(inspection.yPercent)).append("%")
+                            append(" elev≈").append("%.2f".format(inspection.elevationMeters)).append(" m")
+                            append(" slope≈").append("%.1f".format(inspection.slopeDegrees)).append("°")
+                            append(" relief≈").append("%.2f".format(inspection.localReliefMeters)).append(" m")
+                            inspection.latitude?.let { lat ->
+                                inspection.longitude?.let { lon ->
+                                    append(" · ").append("%.5f".format(lat)).append(", ").append("%.5f".format(lon))
+                                }
+                            }
+                        },
                     )
                 }
             },
@@ -533,129 +548,24 @@ private fun TerrainTab(
                 .testTag("terrain_workspace"),
         )
 
-        // Viewshed status sits on its own small card — never inside the cell-inspection sheet —
+        // Viewshed / horizon status sit on small cards — never inside the cell-inspection sheet —
         // so the green/blocked overlay on the canvas stays fully visible.
-        ViewshedCard(
-            viewshed = viewshedState.value,
-            isComputing = viewshedComputing.value,
-            cellSizeMeters = elevationGrid.cellSizeMeters,
-            onClear = { viewshedState.value = null },
+        Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(top = 84.dp, start = 12.dp),
-        )
-
-        nearestFind?.let { (find, distanceMeters) ->
-            if (gpsEnabled && hasLocationPermission) {
-                val lat = deviceLatitude
-                val lon = deviceLongitude
-                val bearing = if (lat != null && lon != null &&
-                    find.latitude != null && find.longitude != null
-                ) {
-                    FieldNavigation.bearingDegrees(lat, lon, find.latitude, find.longitude)
-                } else {
-                    null
-                }
-                val turn = bearing?.let { b ->
-                    compassHeadingDegrees?.let { h -> FieldNavigation.signedTurnDegrees(h, b) }
-                }
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.94f),
-                    tonalElevation = 3.dp,
-                    shadowElevation = 4.dp,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 84.dp, end = 12.dp)
-                        .testTag("nearest_find_hud"),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            Icons.Default.Navigation,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier
-                                .width(18.dp)
-                                .rotate(turn ?: bearing ?: 0f),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                "Nearest: ${find.metalType.label}",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                            Text(
-                                buildString {
-                                    append(MeasurementFormat.length(distanceMeters))
-                                    if (bearing != null) {
-                                        append(" · ")
-                                        append(FieldNavigation.compassDirection(bearing))
-                                        append(" ")
-                                        append(bearing.roundToInt())
-                                        append("°")
-                                    }
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        markMessage?.let { message ->
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.95f),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(bottom = 48.dp),
-            ) {
-                Text(
-                    message,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
-        }
-
-        pendingProximity?.let { pending ->
-            val nearby = pending.nearbyFind
-            val distance = pending.nearbyDistanceMeters
-            AlertDialog(
-                onDismissRequest = { pendingProximity = null },
-                title = { Text("Nearby find") },
-                text = {
-                    Text(
-                        if (nearby != null && distance != null) {
-                            "Another find (${nearby.metalType.label}) is only " +
-                                "${MeasurementFormat.length(distance)} away. Mark this position anyway?"
-                        } else {
-                            "Another find is nearby. Mark this position anyway?"
-                        },
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = { attemptMark(force = true) },
-                        modifier = Modifier.testTag("terrain_proximity_log_anyway"),
-                    ) {
-                        Text("Mark anyway")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { pendingProximity = null }) {
-                        Text("Cancel")
-                    }
-                },
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ViewshedCard(
+                viewshed = viewshedState.value,
+                isComputing = viewshedComputing.value,
+                cellSizeMeters = elevationGrid.cellSizeMeters,
+                onClear = { viewshedState.value = null },
+            )
+            HorizonCard(
+                horizon = horizonState.value,
+                isComputing = horizonComputing.value,
+                onClear = { horizonState.value = null },
             )
         }
 
@@ -665,7 +575,7 @@ private fun TerrainTab(
                 isComputingViewshed = viewshedComputing.value,
                 canComputeViewshed = elevationGrid.width > 2 && elevationGrid.height > 2,
                 onComputeViewshed = {
-                    if (!viewshedComputing.value) {
+                    if (!viewshedComputing.value && !horizonComputing.value) {
                         viewshedComputing.value = true
                         // Free the map immediately: results go to ViewshedCard + canvas overlay.
                         inspectedCell.value = null
@@ -675,11 +585,32 @@ private fun TerrainTab(
                                     grid = elevationGrid,
                                     observerXPercent = inspection.xPercent,
                                     observerYPercent = inspection.yPercent,
+                                    vegetationFilter = vegetation,
                                     maxWorkers = 4,
                                 )
                             }
                             viewshedState.value = result
                             viewshedComputing.value = false
+                        }
+                    }
+                },
+                isComputingHorizon = horizonComputing.value,
+                canComputeHorizon = elevationGrid.width > 2 && elevationGrid.height > 2,
+                onComputeHorizon = {
+                    if (!horizonComputing.value && !viewshedComputing.value) {
+                        horizonComputing.value = true
+                        inspectedCell.value = null
+                        scope.launch {
+                            val result = withContext(Dispatchers.Default) {
+                                TerrainViewshedAnalyzer.horizon(
+                                    grid = elevationGrid,
+                                    observerXPercent = inspection.xPercent,
+                                    observerYPercent = inspection.yPercent,
+                                    vegetationFilter = vegetation,
+                                )
+                            }
+                            horizonState.value = result
+                            horizonComputing.value = false
                         }
                     }
                 },
@@ -751,24 +682,6 @@ private fun TerrainTab(
                 ) { viewModel.updateVisualizationMode(0) }
                 TerrainQuickAction("Light -", Icons.AutoMirrored.Filled.RotateLeft) { viewModel.rotateSunAzimuth(-45f) }
                 TerrainQuickAction("Light +", Icons.AutoMirrored.Filled.RotateRight) { viewModel.rotateSunAzimuth(45f) }
-                TerrainQuickAction("NW light", Icons.Default.WbSunny) {
-                    viewModel.applyLightingPreset(LightingPreset.NORTHWEST)
-                }
-                TerrainQuickAction("SE light", Icons.Default.WbSunny) {
-                    viewModel.applyLightingPreset(LightingPreset.SOUTHEAST)
-                }
-                TerrainQuickAction("Overhead", Icons.Default.WbSunny) {
-                    viewModel.applyLightingPreset(LightingPreset.OVERHEAD)
-                }
-                TerrainQuickAction(
-                    if (palette == 2) "Night on" else "Night",
-                    Icons.Default.Tune,
-                    active = palette == 2,
-                ) { viewModel.setFieldNightContrast(palette != 2) }
-                TerrainQuickAction("Mark GPS", Icons.Default.AddLocationAlt) { attemptMark(force = false) }
-                TerrainQuickAction("Frame finds", Icons.Default.Flag) { viewModel.frameFinds() }
-                TerrainQuickAction("Save view", Icons.Default.Save) { viewModel.saveViewportBookmark() }
-                TerrainQuickAction("Load view", Icons.Default.CenterFocusStrong) { viewModel.restoreViewportBookmark() }
                 TerrainQuickAction("Fit", Icons.Default.CenterFocusStrong) { localViewportResetKey.intValue++ }
                 TerrainQuickAction(
                     if (isExportingScreenshot) "Saving…" else "Screenshot",
@@ -796,6 +709,15 @@ private fun TerrainTab(
                         enabled = !isRefining && !isReloadingSurface,
                         modifier = Modifier.testTag("refine_to_boundary_button"),
                     ) { viewModel.refineToSurveyBoundary() }
+                }
+                if (canRefine) {
+                    TerrainQuickAction(
+                        label = "Refine viewport",
+                        icon = Icons.Default.CropFree,
+                        active = false,
+                        enabled = !isRefining && !isReloadingSurface,
+                        modifier = Modifier.testTag("refine_viewport_rect_button"),
+                    ) { viewModel.refineToNormalizedRect(visibleBounds.value) }
                 }
                 if (canRefine && isDetailed) {
                     TerrainQuickAction("Whole", Icons.Default.ZoomOutMap) { viewModel.showWholeTerrain() }
@@ -900,6 +822,30 @@ private fun TerrainTab(
             }
         }
 
+        // Ground quality / CRS / density honesty banner (product pack) — mirrors Home scorecard.
+        terrainQuality?.let { quality ->
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
+                tonalElevation = 3.dp,
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(start = 10.dp, end = 10.dp, bottom = 42.dp)
+                    .fillMaxWidth(0.96f)
+                    .testTag("terrain_quality_banner"),
+            ) {
+                Text(
+                    quality.bannerLine(),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
@@ -908,36 +854,26 @@ private fun TerrainTab(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .navigationBarsPadding()
-                .padding(start = 10.dp, end = 10.dp, bottom = 8.dp)
-                .testTag("terrain_quality_banner"),
+                .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
         ) {
             val widthMeters = (elevationGrid.width - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
             val heightMeters = (elevationGrid.height - 1).coerceAtLeast(1) * elevationGrid.cellSizeMeters
-            Column(modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)) {
-                Text(
-                    String.format(
-                        Locale.US,
-                        "%d×%d · %s×%s · %s/cell · %s",
-                        elevationGrid.width,
-                        elevationGrid.height,
-                        MeasurementFormat.length(widthMeters),
-                        MeasurementFormat.length(heightMeters),
-                        MeasurementFormat.resolution(elevationGrid.cellSizeMeters),
-                        if (showControls.value) "tools open" else "pinch / drag",
-                    ),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                terrainQuality?.let { quality ->
-                    Text(
-                        quality.bannerLine(),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            Text(
+                String.format(
+                    Locale.US,
+                    "%d×%d · %s×%s · %s/cell · %s",
+                    elevationGrid.width,
+                    elevationGrid.height,
+                    MeasurementFormat.length(widthMeters),
+                    MeasurementFormat.length(heightMeters),
+                    MeasurementFormat.resolution(elevationGrid.cellSizeMeters),
+                    if (showControls.value) "tools open" else "pinch / drag",
+                ),
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
 
         navigationTarget?.let { target ->
@@ -965,11 +901,44 @@ private fun TerrainTab(
                         navigationSolution?.let {
                             "${MeasurementFormat.length(it.distanceMeters.toFloat())} · " +
                                 "${FieldNavigation.compassDirection(it.targetBearingDegrees)} " +
-                                "${it.targetBearingDegrees.toInt()}°"
+                                "${it.targetBearingDegrees.toInt()}° true"
                         } ?: "Waiting for GPS fix - turn on GPS below",
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = FontFamily.Monospace,
                     )
+                    // Feature 16 — AR-lite compass ring (bearing + mag when GPS known)
+                    magneticBearing?.let { mag ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            NavCompassRing(
+                                headingDegrees = compassHeadingDegrees,
+                                targetBearingDegrees = mag,
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .testTag("nav_compass_ring"),
+                            )
+                            Text(
+                                buildString {
+                                    append("Bearing ${mag.toInt()}° · mag")
+                                    compassHeadingDegrees?.let { heading ->
+                                        val turn = FieldNavigation.signedTurnDegrees(heading, mag)
+                                        append(" · heading ${heading.toInt()}°")
+                                        if (kotlin.math.abs(turn) >= 8f) {
+                                            append(
+                                                if (turn > 0f) " · turn R ${turn.toInt()}°"
+                                                else " · turn L ${(-turn).toInt()}°",
+                                            )
+                                        }
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.testTag("nav_compass_bearing"),
+                            )
+                        }
+                    }
                     if (proximityAlerter.isInside) {
                         Text(
                             "Within arrival range - start swinging",
@@ -978,11 +947,47 @@ private fun TerrainTab(
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
-                    TextButton(
-                        onClick = { viewModel.setNavigationTarget(null) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    ) { Text("Clear", style = MaterialTheme.typography.labelSmall) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = { showArGuidance = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.testTag("open_ar_guidance_terrain"),
+                        ) { Text("Open AR", style = MaterialTheme.typography.labelSmall) }
+                        TextButton(
+                            onClick = {
+                                showArGuidance = false
+                                viewModel.setNavigationTarget(null)
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) { Text("Clear", style = MaterialTheme.typography.labelSmall) }
+                    }
                 }
+            }
+        }
+
+        LaunchedEffect(showArGuidance, navigationTarget) {
+            if (showArGuidance && navigationTarget == null) showArGuidance = false
+        }
+        if (showArGuidance) {
+            navigationTarget?.let { target ->
+                ArGuidanceDialog(
+                    target = target,
+                    deviceLatitude = deviceLatitude,
+                    deviceLongitude = deviceLongitude,
+                    deviceAccuracyMeters = deviceAccuracyMeters,
+                    headingDegrees = compassHeadingDegrees,
+                    playlistLabel = if (navPlaylistIds.isNotEmpty()) {
+                        "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}"
+                    } else {
+                        null
+                    },
+                    onNextStop = if (navPlaylistIds.size > 1) {
+                        { viewModel.navPlaylistNext() }
+                    } else {
+                        null
+                    },
+                    onDismiss = { showArGuidance = false },
+                )
             }
         }
 
@@ -1132,6 +1137,7 @@ private fun GoogleMapTab(
         routeWaypoints = plannedRoute?.waypoints ?: emptyList(),
         routeTotalMeters = plannedRoute?.totalDistanceMeters?.toFloat() ?: 0f,
         onClearRoute = { viewModel.setPlannedRoute(null) },
+        onHistoricMapAgreementScore = viewModel::setHistoricMapAgreementScore,
         modifier = Modifier.fillMaxSize().padding(padding),
     )
 }
@@ -1160,7 +1166,7 @@ private fun CompareTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 @Composable
 private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     // Same key as AiAnalysisWorkspace so NAV_TARGET apply crosses AI → Finds.
-    val assistantViewModel: AiTerrainViewModel = viewModel(key = "ai_analysis_workspace")
+    val assistantViewModel: AiTerrainViewModel = composeViewModel(key = "ai_analysis_workspace")
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
     val sweepX by viewModel.sweepX.collectAsStateWithLifecycle()
@@ -1175,7 +1181,24 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val deviceLongitude by viewModel.deviceLongitude.collectAsStateWithLifecycle()
     val deviceAccuracyMeters by viewModel.deviceLocationAccuracyMeters.collectAsStateWithLifecycle()
     val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
+    val navPlaylistIds by viewModel.navPlaylistIds.collectAsStateWithLifecycle()
+    val navPlaylistIndex by viewModel.navPlaylistIndex.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // Auto-apply AI NAV_TARGET ids as multi-stop playlist when Finds is open.
+    LaunchedEffect(aiState.pendingNavTargetIds, signals) {
+        val ids = aiState.pendingNavTargetIds
+        if (ids.isEmpty()) return@LaunchedEffect
+        val geoMatched = ids.any { id ->
+            signals.any { s ->
+                s.id == id && (s.latitude != null || s.gpsLatitude != null) &&
+                    (s.longitude != null || s.gpsLongitude != null)
+            }
+        }
+        if (geoMatched) {
+            viewModel.setNavPlaylist(ids)
+            assistantViewModel.consumeNavTargets()
+        }
+    }
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }
@@ -1227,11 +1250,15 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         onCreateBoundaryFromTrail = { track -> viewModel.createSurveyBoundaryFromTrail(track) },
         onCreateBoundaryAroundGps = { viewModel.createSurveyBoundaryAroundGps() },
         onDeleteSurveyBoundary = viewModel::deleteSurveyBoundary,
+        onUpdateBoundary = viewModel::saveSurveyBoundary,
         onMarkSyncSent = viewModel::markPendingSyncSent,
         onClearSyncQueue = viewModel::clearPendingSyncQueue,
         surfaceZForSignal = viewModel::surfaceZForSignal,
-        pendingNavTargetIds = aiState.pendingNavTargetIds,
-        onConsumeNavTargets = assistantViewModel::consumeNavTargets,
+        navPlaylistIds = navPlaylistIds,
+        navPlaylistIndex = navPlaylistIndex,
+        onSetNavPlaylist = viewModel::setNavPlaylist,
+        onNavPlaylistNext = viewModel::navPlaylistNext,
+        onClearNavPlaylist = viewModel::clearNavPlaylist,
         modifier = Modifier.fillMaxSize().padding(padding),
     )
 }
@@ -1316,6 +1343,57 @@ private fun ImportTab(
                 onImported()
             },
         )
+    }
+}
+
+/**
+ * Simple 2D greyscale compass ring: outer circle, device heading needle, target bearing tick.
+ * Angles are degrees clockwise from north (screen up = 0°).
+ */
+@Composable
+private fun NavCompassRing(
+    headingDegrees: Float?,
+    targetBearingDegrees: Float,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val radius = size.minDimension / 2f * 0.88f
+        val stroke = Stroke(width = 2.5f)
+        drawCircle(
+            color = Color(0xFF9E9E9E),
+            radius = radius,
+            center = Offset(cx, cy),
+            style = stroke,
+        )
+        // North tick (top)
+        drawLine(
+            color = Color(0xFFBDBDBD),
+            start = Offset(cx, cy - radius),
+            end = Offset(cx, cy - radius + 6f),
+            strokeWidth = 2f,
+            cap = StrokeCap.Round,
+        )
+        fun ray(degrees: Float, length: Float, color: Color, width: Float) {
+            val rad = Math.toRadians(degrees.toDouble() - 90.0)
+            val dx = cos(rad).toFloat()
+            val dy = sin(rad).toFloat()
+            drawLine(
+                color = color,
+                start = Offset(cx, cy),
+                end = Offset(cx + dx * length, cy + dy * length),
+                strokeWidth = width,
+                cap = StrokeCap.Round,
+            )
+        }
+        // Target bearing (lighter / longer)
+        ray(targetBearingDegrees, radius * 0.92f, Color(0xFFE0E0E0), 3.5f)
+        // Device heading (darker needle)
+        headingDegrees?.let { heading ->
+            ray(heading, radius * 0.72f, Color(0xFF616161), 3f)
+        }
+        drawCircle(color = Color(0xFF757575), radius = 3.5f, center = Offset(cx, cy))
     }
 }
 

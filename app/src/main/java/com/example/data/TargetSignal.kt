@@ -50,7 +50,7 @@ data class TargetSignal(
      * one exact spot [datasetKey]-based feedback already re-scores.
      */
     val detectedFeatureType: String? = null,
-    /** User-flagged priority find for return trips and sorting. */
+    /** User-flagged priority find for return trips, sorting, and AI offline drafts. */
     val starred: Boolean = false,
 ) : Serializable
 

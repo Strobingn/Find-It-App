@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -36,9 +37,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ai.FieldAiSessionPack
 import com.example.analysis.MetalDetectingTarget
 import androidx.compose.ui.text.font.FontFamily
-import com.example.ai.FieldAiSessionPack
 import com.example.analysis.LayerVerdict
 import com.example.analysis.MetalDetectingTargetRefiner
 import com.example.analysis.TerrainDerivedLayer
@@ -94,14 +95,38 @@ fun AiAnalysisWorkspace(
     val terrainKey by viewModel.activeTerrainKey.collectAsStateWithLifecycle()
     val gridSpacing by viewModel.gridSpacing.collectAsStateWithLifecycle()
     val featureTypeCalibration by viewModel.featureTypeCalibration.collectAsStateWithLifecycle()
+    val historicMapAgreementScore by viewModel.historicMapAgreementScore.collectAsStateWithLifecycle()
     val visualizationMode by viewModel.visualizationMode.collectAsStateWithLifecycle()
+    val inspectedCellSummary by viewModel.inspectedCellSummary.collectAsStateWithLifecycle()
+    val terrainQuality by viewModel.terrainQuality.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val analyzedDatasets by viewModel.analyzedDatasets.collectAsStateWithLifecycle()
 
-    val secondaryDataset = remember(analyzedDatasets, terrainKey) {
-        // Prefer a different dataset than the active terrain key for compare-two-sites.
-        analyzedDatasets.firstOrNull { it.datasetKey != terrainKey }
+    // Keep AI ranker state in sync with map-published historic agreement so ExplainableRanker
+    // applies the same capped adjustment as MetalDetectingTargetRefiner.
+    LaunchedEffect(historicMapAgreementScore) {
+        assistantViewModel.setHistoricMapAgreementScore(historicMapAgreementScore)
     }
+
+    val alternateDatasets = remember(analyzedDatasets, terrainKey) {
+        analyzedDatasets.filter { it.datasetKey != terrainKey }
+    }
+    var selectedSecondaryKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(alternateDatasets, terrainKey) {
+        if (selectedSecondaryKey != null &&
+            alternateDatasets.none { it.datasetKey == selectedSecondaryKey }
+        ) {
+            selectedSecondaryKey = null
+        }
+        if (selectedSecondaryKey == null && alternateDatasets.isNotEmpty()) {
+            selectedSecondaryKey = alternateDatasets.first().datasetKey
+        }
+    }
+    val secondaryDataset = remember(alternateDatasets, selectedSecondaryKey) {
+        alternateDatasets.firstOrNull { it.datasetKey == selectedSecondaryKey }
+            ?: alternateDatasets.firstOrNull()
+    }
+    var selectedCandidateSummary by rememberSaveable { mutableStateOf("") }
 
     val fieldPack = remember(
         summary,
@@ -120,6 +145,9 @@ fun AiAnalysisWorkspace(
         aiState.localResult,
         visualizationMode,
         secondaryDataset,
+        inspectedCellSummary,
+        selectedCandidateSummary,
+        terrainQuality,
     ) {
         val secondarySummary = secondaryDataset?.let { ds ->
             buildString {
@@ -146,12 +174,18 @@ fun AiAnalysisWorkspace(
             excavationLogs = excavationLogs,
             breadcrumbTracks = breadcrumbTracks,
             localResult = aiState.localResult,
-            inspectedCellSummary = "",
+            inspectedCellSummary = inspectedCellSummary,
             visualizationMode = visualizationMode,
             secondaryTerrainSummary = secondarySummary,
             secondaryTerrainContext = secondaryContext,
-            secondaryCandidateCount = 0,
-            secondaryFindCount = 0,
+            secondaryCandidateCount = secondaryDataset?.let { ds ->
+                ds.targetsJson.count { it == '{' }.coerceAtLeast(0)
+            } ?: 0,
+            secondaryFindCount = secondaryDataset?.let { ds ->
+                signals.count { it.datasetKey == ds.datasetKey || it.terrainKey == ds.datasetKey }
+            } ?: 0,
+            selectedCandidateSummary = selectedCandidateSummary,
+            terrainQualitySummary = terrainQuality?.bannerLine().orEmpty(),
         )
     }
 
@@ -163,6 +197,7 @@ fun AiAnalysisWorkspace(
     val showHistoricTargets = rememberSaveable { mutableStateOf(AI_HISTORIC_TARGETS_DEFAULT_VISIBLE) }
     val showCloudTargets = rememberSaveable { mutableStateOf(true) }
     val showDatasetComparison = rememberSaveable { mutableStateOf(false) }
+    val showTwoEpochCompare = rememberSaveable { mutableStateOf(false) }
     val pendingLocalLayer = remember { mutableStateOf<TerrainDerivedLayer?>(null) }
     val localBitmapAtRequest = remember { mutableStateOf(aiState.localLayerBitmap) }
     val sourceRenderLabel = aiSourceVisualizationLabel(visualizationMode)
@@ -205,10 +240,20 @@ fun AiAnalysisWorkspace(
     // Re-derives live from the current logged finds (not just at "Analyze" time) so marking a
     // find CONFIRMED/REJECTED in the Finds tab immediately re-scores historic targets here too,
     // without needing to re-run the full (much more expensive) derived-layer analysis.
-    val historicTargets = remember(aiState.localResult, signals, featureTypeCalibration) {
+    val historicTargets = remember(
+        aiState.localResult,
+        signals,
+        featureTypeCalibration,
+        historicMapAgreementScore,
+    ) {
         val result = aiState.localResult ?: return@remember emptyList()
         val feedbackPoints = VerifiedFeedback.derive(signals, result.datasetKey)
-        MetalDetectingTargetRefiner.refine(result, feedbackPoints, featureTypeCalibration)
+        MetalDetectingTargetRefiner.refine(
+            result = result,
+            feedback = feedbackPoints,
+            calibration = featureTypeCalibration,
+            historicMapAgreementScore = historicMapAgreementScore,
+        )
     }
     val huntZones = remember(historicTargets, aiState.localResult) {
         val resultLayers = aiState.localResult?.layers ?: return@remember emptyList()
@@ -569,6 +614,11 @@ fun AiAnalysisWorkspace(
                             modifier = Modifier.height(CompactButtonHeight).testTag("ai_compare_datasets_button"),
                             contentPadding = CompactButtonPadding,
                         ) { Text("Compare datasets", style = MaterialTheme.typography.labelSmall) }
+                        OutlinedButton(
+                            onClick = { showTwoEpochCompare.value = true },
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_two_epoch_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) { Text("Two-epoch Δ", style = MaterialTheme.typography.labelSmall) }
                     }
                     Text("${signals.size} saved", style = MaterialTheme.typography.labelMedium)
                 }
@@ -627,6 +677,16 @@ fun AiAnalysisWorkspace(
                 }
 
                 if (showTargetDetails.value && historicTargets.isNotEmpty()) {
+                    if (selectedCandidateSummary.isNotBlank()) {
+                        Text(
+                            "AI focus set — dig brief / evidence chain will prioritize it",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .padding(bottom = 4.dp)
+                                .testTag("ai_focus_candidate_hint"),
+                        )
+                    }
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -654,6 +714,20 @@ fun AiAnalysisWorkspace(
                                                 longitude = lon,
                                             ),
                                         )
+                                    }
+                                },
+                                onFocusForAi = {
+                                    selectedCandidateSummary = buildString {
+                                        append(target.type.label)
+                                        append(" · score=").append((target.score * 100f).toInt()).append("%")
+                                        append(" · x=").append("%.1f".format(target.xPercent)).append("%")
+                                        append(" y=").append("%.1f".format(target.yPercent)).append("%")
+                                        if (target.evidence.isNotEmpty()) {
+                                            append(" · evidence=").append(target.evidence.joinToString("; "))
+                                        }
+                                        if (target.cautionReasons.isNotEmpty()) {
+                                            append(" · cautions=").append(target.cautionReasons.joinToString("; "))
+                                        }
                                     }
                                 },
                                 onLog = {
@@ -722,6 +796,43 @@ fun AiAnalysisWorkspace(
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
+        if (alternateDatasets.size > 1) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .testTag("ai_secondary_dataset_picker"),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "Compare secondary site",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    alternateDatasets.forEach { ds ->
+                        FilterChip(
+                            selected = secondaryDataset?.datasetKey == ds.datasetKey,
+                            onClick = { selectedSecondaryKey = ds.datasetKey },
+                            label = {
+                                Text(
+                                    ds.displayName.take(28).ifBlank { ds.datasetKey.take(12) },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                )
+                            },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                    }
+                }
+            }
+        }
+
         AiCloudPanel(
             terrainSummary = summary,
             grid = grid,
@@ -732,11 +843,18 @@ fun AiAnalysisWorkspace(
             onConfirmAiSuggestions = { signalId, metal, outcome, status, notes ->
                 viewModel.applyAiFindSuggestions(signalId, metal, outcome, status, notes)
             },
+            fieldSessionPack = fieldPack,
+            onClearFocusedCandidate = { selectedCandidateSummary = "" },
             onApplyLighting = { azimuth, altitude ->
                 viewModel.updateSunAzimuth(azimuth)
                 viewModel.updateSunAltitude(altitude)
             },
             onApplyVizMode = viewModel::updateVisualizationMode,
+            onApplyNavTargets = { ids ->
+                // Apply multi-stop playlist immediately, then clear the AI pending handoff.
+                viewModel.setNavPlaylist(ids)
+                assistantViewModel.consumeNavTargets()
+            },
             // weight(1f), not fillMaxSize(): this Column isn't scrollable, and the header +
             // map above already claim their own height, so a fillMaxSize() panel here asked
             // for the full column height on top of that and pushed its own internal chat
@@ -751,6 +869,14 @@ fun AiAnalysisWorkspace(
             datasets = analyzedDatasets,
             onDismiss = { showDatasetComparison.value = false },
             onDeleteDataset = viewModel::deleteDatasetSnapshot,
+        )
+    }
+    if (showTwoEpochCompare.value) {
+        TwoEpochCompareDialog(
+            datasets = analyzedDatasets,
+            liveGridA = grid.takeIf { it.width > 2 },
+            liveGridB = null, // second live grid not dual-loaded; residual when same session re-import
+            onDismiss = { showTwoEpochCompare.value = false },
         )
     }
 }
@@ -829,6 +955,7 @@ private fun TargetDetailCard(
     target: MetalDetectingTarget,
     onLog: () -> Unit,
     onNavigate: (() -> Unit)? = null,
+    onFocusForAi: (() -> Unit)? = null,
     depthEstimate: DigDepthEstimate? = null,
     zoneId: Int? = null,
 ) {
@@ -869,6 +996,17 @@ private fun TargetDetailCard(
                         Text("Nav", style = MaterialTheme.typography.labelSmall)
                     }
                 }
+                if (onFocusForAi != null) {
+                    OutlinedButton(
+                        onClick = onFocusForAi,
+                        modifier = Modifier
+                            .height(CompactButtonHeight)
+                            .testTag("ai_focus_candidate"),
+                        contentPadding = CompactButtonPadding,
+                    ) {
+                        Text("Focus AI", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
                 OutlinedButton(
                     onClick = {
                         onLog()
@@ -886,6 +1024,47 @@ private fun TargetDetailCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // Feature 15 — penalty / negative-evidence badges (honest, not proof claims)
+            val penaltyLabels = remember(target.evidence, target.cautionReasons) {
+                buildList {
+                    target.evidence.forEach { line ->
+                        val lower = line.lowercase()
+                        when {
+                            "natural-feature penalty" in lower || "natural feature" in lower ->
+                                add("Natural penalty")
+                            "modern-disturbance penalty" in lower || "modern disturbance" in lower ->
+                                add("Modern penalty")
+                            "penalty" in lower -> add(line.take(28))
+                        }
+                    }
+                    target.cautionReasons.take(3).forEach { reason ->
+                        add(reason.take(32))
+                    }
+                }.distinct()
+            }
+            if (penaltyLabels.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    penaltyLabels.forEach { label ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier.testTag("penalty_badge"),
+                        ) {
+                            Text(
+                                label,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                    }
+                }
+            }
             Text(
                 "Search radius: ${target.radiusMeters.toInt()} m",
                 style = MaterialTheme.typography.labelSmall,
