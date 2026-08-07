@@ -812,6 +812,8 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     onProviderStage = { stage ->
                         _state.value = _state.value.copy(cloudStage = stage)
                     },
+                    featureName = "chat",
+                    conversationId = com.example.ai.SentryAiMonitor.currentConversationId(),
                 )
                 val cloudTargets = if (image != null) {
                     parseCloudMapTargets(answer.text, viewport.bounds)
@@ -1000,6 +1002,8 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     onProviderStage = { stage ->
                         _state.value = _state.value.copy(cloudStage = stage)
                     },
+                    featureName = feature.name,
+                    conversationId = com.example.ai.SentryAiMonitor.currentConversationId(),
                 )
                 val cloudTargets = if (usedImage) {
                     parseCloudMapTargets(answer.text, viewport.bounds)
@@ -1082,6 +1086,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearConversation() {
+        com.example.ai.SentryAiMonitor.beginConversation()
         _state.value = _state.value.copy(
             messages = listOf(
                 AiMessage(

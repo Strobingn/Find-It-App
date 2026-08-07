@@ -30,35 +30,66 @@ internal class TerrainAiGateway(context: Context) {
         image: GeminiImageInput? = null,
         requestedProvider: TerrainAiProvider? = null,
         onProviderStage: (String) -> Unit = {},
+        /** Optional field-pack / feature label for Sentry gen_ai metadata (not prompt text). */
+        featureName: String? = null,
+        conversationId: String? = null,
     ): TerrainAiAnswer {
         val openAiConfigured = OpenAiApiClient.isConfigured(appContext)
         val geminiConfigured = GeminiApiClient.isConfigured(appContext)
 
+        suspend fun runOpenAi(): TerrainAiAnswer {
+            val model = OpenAiApiClient.configuredModel()
+            onProviderStage("Asking OpenAI $model…")
+            val text = SentryAiMonitor.traceLlmCall(
+                SentryAiMonitor.CallMeta(
+                    model = model,
+                    provider = "openai",
+                    hasImage = image != null,
+                    featureName = featureName,
+                    messageCount = conversation.size,
+                    conversationId = conversationId,
+                ),
+            ) {
+                openAi.generate(conversation, systemContext, image)
+            }
+            return TerrainAiAnswer(text = text, provider = TerrainAiProvider.OPENAI)
+        }
+
+        suspend fun runGemini(fallbackReason: String? = null): TerrainAiAnswer {
+            val model = GeminiApiClient.configuredModel()
+            onProviderStage("Asking Gemini $model…")
+            val text = SentryAiMonitor.traceLlmCall(
+                SentryAiMonitor.CallMeta(
+                    model = model,
+                    provider = "gemini",
+                    hasImage = image != null,
+                    featureName = featureName,
+                    messageCount = conversation.size,
+                    conversationId = conversationId,
+                ),
+            ) {
+                gemini.generate(conversation, systemContext, image)
+            }
+            return TerrainAiAnswer(
+                text = text,
+                provider = TerrainAiProvider.GEMINI,
+                fallbackReason = fallbackReason,
+            )
+        }
+
         if (requestedProvider == TerrainAiProvider.OPENAI) {
             check(openAiConfigured) { "OpenAI is not configured on this device." }
-            onProviderStage("Asking OpenAI ${OpenAiApiClient.configuredModel()}…")
-            return TerrainAiAnswer(
-                text = openAi.generate(conversation, systemContext, image),
-                provider = TerrainAiProvider.OPENAI,
-            )
+            return runOpenAi()
         }
 
         if (requestedProvider == TerrainAiProvider.GEMINI) {
             check(geminiConfigured) { "Gemini is not configured on this device." }
-            onProviderStage("Asking Gemini ${GeminiApiClient.configuredModel()}…")
-            return TerrainAiAnswer(
-                text = gemini.generate(conversation, systemContext, image),
-                provider = TerrainAiProvider.GEMINI,
-            )
+            return runGemini()
         }
 
         if (openAiConfigured) {
-            onProviderStage("Asking OpenAI ${OpenAiApiClient.configuredModel()}…")
             try {
-                return TerrainAiAnswer(
-                    text = openAi.generate(conversation, systemContext, image),
-                    provider = TerrainAiProvider.OPENAI,
-                )
+                return runOpenAi()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (openAiError: Throwable) {
@@ -71,11 +102,7 @@ internal class TerrainAiGateway(context: Context) {
                 }
                 try {
                     onProviderStage("OpenAI failed · trying Gemini ${GeminiApiClient.configuredModel()}…")
-                    return TerrainAiAnswer(
-                        text = gemini.generate(conversation, systemContext, image),
-                        provider = TerrainAiProvider.GEMINI,
-                        fallbackReason = openAiReason,
-                    )
+                    return runGemini(fallbackReason = openAiReason)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (geminiError: Throwable) {
@@ -89,13 +116,8 @@ internal class TerrainAiGateway(context: Context) {
         }
 
         if (geminiConfigured) {
-            onProviderStage("Asking Gemini ${GeminiApiClient.configuredModel()}…")
             try {
-                return TerrainAiAnswer(
-                    text = gemini.generate(conversation, systemContext, image),
-                    provider = TerrainAiProvider.GEMINI,
-                    fallbackReason = "OpenAI was not configured",
-                )
+                return runGemini(fallbackReason = "OpenAI was not configured")
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (geminiError: Throwable) {
