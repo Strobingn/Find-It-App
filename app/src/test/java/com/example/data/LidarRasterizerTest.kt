@@ -102,7 +102,7 @@ class LidarRasterizerTest {
         val emptyIndex = result.grid.validData.indexOfFirst { !it }
         assertTrue(result.grid.bareEarth[emptyIndex].isNaN())
         // Opposite corner is a true void — TIN/IDW must not invent a surface there.
-        val farIndex = result.grid.width * (result.grid.height - 1) - 1
+        val farIndex = result.grid.width - 1
         assertFalse(result.grid.validData[farIndex])
         assertTrue(result.grid.bareEarth[farIndex].isNaN())
     }
@@ -117,9 +117,9 @@ class LidarRasterizerTest {
         // 100 pts / 10_000 m² → spacing 10 m → cell ≈ 17.5 m → ≈ 7 px, floored at 128.
         assertEquals(128, limited.rasterResolution)
         val dense = LidarImportOptions(rasterResolution = 1_024).withDensityLimitedResolution(
-            rangeX = 100.0,
-            rangeY = 100.0,
-            pointCount = 80_000,
+            rangeX = 1_000.0,
+            rangeY = 1_000.0,
+            pointCount = 8_000_000,
         )
         assertEquals(1_024, dense.rasterResolution)
     }

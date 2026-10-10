@@ -138,7 +138,7 @@ class BareEarthCoverageTest {
             minY = 0.0,
             maxY = 24.0,
             options = LidarImportOptions(
-                rasterResolution = 48,
+                rasterResolution = 64,
                 groundMode = GroundSurfaceMode.AUTO_LOWEST,
             ),
             declaredPointCount = 13 * 13L,
@@ -149,7 +149,7 @@ class BareEarthCoverageTest {
             }
         }
         val grid = requireNotNull(rasterizer.finish(0, "gpu")).grid
-        val scene = TerrainGpuSceneBuilder.build(grid, maxFinestDimension = 48, tileSize = 16)
+        val scene = TerrainGpuSceneBuilder.build(grid, maxFinestDimension = 64, tileSize = 16)
         assertTrue(scene.levels.first().batches.isNotEmpty())
         val validShare = grid.validData.count { it }.toFloat() / grid.validData.size
         assertTrue("expected a continuous GPU surface, valid=$validShare", validShare > 0.7f)
