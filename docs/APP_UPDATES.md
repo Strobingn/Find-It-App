@@ -71,6 +71,8 @@ If the token is missing, the in-app updater says so. HTTP 401/403 shows **Update
 
 Releases stay in this private repo (the APK embeds API keys).
 
+Embedded API keys stay in the APK (owner request). Do not strip `BuildConfig` / manifest injection.
+
 ## Secret audit (rotate if a public APK was ever shipped)
 
 No literal key material is in git. `.env.example` uses `YOUR_*` placeholders; `local.properties` / `.env` are gitignored. CI still **injects** these into `BuildConfig` and the manifest when the matching Actions secret is set, so anyone who downloaded a CI APK while the repo was public could extract them.

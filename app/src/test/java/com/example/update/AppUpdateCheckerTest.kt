@@ -92,6 +92,13 @@ class AppUpdateCheckerTest {
     }
 
     @Test
+    fun blankTokenIsAnErrorBeforeAnyNetworkCall() {
+        val result = GitHubReleaseClient(token = "").latestFinditRelease()
+        assertTrue(result is UpdateCheckResult.TokenMissing)
+        assertTrue((result as UpdateCheckResult.TokenMissing).message.contains("FINDIT_UPDATE_TOKEN"))
+    }
+
+    @Test
     fun tokenErrorsAreDistinctFromNoUpdates() {
         val missing = AppUpdateParse.tokenErrorMessage(404, tokenPresent = false)
         assertTrue(missing is UpdateCheckResult.TokenMissing)

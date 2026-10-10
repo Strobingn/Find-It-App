@@ -16,6 +16,11 @@ class GitHubReleaseClient(
 ) {
     fun latestFinditRelease(): UpdateCheckResult {
         val tokenPresent = token.isNotBlank()
+        if (!tokenPresent) {
+            return UpdateCheckResult.TokenMissing(
+                "Update token missing. Add a fine-grained GitHub token (Contents: read, Strobingn/Find-It-App only) as the FINDIT_UPDATE_TOKEN Actions secret and rebuild.",
+            )
+        }
         val releases = ArrayList<FinditRelease>()
         var page = 1
         while (page <= 20) {
@@ -47,6 +52,9 @@ class GitHubReleaseClient(
     }
 
     fun downloadAsset(apiUrl: String, destination: File) {
+        if (token.isBlank()) {
+            throw IOException("Update token missing")
+        }
         destination.parentFile?.mkdirs()
         val request = Request.Builder()
             .url(apiUrl)
