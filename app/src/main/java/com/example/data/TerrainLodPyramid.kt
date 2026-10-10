@@ -28,13 +28,11 @@ class TerrainLodPyramid private constructor(
 
     fun selectForZoom(zoom: Float): TerrainLodLevel {
         if (levels.size == 1) return levels.first()
-        val safeZoom = zoom.coerceAtLeast(1f)
-        val desiredFactor = when {
-            safeZoom >= 8f -> 1
-            safeZoom >= 4f -> 2
-            safeZoom >= 2f -> 4
-            else -> Int.MAX_VALUE
-        }
+        // Default and typical field zooms keep the finest mesh. Coarser levels are only used
+        // when the operator has zoomed far out (below 1×).
+        val safeZoom = zoom.coerceAtLeast(0.1f)
+        if (safeZoom >= 1f) return finest
+        val desiredFactor = if (safeZoom >= 0.6f) 2 else Int.MAX_VALUE
         return if (desiredFactor == Int.MAX_VALUE) {
             coarsest
         } else {
@@ -54,7 +52,7 @@ class TerrainLodPyramid private constructor(
          */
         fun build(
             source: ElevationGrid,
-            maxFinestDimension: Int = 512,
+            maxFinestDimension: Int = Int.MAX_VALUE,
             minDimension: Int = 64,
             maxLevels: Int = 4,
         ): TerrainLodPyramid {
@@ -64,6 +62,7 @@ class TerrainLodPyramid private constructor(
 
             var reduction = 1
             var current = source
+            // Only downsample when the caller explicitly caps the finest GPU level.
             while (max(current.width, current.height) > maxFinestDimension) {
                 current = downsample2x(current)
                 reduction *= 2

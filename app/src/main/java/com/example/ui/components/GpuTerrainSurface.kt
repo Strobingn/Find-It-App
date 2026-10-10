@@ -10,6 +10,7 @@ import android.view.ScaleGestureDetector
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.data.TerrainFrustumCuller
 import com.example.data.TerrainGpuBatch
 import com.example.data.TerrainGpuLevel
 import com.example.data.TerrainGpuScene
@@ -157,15 +158,18 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         val vertexBufferId: Int,
         val indexBufferId: Int,
         val indexCount: Int,
+        val aabb: TerrainFrustumCuller.Aabb,
     )
 
     private var program = 0
     private var positionAttribute = -1
     private var normalAttribute = -1
     private var mvpUniform = -1
-    private var uploadedReductionFactor: Int? = null
-    private val glBatches = ArrayList<GlBatch>()
+    private val uploadedLevels = HashMap<Int, List<GlBatch>>()
+    private var activeBatches: List<GlBatch> = emptyList()
     private var scene: TerrainGpuScene? = null
+    private var stagingVertices: ByteBuffer? = null
+    private var stagingIndices: ByteBuffer? = null
     @Volatile private var viewportWidth = 1
     @Volatile private var viewportHeight = 1
     private val modelMatrix = FloatArray(16)
@@ -184,8 +188,9 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
 
     fun submit(newScene: TerrainGpuScene) {
         if (scene === newScene) return
+        deleteAllLevels()
         scene = newScene
-        uploadedReductionFactor = null
+        activeBatches = emptyList()
     }
 
     fun adjustZoom(scaleFactor: Float) {
@@ -227,7 +232,8 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         positionAttribute = GLES20.glGetAttribLocation(program, "aPosition")
         normalAttribute = GLES20.glGetAttribLocation(program, "aNormal")
         mvpUniform = GLES20.glGetUniformLocation(program, "uMvp")
-        uploadedReductionFactor = null
+        uploadedLevels.clear()
+        activeBatches = emptyList()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -240,15 +246,18 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         val activeScene = scene ?: return
         val level = activeScene.selectForZoom(zoom)
-        if (uploadedReductionFactor != level.reductionFactor) upload(level)
-        if (glBatches.isEmpty()) return
+        val batches = uploadedLevels[level.reductionFactor] ?: upload(level)
+        if (batches.isEmpty()) return
+        activeBatches = batches
 
         GLES20.glUseProgram(program)
         buildMvpMatrix()
         GLES20.glUniformMatrix4fv(mvpUniform, 1, false, mvpMatrix, 0)
+        val planes = TerrainFrustumCuller.extractPlanes(mvpMatrix)
 
         val strideBytes = TerrainGpuBatch.FLOATS_PER_VERTEX * Float.SIZE_BYTES
-        for (batch in glBatches) {
+        for (batch in batches) {
+            if (!TerrainFrustumCuller.isVisible(batch.aabb, planes)) continue
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, batch.vertexBufferId)
             GLES20.glEnableVertexAttribArray(positionAttribute)
             GLES20.glVertexAttribPointer(positionAttribute, 3, GLES20.GL_FLOAT, false, strideBytes, 0)
@@ -275,58 +284,84 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
     }
 
-    private fun upload(level: TerrainGpuLevel) {
-        deleteBuffers()
+    private fun upload(level: TerrainGpuLevel): List<GlBatch> {
+        val uploaded = ArrayList<GlBatch>(level.batches.size)
         for (batch in level.batches) {
             val ids = IntArray(2)
             GLES20.glGenBuffers(2, ids, 0)
 
-            val vertexBuffer = ByteBuffer.allocateDirect(batch.vertices.size * Float.SIZE_BYTES)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer()
-                .apply {
-                    put(batch.vertices)
-                    position(0)
-                }
+            val vertexBytes = batch.vertices.size * Float.SIZE_BYTES
+            val vertexBuffer = reusableFloatStaging(vertexBytes)
+            vertexBuffer.asFloatBuffer().apply {
+                clear()
+                put(batch.vertices)
+                position(0)
+            }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, ids[0])
             GLES20.glBufferData(
                 GLES20.GL_ARRAY_BUFFER,
-                batch.vertices.size * Float.SIZE_BYTES,
+                vertexBytes,
                 vertexBuffer,
                 GLES20.GL_STATIC_DRAW,
             )
 
-            val indexBuffer = ByteBuffer.allocateDirect(batch.indices.size * Short.SIZE_BYTES)
-                .order(ByteOrder.nativeOrder())
-                .asShortBuffer()
-                .apply {
-                    put(batch.indices)
-                    position(0)
-                }
+            val indexBytes = batch.indices.size * Short.SIZE_BYTES
+            val indexBuffer = reusableShortStaging(indexBytes)
+            indexBuffer.asShortBuffer().apply {
+                clear()
+                put(batch.indices)
+                position(0)
+            }
             GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ids[1])
             GLES20.glBufferData(
                 GLES20.GL_ELEMENT_ARRAY_BUFFER,
-                batch.indices.size * Short.SIZE_BYTES,
+                indexBytes,
                 indexBuffer,
                 GLES20.GL_STATIC_DRAW,
             )
-            glBatches += GlBatch(ids[0], ids[1], batch.indices.size)
+            uploaded += GlBatch(
+                vertexBufferId = ids[0],
+                indexBufferId = ids[1],
+                indexCount = batch.indices.size,
+                aabb = TerrainFrustumCuller.tileAabb(batch.tile, level.gridWidth, level.gridHeight),
+            )
         }
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
-        uploadedReductionFactor = level.reductionFactor
+        uploadedLevels[level.reductionFactor] = uploaded
+        return uploaded
     }
 
-    private fun deleteBuffers() {
-        if (glBatches.isNotEmpty()) {
-            val ids = IntArray(glBatches.size * 2)
-            glBatches.forEachIndexed { index, batch ->
-                ids[index * 2] = batch.vertexBufferId
-                ids[index * 2 + 1] = batch.indexBufferId
-            }
-            GLES20.glDeleteBuffers(ids.size, ids, 0)
-            glBatches.clear()
+    private fun reusableFloatStaging(bytes: Int): ByteBuffer {
+        val existing = stagingVertices
+        if (existing != null && existing.capacity() >= bytes) {
+            existing.clear()
+            return existing
         }
+        val allocated = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
+        stagingVertices = allocated
+        return allocated
+    }
+
+    private fun reusableShortStaging(bytes: Int): ByteBuffer {
+        val existing = stagingIndices
+        if (existing != null && existing.capacity() >= bytes) {
+            existing.clear()
+            return existing
+        }
+        val allocated = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
+        stagingIndices = allocated
+        return allocated
+    }
+
+    private fun deleteAllLevels() {
+        if (uploadedLevels.isEmpty()) return
+        val ids = uploadedLevels.values.flatten().flatMap { listOf(it.vertexBufferId, it.indexBufferId) }
+        if (ids.isNotEmpty()) {
+            GLES20.glDeleteBuffers(ids.size, ids.toIntArray(), 0)
+        }
+        uploadedLevels.clear()
+        activeBatches = emptyList()
     }
 
     private fun buildMvpMatrix() {

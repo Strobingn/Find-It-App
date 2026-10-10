@@ -74,7 +74,11 @@ import com.example.analysis.ReviewedExampleStore
 import com.example.analysis.ReviewedVerdict
 import com.example.analysis.TerrainDerivedLayer
 import com.example.analysis.TerrainDerivedLayerCache
+import com.example.analysis.FeatureDisplayBucket
+import com.example.analysis.OsmModernLoader
 import com.example.analysis.TerrainFeatureCandidate
+import com.example.analysis.TerrainFeatureType
+import com.example.analysis.TerrainFeedbackRating
 import com.example.analysis.TerrainIntelligenceEngine
 import com.example.analysis.TerrainIntelligenceRenderer
 import com.example.analysis.TerrainIntelligenceResult
@@ -93,9 +97,14 @@ import com.example.data.ElevationGrid
 import com.example.data.ai.AnomalyClusterer
 import com.example.data.ai.AnomalyClassification
 import com.example.data.ai.TerrainSessionContext
+import com.example.data.historicmap.HistoricMapArchive
+import com.example.data.historicmap.HistoricMapFindMatcher
 import com.example.data.historicmap.MapTerrainAgreement
+import com.example.data.local.AppDatabase
+import com.example.data.local.toDomain
 import com.example.data.NormalizedRasterBounds
 import com.example.data.TargetSignal
+import com.example.geospatial.GeoSpatialLibrary
 import com.example.geospatial.GeoSpatialLibrary.GeoSpatialMetadata
 import java.io.File
 import java.util.Locale
@@ -629,7 +638,79 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
      * targets (via [AiTerrainState.verifiedFeedback], applied by the caller) benefit from real
      * confirmed/rejected field checks instead of only ever seeing an empty feedback list.
      */
-    fun runLocalAnalysis(grid: ElevationGrid, terrainSummary: String, loggedSignals: List<TargetSignal> = emptyList()) {
+    fun rateCandidate(id: String, rating: TerrainFeedbackRating) {
+        val result = _state.value.localResult ?: return
+        val updated = result.candidates.map { candidate ->
+            if (candidate.id != id) candidate
+            else candidate.copy(
+                feedback = rating,
+                displayBucket = when (rating) {
+                    TerrainFeedbackRating.CONFIRMED -> FeatureDisplayBucket.AUTO
+                    TerrainFeedbackRating.REJECTED -> FeatureDisplayBucket.HIDDEN
+                    TerrainFeedbackRating.UNSURE -> FeatureDisplayBucket.MAYBE
+                },
+                note = listOf(candidate.note, rating.name.lowercase()).filter { it.isNotBlank() }.joinToString(" · "),
+            )
+        }
+        _state.value = _state.value.copy(
+            localResult = result.copy(candidates = updated.filter { it.displayBucket != FeatureDisplayBucket.HIDDEN }),
+            rankedCandidates = rank(result.copy(candidates = updated)),
+        )
+    }
+
+    private suspend fun applyHistoricMapBoosts(
+        result: TerrainIntelligenceResult,
+        bounds: GeoSpatialLibrary.GeographicBounds?,
+    ): TerrainIntelligenceResult {
+        if (bounds == null) return result
+        return withContext(Dispatchers.IO) {
+            val maps = HistoricMapArchive(appContext).loadIndex().forBounds(
+                bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon,
+            )
+            val features = AppDatabase.get(appContext).historicMapFeatureDao().listAll()
+                .map { it.toDomain() }
+            if (maps.isEmpty() || features.isEmpty()) return@withContext result
+            val boosted = HistoricMapFindMatcher.applyAll(
+                candidates = result.candidates,
+                minLatitude = bounds.minLat,
+                maxLatitude = bounds.maxLat,
+                minLongitude = bounds.minLon,
+                maxLongitude = bounds.maxLon,
+                maps = maps,
+                features = features,
+            )
+            result.copy(candidates = boosted)
+        }
+    }
+
+    fun addManualFind(type: TerrainFeatureType, xPercent: Float, yPercent: Float) {
+        val result = _state.value.localResult ?: return
+        val added = TerrainFeatureCandidate(
+            id = "manual-${type.name}-${(xPercent * 10).toInt()}-${(yPercent * 10).toInt()}",
+            type = type,
+            xPercent = xPercent,
+            yPercent = yPercent,
+            score = 1f,
+            radiusMeters = 8f,
+            evidence = listOf("manual add"),
+            feedback = TerrainFeedbackRating.CONFIRMED,
+            note = "Added by operator",
+            visualizationHits = 3,
+            displayBucket = FeatureDisplayBucket.AUTO,
+        )
+        val candidates = listOf(added) + result.candidates
+        _state.value = _state.value.copy(
+            localResult = result.copy(candidates = candidates),
+            rankedCandidates = rank(result.copy(candidates = candidates)),
+        )
+    }
+
+    fun runLocalAnalysis(
+        grid: ElevationGrid,
+        terrainSummary: String,
+        loggedSignals: List<TargetSignal> = emptyList(),
+        bounds: GeoSpatialLibrary.GeographicBounds? = null,
+    ) {
         if (_state.value.isLocalAnalyzing) return
         localAnalysisJob?.cancel()
         _state.value = _state.value.copy(
@@ -642,12 +723,17 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val datasetKey = TerrainIntelligenceEngine.terrainSignature(grid)
                 val verifiedPoints = VerifiedFeedback.derive(loggedSignals, datasetKey)
-                val result = localEngine.analyze(
+                val modern = withContext(Dispatchers.IO) {
+                    bounds?.let { OsmModernLoader.load(it) } ?: com.example.analysis.OsmModernContext.Empty
+                }
+                val analyzed = localEngine.analyze(
                     grid = grid,
                     terrainSummary = terrainSummary,
                     feedback = VerifiedFeedback.toTerrainFeedbackRecords(datasetKey, verifiedPoints),
+                    modern = modern,
                     onStage = { stage -> _state.value = _state.value.copy(localStage = stage) },
                 )
+                val result = applyHistoricMapBoosts(analyzed, bounds)
                 val layer = _state.value.selectedLayer
                 val bitmap = withContext(Dispatchers.Default) {
                     TerrainIntelligenceRenderer.renderLayer(result, layer)
@@ -677,7 +763,11 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
      * Rehydrates the AI workspace after process death. Derived layers are already stored in the
      * disk cache, so reopening the same terrain restores the result without repeating extraction.
      */
-    fun restoreLocalAnalysis(grid: ElevationGrid, terrainSummary: String) {
+    fun restoreLocalAnalysis(
+        grid: ElevationGrid,
+        terrainSummary: String,
+        bounds: GeoSpatialLibrary.GeographicBounds? = null,
+    ) {
         val datasetKey = TerrainIntelligenceEngine.terrainSignature(grid)
         if (_state.value.localResult?.datasetKey == datasetKey) return
         localAnalysisJob?.cancel()
@@ -691,11 +781,12 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         )
         localAnalysisJob = viewModelScope.launch {
             try {
-                val result = localEngine.restoreCached(
+                val cached = localEngine.restoreCached(
                     grid = grid,
                     terrainSummary = terrainSummary,
                     onStage = { stage -> _state.value = _state.value.copy(localStage = stage) },
                 )
+                val result = cached?.let { applyHistoricMapBoosts(it, bounds) }
                 if (result == null) {
                     _state.value = _state.value.copy(
                         isLocalRestoring = false,
@@ -1225,7 +1316,7 @@ fun GeminiAssistantScreen(
                             )
                         }
                         Button(
-                            onClick = { assistantViewModel.runLocalAnalysis(grid, terrainSummary) },
+                            onClick = { assistantViewModel.runLocalAnalysis(grid, terrainSummary, bounds = metadata.bounds) },
                             enabled = !state.isLocalAnalyzing,
                         ) {
                             if (state.isLocalAnalyzing) {
@@ -1305,6 +1396,9 @@ fun GeminiAssistantScreen(
                     recommendation = result.recommendation,
                     ranked = state.rankedCandidates,
                     rankerVersion = state.rankerVersion,
+                    onMark = { assistantViewModel.rateCandidate(it, TerrainFeedbackRating.CONFIRMED) },
+                    onReject = { assistantViewModel.rateCandidate(it, TerrainFeedbackRating.REJECTED) },
+                    onAddFind = assistantViewModel::addManualFind,
                 )
             }
         }
@@ -1563,6 +1657,9 @@ private fun LocalCandidateSummary(
     recommendation: String,
     ranked: List<RankedCandidate>?,
     rankerVersion: String?,
+    onMark: (String) -> Unit = {},
+    onReject: (String) -> Unit = {},
+    onAddFind: (TerrainFeatureType, Float, Float) -> Unit = { _, _, _ -> },
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
@@ -1578,10 +1675,27 @@ private fun LocalCandidateSummary(
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
-            val display: List<RankedCandidate> = ranked ?: candidates.map {
+            val visible = candidates.filter { it.displayBucket != FeatureDisplayBucket.HIDDEN }
+            val auto = visible.filter { it.displayBucket == FeatureDisplayBucket.AUTO }
+            val maybe = visible.filter { it.displayBucket == FeatureDisplayBucket.MAYBE }
+            Text(
+                "${auto.size} auto-shown · ${maybe.size} maybe — AI is never the only path. Mark, Reject, or add a find.",
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { onAddFind(TerrainFeatureType.FOUNDATION, 50f, 50f) }) {
+                    Text("Add foundation")
+                }
+                OutlinedButton(onClick = { onAddFind(TerrainFeatureType.ROAD_TRAIL, 50f, 50f) }) {
+                    Text("Add trail")
+                }
+            }
+            val display: List<RankedCandidate> = ranked?.filter {
+                it.candidate.displayBucket != FeatureDisplayBucket.HIDDEN
+            } ?: visible.map {
                 RankedCandidate(it, probability = -1f, contributions = emptyList())
             }
-            display.take(12).forEachIndexed { index, entry ->
+            display.take(16).forEachIndexed { index, entry ->
                 val candidate = entry.candidate
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -1592,6 +1706,7 @@ private fun LocalCandidateSummary(
                         Text(
                             buildString {
                                 append("${index + 1}. ${candidate.type.label} · ${(candidate.score * 100f).toInt()}%")
+                                append(if (candidate.displayBucket == FeatureDisplayBucket.AUTO) " · auto" else " · maybe")
                                 if (entry.probability >= 0f) {
                                     append(" → field-check ${(entry.probability * 100f).toInt()}%")
                                 }
@@ -1647,6 +1762,10 @@ private fun LocalCandidateSummary(
                                     }
                                 }
                             }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { onMark(candidate.id) }) { Text("Mark") }
+                            OutlinedButton(onClick = { onReject(candidate.id) }) { Text("Reject") }
                         }
                     }
                 }

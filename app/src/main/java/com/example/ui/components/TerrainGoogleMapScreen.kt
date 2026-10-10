@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -98,9 +99,13 @@ import com.example.data.historicmap.GeoReferenceConfidence
 import com.example.data.historicmap.GeoReferenceTransform
 import com.example.data.historicmap.GeoReferencedMap
 import com.example.data.historicmap.GeoReferencer
+import com.example.data.historicmap.AutoGeoreferencer
 import com.example.data.historicmap.HistoricMapAgreementScorer
+import com.example.data.historicmap.HistoricMapArchive
+import com.example.data.historicmap.HistoricMapCatalogClient
 import com.example.data.historicmap.HistoricMapControlPoint
 import com.example.data.historicmap.HistoricMapFeature
+import com.example.data.historicmap.HistoricMapRecord
 import com.example.ai.GeminiConversationTurn
 import com.example.ai.TerrainAiGateway
 import com.example.data.historicmap.HistoricMapGeoreference
@@ -113,6 +118,7 @@ import com.example.data.field.FieldWaypoint
 import com.example.data.field.SweepCoverageGrid
 import com.example.data.field.SweepCoverageTracker
 import com.example.data.local.AppDatabase
+import com.example.data.local.HistoricMapFeatureDao
 import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.data.survey.SurveyFeature
@@ -191,7 +197,11 @@ fun TerrainGoogleMapScreen(
 
     val scope = rememberCoroutineScope()
     val historicMapRepository = remember(context) { HistoricMapOverlayRepository(context.applicationContext) }
+    val historicMapArchive = remember(context) { HistoricMapArchive(context.applicationContext) }
+    val historicMapCatalog = remember { HistoricMapCatalogClient() }
     var historicMaps by remember { mutableStateOf(historicMapRepository.list()) }
+    var catalogMaps by remember { mutableStateOf(historicMapArchive.loadIndex().forBounds(-90.0, 90.0, -180.0, 180.0)) }
+    var catalogScanning by remember { mutableStateOf(false) }
     val historicBitmaps = remember { mutableStateMapOf<String, Bitmap>() }
     var historicOverlayObjects by remember { mutableStateOf<Map<String, GroundOverlay>>(emptyMap()) }
     var activeHistoricMapId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -343,6 +353,92 @@ fun TerrainGoogleMapScreen(
 
     fun refreshHistoricMaps() {
         historicMaps = historicMapRepository.list()
+        catalogMaps = historicMapArchive.loadIndex().let { index ->
+            val bounds = metadata.bounds
+            if (bounds == null) index.records else index.forBounds(bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon)
+        }
+    }
+
+    fun scanHistoricCatalog() {
+        val bounds = metadata.bounds ?: return
+        catalogScanning = true
+        historicMapMessage = "Scanning USGS, David Rumsey, and Library of Congress…"
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val found = historicMapCatalog.discover(
+                        minLatitude = bounds.minLat,
+                        maxLatitude = bounds.maxLat,
+                        minLongitude = bounds.minLon,
+                        maxLongitude = bounds.maxLon,
+                    )
+                    historicMapCatalog.downloadMissing(found, historicMapArchive)
+                    historicMapArchive.loadIndex().forBounds(
+                        bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon,
+                    ).forEach { record ->
+                        val stored = if (!record.georeferenced) {
+                            val auto = AutoGeoreferencer.georeference(emptyList())
+                            val updated = record.copy(
+                                residualRmseMeters = auto.fit.rmseMeters,
+                                matchRadiusMeters = auto.matchRadiusMeters,
+                            )
+                            historicMapArchive.upsert(updated)
+                            updated
+                        } else {
+                            record
+                        }
+                        extractCatalogSymbols(stored, historicMapFeatureDao)
+                    }
+                    historicMapArchive.loadIndex().forBounds(
+                        bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon,
+                    )
+                }
+            }
+            catalogScanning = false
+            result.onSuccess { records ->
+                catalogMaps = records
+                historicMapMessage = "Saved ${records.size} historic map edition(s) for this tile."
+            }.onFailure { error ->
+                historicMapMessage = error.localizedMessage ?: "Historic map catalog failed"
+            }
+        }
+    }
+
+    fun overlayCatalogRecord(record: HistoricMapRecord) {
+        val file = record.localFile
+        if (file == null || !file.isFile) {
+            historicMapMessage = "Download that edition first (Scan USGS / Rumsey / LOC)."
+            return
+        }
+        val centerLat = (record.minLatitude + record.maxLatitude) / 2.0
+        val centerLon = (record.minLongitude + record.maxLongitude) / 2.0
+        val widthMeters = GeoSpatialLibrary.calculateGeodesicDistance(
+            centerLat, record.minLongitude, centerLat, record.maxLongitude,
+        ).toFloat().coerceIn(20f, 50_000f)
+        historicMapMessage = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    historicMapRepository.registerExistingFile(
+                        file = file,
+                        displayName = "${record.source.label} ${record.editionYear ?: ""} ${record.title}".trim(),
+                        latitude = centerLat,
+                        longitude = centerLon,
+                        defaultBaseWidthMeters = widthMeters,
+                        sourceAttribution = record.attribution,
+                        rmseMeters = record.residualRmseMeters,
+                        georeferenced = record.georeferenced,
+                    )
+                }
+            }
+            result.onSuccess { overlay ->
+                refreshHistoricMaps()
+                activeHistoricMapId = overlay.id
+                historicMapMessage = "Overlaying ${overlay.displayName}. Automatic checks still use every saved map."
+            }.onFailure { error ->
+                historicMapMessage = error.localizedMessage ?: "Could not overlay that map"
+            }
+        }
     }
 
     val historicMapPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -893,6 +989,10 @@ fun TerrainGoogleMapScreen(
         if (historicPanelExpanded) {
             HistoricMapPanel(
                 historicMaps = historicMaps,
+                catalogMaps = catalogMaps,
+                catalogScanning = catalogScanning,
+                onScanCatalog = { scanHistoricCatalog() },
+                onCatalogSelect = { overlayCatalogRecord(it) },
                 activeId = activeHistoricMapId,
                 message = historicMapMessage,
                 agreement = historicAgreement,
@@ -1322,6 +1422,10 @@ private fun AlignmentSlider(
 @Composable
 private fun HistoricMapPanel(
     historicMaps: List<HistoricMapOverlay>,
+    catalogMaps: List<HistoricMapRecord> = emptyList(),
+    catalogScanning: Boolean = false,
+    onScanCatalog: () -> Unit = {},
+    onCatalogSelect: (HistoricMapRecord) -> Unit = {},
     activeId: String?,
     message: String?,
     agreement: MapFeatureAgreement?,
@@ -1395,6 +1499,34 @@ private fun HistoricMapPanel(
                 )
             }
             if (listExpanded) {
+                OutlinedButton(
+                    onClick = onScanCatalog,
+                    enabled = !catalogScanning,
+                    modifier = Modifier.fillMaxWidth().testTag("historic_map_catalog_scan"),
+                ) {
+                    Icon(Icons.Default.History, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (catalogScanning) "Scanning editions…" else "Scan USGS / Rumsey / LOC")
+                }
+                if (catalogMaps.isNotEmpty()) {
+                    Text(
+                        "Saved editions (Rumsey & USGS first). Automatic checks use every map; pick one to overlay.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    catalogMaps.forEach { record ->
+                        val year = record.editionYear?.toString() ?: "undated"
+                        Text(
+                            "${record.source.label} · $year · ${record.title}",
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onCatalogSelect(record) }
+                                .padding(vertical = 4.dp)
+                                .testTag("historic_catalog_map_${record.id}"),
+                        )
+                    }
+                }
                 OutlinedButton(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.UploadFile, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
@@ -2096,6 +2228,41 @@ private fun removeMapObject(value: Any) {
         is Marker -> value.remove()
         is Polyline -> value.remove()
         is Polygon -> value.remove()
+    }
+}
+
+private suspend fun extractCatalogSymbols(
+    record: HistoricMapRecord,
+    dao: HistoricMapFeatureDao,
+) {
+    val file = record.localFile ?: return
+    if (!file.isFile) return
+    val bitmap = decodeSampledBitmap(file, 768) ?: return
+    try {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 8 || height < 8) return
+        val fit = GeoReferencer.fit(
+            listOf(
+                HistoricMapControlPoint(0f, 0f, record.maxLatitude, record.minLongitude),
+                HistoricMapControlPoint(width.toFloat(), 0f, record.maxLatitude, record.maxLongitude),
+                HistoricMapControlPoint(width.toFloat(), height.toFloat(), record.minLatitude, record.maxLongitude),
+                HistoricMapControlPoint(0f, height.toFloat(), record.minLatitude, record.minLongitude),
+            ),
+        )
+        val transform = fit.transform ?: return
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        val result = MapVectorizationGateway.extractLocal(
+            pixels = pixels,
+            width = width,
+            height = height,
+            mapId = record.id,
+            transform = transform,
+        )
+        result.features.forEach { dao.upsert(it.toEntity()) }
+    } finally {
+        bitmap.recycle()
     }
 }
 

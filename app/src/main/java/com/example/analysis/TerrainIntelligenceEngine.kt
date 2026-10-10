@@ -82,6 +82,8 @@ data class TerrainFeedbackRecord(
     val updatedAtMillis: Long,
 )
 
+enum class FeatureDisplayBucket { AUTO, MAYBE, HIDDEN }
+
 data class TerrainFeatureCandidate(
     val id: String,
     val type: TerrainFeatureType,
@@ -92,7 +94,12 @@ data class TerrainFeatureCandidate(
     val evidence: List<String>,
     val feedback: TerrainFeedbackRating? = null,
     val note: String = "",
-)
+    val visualizationHits: Int = 0,
+    val displayBucket: FeatureDisplayBucket = FeatureDisplayBucket.MAYBE,
+    val mapBoost: Float = 0f,
+) {
+    val autoShown: Boolean get() = displayBucket == FeatureDisplayBucket.AUTO
+}
 
 data class TerrainDerivedLayers(
     val width: Int,
@@ -122,6 +129,7 @@ class TerrainIntelligenceEngine(
         grid: ElevationGrid,
         terrainSummary: String,
         feedback: List<TerrainFeedbackRecord> = emptyList(),
+        modern: OsmModernContext = OsmModernContext.Empty,
         onStage: suspend (String) -> Unit = {},
     ): TerrainIntelligenceResult? {
         val datasetKey = terrainSignature(grid)
@@ -131,7 +139,7 @@ class TerrainIntelligenceEngine(
         onStage("Restoring cached terrain-feature detectors…")
         val candidates = withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            detectFeatures(datasetKey, layers, feedback)
+            detectFeatures(datasetKey, layers, feedback, modern)
         }
         return TerrainIntelligenceResult(
             datasetKey = datasetKey,
@@ -148,6 +156,7 @@ class TerrainIntelligenceEngine(
         grid: ElevationGrid,
         terrainSummary: String,
         feedback: List<TerrainFeedbackRecord> = emptyList(),
+        modern: OsmModernContext = OsmModernContext.Empty,
         onStage: suspend (String) -> Unit = {},
     ): TerrainIntelligenceResult {
         val datasetKey = terrainSignature(grid)
@@ -165,7 +174,7 @@ class TerrainIntelligenceEngine(
         onStage("Running terrain-feature detectors…")
         val candidates = withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            detectFeatures(datasetKey, layers, feedback)
+            detectFeatures(datasetKey, layers, feedback, modern)
         }
         val recommendation = buildRecommendation(candidates, terrainSummary)
         return TerrainIntelligenceResult(
@@ -352,6 +361,7 @@ class TerrainIntelligenceEngine(
         datasetKey: String,
         layers: TerrainDerivedLayers,
         feedback: List<TerrainFeedbackRecord>,
+        modern: OsmModernContext = OsmModernContext.Empty,
     ): List<TerrainFeatureCandidate> {
         val width = layers.width
         val height = layers.height
@@ -515,7 +525,12 @@ class TerrainIntelligenceEngine(
             }
         }
 
-        val sorted = output.sortedByDescending { it.score }.take(MAX_TOTAL_CANDIDATES)
+        val refined = HistoricFeatureClassifier.refine(
+            candidates = output,
+            layers = layers,
+            modern = modern,
+        ).take(MAX_TOTAL_CANDIDATES)
+        val sorted = refined
         val hotspotLayer = FloatArray(size)
         for (candidate in sorted.filter { it.type == TerrainFeatureType.ARTIFACT_HOTSPOT || it.type == TerrainFeatureType.DIG_RECOMMENDATION }) {
             val cx = (candidate.xPercent / 100f * (width - 1)).roundToInt()
@@ -559,7 +574,7 @@ class TerrainIntelligenceEngine(
     }
 
     companion object {
-        private const val MAX_ANALYSIS_SIDE = 384
+        private const val MAX_ANALYSIS_SIDE = 1_024
         private const val MAX_TOTAL_CANDIDATES = 120
 
         /**

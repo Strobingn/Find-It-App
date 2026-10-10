@@ -49,7 +49,8 @@ class DemGeneratorTest {
         assertNotNull(result)
         assertEquals(1, result!!.totalPointsRead)
         assertEquals(0, result.pointFormat)
-        assertFalse(result.grid.bareEarth.any { it.isNaN() })
+        assertTrue(result.grid.validData.any { it })
+        assertTrue(result.grid.validData.any { !it })
     }
 
     private fun minimalLasPoint(): ByteArray {
@@ -77,5 +78,16 @@ class DemGeneratorTest {
         buffer.putInt(235, 1_000)
         bytes[242] = 2
         return bytes
+    }
+
+    @Test
+    fun xyzStreamingReadsPastTheOldThreeHundredThousandCap() {
+        val builder = StringBuilder()
+        repeat(350) { index ->
+            builder.append("${index % 20} ${index / 20} 10\n")
+        }
+        val grid = DemGenerator.parseXyzStream(BufferedReader(StringReader(builder.toString())))
+        assertNotNull(grid)
+        assertTrue(grid!!.bareEarth.any { it.isFinite() })
     }
 }
