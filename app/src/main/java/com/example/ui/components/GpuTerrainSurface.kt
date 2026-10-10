@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import android.content.Context
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.view.GestureDetector
@@ -82,7 +83,7 @@ private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
     )
 
     init {
-        setEGLContextClientVersion(2)
+        setEGLContextClientVersion(3)
         setRenderer(terrainRenderer)
         renderMode = RENDERMODE_WHEN_DIRTY
         preserveEGLContextOnPause = true
@@ -159,6 +160,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         val indexBufferId: Int,
         val indexCount: Int,
         val aabb: TerrainFrustumCuller.Aabb,
+        val usesIntIndices: Boolean,
     )
 
     private var program = 0
@@ -234,6 +236,14 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         mvpUniform = GLES20.glGetUniformLocation(program, "uMvp")
         uploadedLevels.clear()
         activeBatches = emptyList()
+        val version = runCatching { GLES20.glGetString(GLES20.GL_VERSION) }.getOrNull().orEmpty()
+        val compute = version.contains("3.1") || version.contains("3.2")
+        com.example.data.TerrainStageProfiler.emit(
+            "GL $version · compute=${if (compute) "available" else "cpu-fallback"} · ES3 heightmap/CDLOD ready",
+        )
+        com.example.data.TerrainMemoryMonitor.snapshot().let {
+            com.example.data.TerrainStageProfiler.emit(it.format())
+        }
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -274,7 +284,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
             GLES20.glDrawElements(
                 GLES20.GL_TRIANGLES,
                 batch.indexCount,
-                GLES20.GL_UNSIGNED_SHORT,
+                if (batch.usesIntIndices) GLES30.GL_UNSIGNED_INT else GLES20.GL_UNSIGNED_SHORT,
                 0,
             )
         }
@@ -305,12 +315,25 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
                 GLES20.GL_STATIC_DRAW,
             )
 
-            val indexBytes = batch.indices.size * Short.SIZE_BYTES
-            val indexBuffer = reusableShortStaging(indexBytes)
-            indexBuffer.asShortBuffer().apply {
-                clear()
-                put(batch.indices)
-                position(0)
+            val intIdx = batch.intIndices
+            val indexBytes: Int
+            val indexBuffer: java.nio.ByteBuffer
+            if (intIdx != null) {
+                indexBytes = intIdx.size * Int.SIZE_BYTES
+                indexBuffer = reusableShortStaging(indexBytes)
+                indexBuffer.asIntBuffer().apply {
+                    clear()
+                    put(intIdx)
+                    position(0)
+                }
+            } else {
+                indexBytes = batch.indices.size * Short.SIZE_BYTES
+                indexBuffer = reusableShortStaging(indexBytes)
+                indexBuffer.asShortBuffer().apply {
+                    clear()
+                    put(batch.indices)
+                    position(0)
+                }
             }
             GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ids[1])
             GLES20.glBufferData(
@@ -322,8 +345,9 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
             uploaded += GlBatch(
                 vertexBufferId = ids[0],
                 indexBufferId = ids[1],
-                indexCount = batch.indices.size,
+                indexCount = intIdx?.size ?: batch.indices.size,
                 aabb = TerrainFrustumCuller.tileAabb(batch.tile, level.gridWidth, level.gridHeight),
+                usesIntIndices = intIdx != null,
             )
         }
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
