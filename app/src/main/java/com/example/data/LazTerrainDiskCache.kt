@@ -51,7 +51,8 @@ class LazTerrainDiskCache(
                 val valid = BooleanArray(cells.toInt()) { input.readBoolean() }
                 val geoMetadata = if (magic == MAGIC_V3) readGeoMetadata(input, width, height, cellSize) else null
                 DemGenerator.TerrainLoadResult(
-                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid),
+                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid)
+                        .ensureBareEarthCoverage(),
                     summary = summary,
                     isBareEarth = isBareEarth,
                     geoMetadata = geoMetadata,

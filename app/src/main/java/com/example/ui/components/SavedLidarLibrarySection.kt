@@ -122,7 +122,6 @@ fun SavedLidarLibrarySection(
                     displayName = dataset.displayName,
                     options = options,
                 )
-                var paintedEarly = false
                 val outcome = decodeCoordinator.decode(
                     file = dataset.file,
                     displayName = dataset.displayName,
@@ -130,14 +129,11 @@ fun SavedLidarLibrarySection(
                     onPreview = { preview ->
                         withContext(Dispatchers.Main.immediate) {
                             TerrainPerformanceSession.publish(preview.gpuScene)
-                            if (!paintedEarly) {
-                                paintedEarly = true
-                                onTerrainLoaded(preview.terrain, source)
-                                progressText = if (preview.isPreview) {
-                                    "Sparse preview visible — exact terrain decoding…"
-                                } else {
-                                    "Terrain visible — finishing GPU mesh…"
-                                }
+                            onTerrainLoaded(preview.terrain, source)
+                            progressText = if (preview.isPreview) {
+                                "Sparse preview visible — exact terrain decoding…"
+                            } else {
+                                "Terrain visible — finishing GPU mesh…"
                             }
                         }
                     },
@@ -146,9 +142,7 @@ fun SavedLidarLibrarySection(
                     },
                 )
                 TerrainPerformanceSession.publish(outcome.gpuScene)
-                if (!paintedEarly) {
-                    onTerrainLoaded(outcome.terrain, source)
-                }
+                onTerrainLoaded(outcome.terrain, source)
                 isOpening = false
                 progressText = null
                 message = buildString {

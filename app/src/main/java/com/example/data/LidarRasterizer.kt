@@ -280,12 +280,31 @@ internal class LidarRasterizer(
         for (index in surface.indices) {
             surface[index] = if (measuredMask[index]) source[index] else Float.NaN
         }
-        // Holes stay NaN. Invented nearest-neighbor fill is never presented as measured ground.
+        val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
+            .takeIf { it.isFinite() && it in 0.001..100_000.0 }
+            ?.toFloat() ?: 1f
+        val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
+            groundPointsBinned
+        } else {
+            pointsBinned
+        }
+        // Ground samples → per-tile buffered Delaunay TIN → max-edge kill → bounded hole fill.
+        // True voids outside the data hull stay NaN and are never shown as measured ground.
+        val filled = interpolateBareEarth(
+            measuredElevations = surface,
+            measuredMask = measuredMask,
+            width = width,
+            height = height,
+            cellSizeMeters = cellSize,
+            totalPoints = pointsDecoded,
+            groundPoints = groundSamples,
+            sourceCounts = sourceCounts,
+        )
 
         val cleaned = if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
-            surface
+            filled.elevations
         } else {
-            suppressIsolatedLowNoise(surface, width, height)
+            suppressIsolatedLowNoise(filled.elevations, width, height)
         }
         val bareEarth = if (options.smoothingRadius > 0) {
             multiScaleSmooth(cleaned, width, height, options.smoothingRadius)
@@ -295,15 +314,15 @@ internal class LidarRasterizer(
         val canopy = FloatArray(surface.size)
         if (appliedMode != GroundSurfaceMode.SURFACE_MODEL) {
             for (index in canopy.indices) {
-                if (allCount[index] > 0) {
+                if (allCount[index] > 0 && bareEarth[index].isFinite()) {
                     canopy[index] = (allMax[index] - bareEarth[index]).coerceAtLeast(0f)
                 }
             }
         }
 
         val totalCells = width * height
-        // Only cells that received a real return are valid. Filled/invented values are never shown.
-        val validData = measuredMask
+        val validData = filled.validData
+        val interpolatedData = filled.interpolatedData
         val groundSamplesPerCell = if (populatedCells > 0) {
             val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
@@ -341,9 +360,6 @@ internal class LidarRasterizer(
             lowSpikesRejected = lowSpikesRejected,
         )
 
-        val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
-            .takeIf { it.isFinite() && it in 0.001..100_000.0 }
-            ?.toFloat() ?: 1f
         val wasTruncated = truncatedByReader
         val earlyOutNote = if (wasTruncated) " · truncated" else ""
         val samplingNote = "every return used · $pointsDecoded points decoded$earlyOutNote"
@@ -383,7 +399,15 @@ internal class LidarRasterizer(
         }
 
         return DemGenerator.LasLoadResult(
-            grid = ElevationGrid(width, height, bareEarth, canopy, cellSize, validData),
+            grid = ElevationGrid(
+                width = width,
+                height = height,
+                bareEarth = bareEarth,
+                canopySpikes = canopy,
+                cellSizeMeters = cellSize,
+                validData = validData,
+                interpolatedData = interpolatedData,
+            ),
             totalPointsRead = pointsDecoded.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             groundPointsUsed = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
@@ -579,15 +603,20 @@ private fun suppressIsolatedLowNoiseRow(
     width: Int,
     y: Int,
 ) {
-    val neighbors = FloatArray(8)
-    for (x in 1 until width - 1) {
-        var count = 0
-        for (dy in -1..1) {
-            for (dx in -1..1) {
-                if (dx == 0 && dy == 0) continue
-                neighbors[count++] = source[(y + dy) * width + x + dx]
+        val neighbors = FloatArray(8)
+        for (x in 1 until width - 1) {
+            val index = y * width + x
+            if (!source[index].isFinite()) continue
+            var count = 0
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    if (dx == 0 && dy == 0) continue
+                    val neighbor = source[(y + dy) * width + x + dx]
+                    if (!neighbor.isFinite()) continue
+                    neighbors[count++] = neighbor
+                }
             }
-        }
+            if (count < 5) continue
         // Eight-element insertion sort avoids generic Array.sort overhead across up to a
         // million raster cells while producing the same median.
         for (i in 1 until count) {
@@ -600,7 +629,6 @@ private fun suppressIsolatedLowNoiseRow(
             neighbors[j + 1] = value
         }
         val median = neighbors[count / 2]
-        val index = y * width + x
         // Remove only extreme low outliers; shallow cellars, ditches and tracks remain untouched.
         if (source[index] < median - LOW_NOISE_THRESHOLD_METERS) output[index] = median
     }
@@ -608,24 +636,33 @@ private fun suppressIsolatedLowNoiseRow(
 
 internal fun boxSmooth(source: FloatArray, width: Int, height: Int, radius: Int): FloatArray {
     if (radius <= 0) return source.copyOf()
-    val integral = DoubleArray((width + 1) * (height + 1))
+    val stride = width + 1
+    val integral = DoubleArray(stride * (height + 1))
+    val countIntegral = DoubleArray(integral.size)
     for (y in 0 until height) {
         var rowSum = 0.0
+        var rowCount = 0.0
         for (x in 0 until width) {
-            rowSum += source[y * width + x]
-            integral[(y + 1) * (width + 1) + x + 1] =
-                integral[y * (width + 1) + x + 1] + rowSum
+            val value = source[y * width + x]
+            if (value.isFinite()) {
+                rowSum += value
+                rowCount += 1.0
+            }
+            integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1] + rowSum
+            countIntegral[(y + 1) * stride + x + 1] = countIntegral[y * stride + x + 1] + rowCount
         }
     }
-    val output = FloatArray(source.size)
+    val output = FloatArray(source.size) { Float.NaN }
     for (y in 0 until height) {
         val y0 = (y - radius).coerceAtLeast(0)
         val y1 = (y + radius).coerceAtMost(height - 1)
         for (x in 0 until width) {
+            if (!source[y * width + x].isFinite()) continue
             val x0 = (x - radius).coerceAtLeast(0)
             val x1 = (x + radius).coerceAtMost(width - 1)
-            val sum = rectangleSum(integral, width + 1, x0, y0, x1, y1)
-            output[y * width + x] = (sum / ((x1 - x0 + 1) * (y1 - y0 + 1))).toFloat()
+            val sum = rectangleSum(integral, stride, x0, y0, x1, y1)
+            val count = rectangleSum(countIntegral, stride, x0, y0, x1, y1)
+            if (count > 0.0) output[y * width + x] = (sum / count).toFloat()
         }
     }
     return output
@@ -650,8 +687,9 @@ internal fun multiScaleSmooth(source: FloatArray, width: Int, height: Int, radiu
     if (radius <= 0) return source.copyOf()
     val fine = boxSmooth(source, width, height, radius)
     val coarse = boxSmooth(source, width, height, radius * 2)
-    val output = FloatArray(source.size)
+    val output = FloatArray(source.size) { source[it] }
     for (index in output.indices) {
+        if (!source[index].isFinite() || !fine[index].isFinite() || !coarse[index].isFinite()) continue
         val disagreement = kotlin.math.abs(fine[index] - coarse[index])
         val fineWeight = (disagreement / MULTI_SCALE_EDGE_METERS).coerceIn(0f, 1f)
         output[index] = fineWeight * fine[index] + (1f - fineWeight) * coarse[index]
