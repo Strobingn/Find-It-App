@@ -104,7 +104,7 @@ class AppUpdateController(
                     GitHubReleaseClient(
                         repo = BuildConfig.FINDIT_UPDATE_REPO.trim().ifBlank { "Strobingn/Find-It-App" },
                         token = BuildConfig.FINDIT_UPDATE_TOKEN.trim(),
-                    ).downloadAsset(release.apkApiUrl, apk)
+                    ).downloadRelease(release, apk)
                     val verify = ApkInstaller.verifyDownloadedApk(context, apk, release.sha256)
                     verify to apk
                 }
@@ -115,6 +115,8 @@ class AppUpdateController(
                 setStatus(
                     if (message.contains("expired or invalid", ignoreCase = true)) {
                         "Update token expired or invalid"
+                    } else if (message.contains("rate limit", ignoreCase = true)) {
+                        AppUpdateParse.RATE_LIMIT_MESSAGE
                     } else {
                         message.ifBlank { "Download failed" }
                     },

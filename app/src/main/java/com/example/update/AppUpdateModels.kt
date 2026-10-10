@@ -8,6 +8,7 @@ data class FinditRelease(
     val apkAssetId: Long,
     val apkName: String,
     val apkApiUrl: String,
+    val browserDownloadUrl: String = "",
     val sha256: String?,
     val applicationId: String?,
 ) {
@@ -29,6 +30,7 @@ sealed class UpdateCheckResult {
     data object UpToDate : UpdateCheckResult()
     data class TokenMissing(val message: String) : UpdateCheckResult()
     data class TokenInvalid(val message: String) : UpdateCheckResult()
+    data class RateLimited(val message: String) : UpdateCheckResult()
     data class Failed(val message: String) : UpdateCheckResult()
 }
 
@@ -58,12 +60,24 @@ object AppUpdateParse {
         return want.length == 64 && want == actualHex.lowercase()
     }
 
-    fun tokenErrorMessage(status: Int, tokenPresent: Boolean): UpdateCheckResult? = when {
-        !tokenPresent && (status == 401 || status == 403 || status == 404) ->
-            UpdateCheckResult.TokenMissing(
-                "Update token missing. Add a fine-grained GitHub token (Contents: read, Strobingn/Find-It-App only) as FINDIT_UPDATE_TOKEN.",
-            )
-        status == 401 || status == 403 ->
+    const val RATE_LIMIT_MESSAGE =
+        "GitHub rate limit reached (60 unauthenticated requests/hour). Wait, or set FINDIT_UPDATE_TOKEN to raise it."
+
+    fun isRateLimit(status: Int, body: String = "", remainingHeader: String? = null): Boolean {
+        if (remainingHeader == "0" && status == 403) return true
+        if (status != 403) return false
+        return body.contains("rate limit", ignoreCase = true)
+    }
+
+    fun tokenErrorMessage(
+        status: Int,
+        tokenPresent: Boolean,
+        body: String = "",
+        remainingHeader: String? = null,
+    ): UpdateCheckResult? = when {
+        isRateLimit(status, body, remainingHeader) ->
+            UpdateCheckResult.RateLimited(RATE_LIMIT_MESSAGE)
+        tokenPresent && (status == 401 || status == 403) ->
             UpdateCheckResult.TokenInvalid("Update token expired or invalid")
         else -> null
     }

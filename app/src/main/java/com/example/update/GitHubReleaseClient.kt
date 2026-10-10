@@ -8,6 +8,7 @@ import org.json.JSONArray
 
 /**
  * Pages `/repos/{owner}/{repo}/releases` (never `/latest`) and keeps only `findit-v*` tags.
+ * Public repos work with no token. [token] is optional and used only when set (private later).
  */
 class GitHubReleaseClient(
     private val repo: String = "Strobingn/Find-It-App",
@@ -16,11 +17,6 @@ class GitHubReleaseClient(
 ) {
     fun latestFinditRelease(): UpdateCheckResult {
         val tokenPresent = token.isNotBlank()
-        if (!tokenPresent) {
-            return UpdateCheckResult.TokenMissing(
-                "Update token missing. Add a fine-grained GitHub token (Contents: read, Strobingn/Find-It-App only) as the FINDIT_UPDATE_TOKEN Actions secret and rebuild.",
-            )
-        }
         val releases = ArrayList<FinditRelease>()
         var page = 1
         while (page <= 20) {
@@ -32,11 +28,16 @@ class GitHubReleaseClient(
                 .apply { if (tokenPresent) header("Authorization", "Bearer $token") }
                 .build()
             http.newCall(request).execute().use { response ->
-                AppUpdateParse.tokenErrorMessage(response.code, tokenPresent)?.let { return it }
+                val body = response.body?.string().orEmpty()
+                AppUpdateParse.tokenErrorMessage(
+                    status = response.code,
+                    tokenPresent = tokenPresent,
+                    body = body,
+                    remainingHeader = response.header("X-RateLimit-Remaining"),
+                )?.let { return it }
                 if (!response.isSuccessful) {
                     return UpdateCheckResult.Failed("GitHub releases HTTP ${response.code}")
                 }
-                val body = response.body?.string().orEmpty()
                 val array = JSONArray(body)
                 if (array.length() == 0) break
                 for (i in 0 until array.length()) {
@@ -51,10 +52,16 @@ class GitHubReleaseClient(
         return UpdateCheckResult.Available(newest)
     }
 
-    fun downloadAsset(apiUrl: String, destination: File) {
-        if (token.isBlank()) {
-            throw IOException("Update token missing")
+    fun downloadRelease(release: FinditRelease, destination: File) {
+        val url = if (token.isNotBlank()) {
+            release.apkApiUrl
+        } else {
+            release.browserDownloadUrl.ifBlank { release.apkApiUrl }
         }
+        downloadAsset(url, destination)
+    }
+
+    fun downloadAsset(apiUrl: String, destination: File) {
         destination.parentFile?.mkdirs()
         val request = Request.Builder()
             .url(apiUrl)
@@ -63,10 +70,19 @@ class GitHubReleaseClient(
             .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
             .build()
         http.newCall(request).execute().use { response ->
-            if (response.code == 401 || response.code == 403) {
-                throw IOException("Update token expired or invalid")
-            }
             if (!response.isSuccessful) {
+                val err = response.body?.string().orEmpty()
+                if (AppUpdateParse.isRateLimit(
+                        response.code,
+                        err,
+                        response.header("X-RateLimit-Remaining"),
+                    )
+                ) {
+                    throw IOException(AppUpdateParse.RATE_LIMIT_MESSAGE)
+                }
+                if (token.isNotBlank() && (response.code == 401 || response.code == 403)) {
+                    throw IOException("Update token expired or invalid")
+                }
                 throw IOException("APK download HTTP ${response.code}")
             }
             val bytes = response.body?.bytes() ?: throw IOException("Empty APK download")
@@ -84,6 +100,7 @@ class GitHubReleaseClient(
             var assetId = -1L
             var assetName = ""
             var assetUrl = ""
+            var browserUrl = ""
             for (i in 0 until assets.length()) {
                 val asset = assets.getJSONObject(i)
                 val name = asset.optString("name")
@@ -91,10 +108,11 @@ class GitHubReleaseClient(
                     assetId = asset.optLong("id")
                     assetName = name
                     assetUrl = asset.optString("url")
+                    browserUrl = asset.optString("browser_download_url")
                     break
                 }
             }
-            if (assetId <= 0L || assetUrl.isBlank()) return null
+            if (assetId <= 0L || (assetUrl.isBlank() && browserUrl.isBlank())) return null
             return FinditRelease(
                 tag = tag,
                 versionCode = code,
@@ -103,6 +121,7 @@ class GitHubReleaseClient(
                 apkAssetId = assetId,
                 apkName = assetName,
                 apkApiUrl = assetUrl,
+                browserDownloadUrl = browserUrl,
                 sha256 = AppUpdateParse.sha256FromNotes(body),
                 applicationId = AppUpdateParse.appIdFromNotes(body),
             )

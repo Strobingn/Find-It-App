@@ -92,20 +92,48 @@ class AppUpdateCheckerTest {
     }
 
     @Test
-    fun blankTokenIsAnErrorBeforeAnyNetworkCall() {
-        val result = GitHubReleaseClient(token = "").latestFinditRelease()
-        assertTrue(result is UpdateCheckResult.TokenMissing)
-        assertTrue((result as UpdateCheckResult.TokenMissing).message.contains("FINDIT_UPDATE_TOKEN"))
+    fun publicModeDoesNotRequireAToken() {
+        assertNull(AppUpdateParse.tokenErrorMessage(404, tokenPresent = false))
+        assertNull(AppUpdateParse.tokenErrorMessage(200, tokenPresent = false))
     }
 
     @Test
     fun tokenErrorsAreDistinctFromNoUpdates() {
-        val missing = AppUpdateParse.tokenErrorMessage(404, tokenPresent = false)
-        assertTrue(missing is UpdateCheckResult.TokenMissing)
         val expired = AppUpdateParse.tokenErrorMessage(401, tokenPresent = true)
         assertTrue(expired is UpdateCheckResult.TokenInvalid)
         assertEquals("Update token expired or invalid", (expired as UpdateCheckResult.TokenInvalid).message)
         assertNull(AppUpdateParse.tokenErrorMessage(200, tokenPresent = true))
+    }
+
+    @Test
+    fun unauthenticatedRateLimitIsNotATokenError() {
+        val limited = AppUpdateParse.tokenErrorMessage(
+            status = 403,
+            tokenPresent = false,
+            body = "API rate limit exceeded",
+            remainingHeader = "0",
+        )
+        assertTrue(limited is UpdateCheckResult.RateLimited)
+        assertTrue((limited as UpdateCheckResult.RateLimited).message.contains("60"))
+    }
+
+    @Test
+    fun parseReleaseReadsPublicBrowserDownloadUrl() {
+        val json = """
+            {
+              "tag_name":"findit-v1000008",
+              "name":"public",
+              "body":"app-id: com.aistudio.lidardetector.pkrxtz",
+              "assets":[{
+                "id":3,
+                "name":"findit-1000008.apk",
+                "url":"https://api.github.com/repos/Strobingn/Find-It-App/releases/assets/3",
+                "browser_download_url":"https://github.com/Strobingn/Find-It-App/releases/download/findit-v1000008/findit-1000008.apk"
+              }]
+            }
+        """.trimIndent()
+        val release = requireNotNull(GitHubReleaseClient.parseRelease(json))
+        assertTrue(release.browserDownloadUrl.contains("/releases/download/"))
     }
 
     @Test

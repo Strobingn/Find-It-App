@@ -51,25 +51,27 @@ update-token-expiry: <date>
 
 The workflow fails if the APK, `app-id:` line, or sha256 is missing.
 
-## Private-repo updater token
+## Updater token (optional while the repo is public)
 
-The repo is expected to be **private**. Unauthenticated Releases API calls 404.
+The repo is **public for now**. The updater uses the unauthenticated Releases API and
+`browser_download_url` (does not require a token). GitHub allows **60 unauthenticated
+requests/hour**; the app reports that limit instead of “no updates”.
 
-Create a **fine-grained** personal access token:
+`FINDIT_UPDATE_TOKEN` is **optional**. Use it only when going private later:
 
 - Resource owner: the owner of `Strobingn/Find-It-App`
 - Repository: **Strobingn/Find-It-App only**
 - Permissions: **Contents: Read** (nothing else)
-- Expiration: pick a date and store it
+- Expiration: pick a date and store it as `FINDIT_UPDATE_TOKEN_EXPIRY`
 
 | Name | Where |
 | --- | --- |
-| `FINDIT_UPDATE_TOKEN` | Actions **secret** (baked into the APK at build time) |
+| `FINDIT_UPDATE_TOKEN` | Actions **secret** (optional now; required after the repo is private) |
 | `FINDIT_UPDATE_TOKEN_EXPIRY` | Actions **variable** (written into each release as `update-token-expiry:`) |
 
-If the token is missing, the in-app updater says so. HTTP 401/403 shows **Update token expired or invalid** (not “no updates”).
+If a token **is** set and GitHub returns 401/403: **Update token expired or invalid**.
 
-Releases stay in this private repo (the APK embeds API keys).
+Releases stay on Strobingn/Find-It-App (not a public-releases sidecar). API keys stay in the APK.
 
 Embedded API keys stay in the APK (owner request). Do not strip `BuildConfig` / manifest injection.
 

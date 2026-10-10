@@ -28,6 +28,7 @@ object AppUpdateChecker {
         UpdateCheckResult.UpToDate -> "You are on the latest Find It build"
         is UpdateCheckResult.TokenMissing -> result.message
         is UpdateCheckResult.TokenInvalid -> result.message
+        is UpdateCheckResult.RateLimited -> result.message
         is UpdateCheckResult.Failed -> result.message
     }
 
