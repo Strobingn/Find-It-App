@@ -24,7 +24,7 @@ class SparseLazPreviewTest {
 
     @Test
     fun qualityFloorRequiresAtLeast1024ForSparsePath() {
-        assertEquals(1_024, TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION)
+        assertEquals(Int.MAX_VALUE, TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION)
         assertTrue(TerrainDecodeCoordinator.GPU_FAST_TILE_SIZE > TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE)
         assertFalse(TerrainDecodeCoordinator.GPU_FAST_TILE_SIZE < 128)
     }

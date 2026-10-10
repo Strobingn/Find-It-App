@@ -10,6 +10,9 @@ interface HistoricMapFeatureDao {
     @Query("SELECT * FROM historic_map_features WHERE mapId = :mapId ORDER BY createdAtMillis ASC")
     fun observeByMapId(mapId: String): Flow<List<HistoricMapFeatureEntity>>
 
+    @Query("SELECT * FROM historic_map_features")
+    suspend fun listAll(): List<HistoricMapFeatureEntity>
+
     @Upsert
     suspend fun upsert(feature: HistoricMapFeatureEntity)
 

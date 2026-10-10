@@ -61,7 +61,7 @@ class HistoricMapOverlayRepository(
     directory: File? = null,
 ) {
     private val storeDirectory = directory ?: File(
-        context.applicationContext.getExternalFilesDir(null) ?: context.applicationContext.filesDir,
+        context.applicationContext.filesDir,
         "historic-maps",
     )
     private val preferences = context.applicationContext
@@ -117,10 +117,56 @@ class HistoricMapOverlayRepository(
         return overlay
     }
 
+    /**
+     * Registers an already-downloaded archive file as an overlay without copying it.
+     * Delete will not remove files that live outside [storeDirectory].
+     */
+    fun registerExistingFile(
+        file: File,
+        displayName: String,
+        latitude: Double,
+        longitude: Double,
+        defaultBaseWidthMeters: Float,
+        sourceAttribution: String,
+        rmseMeters: Double? = null,
+        georeferenced: Boolean = false,
+    ): HistoricMapOverlay {
+        require(file.isFile && file.length() > 0L) { "$displayName is missing on disk" }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val aspectRatio = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            bounds.outWidth.toFloat() / bounds.outHeight.toFloat()
+        } else {
+            1f
+        }
+        val overlay = HistoricMapOverlay(
+            id = UUID.randomUUID().toString(),
+            file = file,
+            displayName = displayName,
+            latitude = latitude,
+            longitude = longitude,
+            baseWidthMeters = defaultBaseWidthMeters.coerceAtLeast(1f),
+            aspectRatio = aspectRatio,
+            confidence = if (georeferenced) {
+                GeoReferenceConfidence.GOOD
+            } else {
+                GeoReferenceConfidence.INSUFFICIENT_POINTS
+            },
+            rmseMeters = rmseMeters,
+            sourceAttribution = sourceAttribution,
+        )
+        save(overlay)
+        return overlay
+    }
+
     fun update(overlay: HistoricMapOverlay) = save(overlay)
 
     fun delete(overlay: HistoricMapOverlay) {
-        overlay.file.delete()
+        val storedRoot = storeDirectory.canonicalPath
+        val overlayPath = runCatching { overlay.file.canonicalPath }.getOrDefault(overlay.file.absolutePath)
+        if (overlayPath.startsWith(storedRoot)) {
+            overlay.file.delete()
+        }
         val ids = preferences.getStringSet(KEY_IDS, emptySet()).orEmpty().toMutableSet()
         ids.remove(overlay.id)
         val editor = preferences.edit().putStringSet(KEY_IDS, ids)

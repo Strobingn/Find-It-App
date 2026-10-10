@@ -77,7 +77,6 @@ class TerrainRenderPerformanceTest {
             declaredPointCount = 40_000_000,
         )
 
-        // Same per-cell target: overview of the whole file still elevates regularly.
         var overviewElevation = 0
         var refinedElevation = 0
         repeat(10_000) {
@@ -86,14 +85,14 @@ class TerrainRenderPerformanceTest {
             if (refined.nextPointWork() == LidarPointWork.ELEVATION) refinedElevation++
             refined.skipPoint()
         }
-        // Overview has more points in focus so fewer elevation hits per 10k, but both sample.
-        assertTrue(overviewElevation > 0)
-        assertTrue(refinedElevation > 0)
+        assertEquals(10_000, overviewElevation)
+        assertEquals(10_000, refinedElevation)
         assertFalse(overview.shouldStopDecoding())
+        assertFalse(refined.shouldStopDecoding())
     }
 
     @Test
-    fun overviewEarlyOutOnlyAtHardScanCap() {
+    fun overviewNeverStopsEarlyOnAPointBudget() {
         val rasterizer = LidarRasterizer(
             minX = 0.0,
             maxX = 10.0,
@@ -103,17 +102,10 @@ class TerrainRenderPerformanceTest {
             declaredPointCount = 5_000_000,
         )
         assertFalse(rasterizer.shouldStopDecoding())
-        // Below the dense scan budget, keep decoding.
         repeat(100_000) {
-            when (rasterizer.nextPointWork()) {
-                LidarPointWork.SKIP -> rasterizer.skipPoint()
-                LidarPointWork.COVERAGE -> rasterizer.addCoveragePoint(1.0, 1.0)
-                LidarPointWork.ELEVATION -> rasterizer.addPoint(1.0, 1.0, 10f, classification = 2)
-            }
+            rasterizer.addPoint(1.0, 1.0, 10f, classification = 2)
         }
-        // With denser budgets, 100k may still be under the cap on small rasters.
-        if (rasterizer.shouldStopDecoding()) {
-            assertTrue(rasterizer.pointsDecoded >= 200_000L || rasterizer.pointsDecoded < 5_000_000L)
-        }
+        assertFalse(rasterizer.shouldStopDecoding())
+        assertEquals(100_000L, rasterizer.pointsDecoded)
     }
 }

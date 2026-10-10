@@ -28,7 +28,7 @@ class LidarRasterizerTest {
     }
 
     @Test
-    fun optimizedPointWorkSkipsMostGettersOnLargeOverviews() {
+    fun everyReturnIsAnElevationSampleEvenOnHugeTiles() {
         val rasterizer = LidarRasterizer(
             minX = 0.0,
             maxX = 100.0,
@@ -38,11 +38,69 @@ class LidarRasterizerTest {
             declaredPointCount = 64_000_000,
         )
 
-        assertEquals(LidarPointWork.ELEVATION, rasterizer.nextPointWork())
-        rasterizer.skipPoint()
-        // With dense sample budgets, stride is large on huge tiles — first non-elevation work is SKIP.
-        val next = rasterizer.nextPointWork()
-        assertTrue(next == LidarPointWork.SKIP || next == LidarPointWork.COVERAGE)
+        repeat(64) {
+            assertEquals(LidarPointWork.ELEVATION, rasterizer.nextPointWork())
+            rasterizer.skipPoint()
+        }
+        assertFalse(rasterizer.shouldStopDecoding())
+    }
+
+    @Test
+    fun class8IsGroundOnlyOnPreLas14() {
+        assertTrue(isSourceGround(2, versionMajor = 1, versionMinor = 4, pointFormat = 6))
+        assertTrue(isSourceGround(8, versionMajor = 1, versionMinor = 2, pointFormat = 1))
+        assertFalse(isSourceGround(8, versionMajor = 1, versionMinor = 4, pointFormat = 6))
+        assertFalse(isSourceGround(8, isKeyPoint = true, versionMajor = 1, versionMinor = 4, pointFormat = 6))
+    }
+
+    @Test
+    fun mergeCombinesDisjointChunkGrids() {
+        val left = LidarRasterizer(
+            minX = 0.0, maxX = 10.0, minY = 0.0, maxY = 10.0,
+            options = LidarImportOptions(rasterResolution = 32, groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            declaredPointCount = 4,
+        )
+        val right = LidarRasterizer(
+            minX = 0.0, maxX = 10.0, minY = 0.0, maxY = 10.0,
+            options = LidarImportOptions(rasterResolution = 32, groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            declaredPointCount = 4,
+        )
+        left.addPoint(1.0, 1.0, 10f, 2)
+        right.addPoint(9.0, 9.0, 20f, 2)
+        left.mergeFrom(right)
+        val result = requireNotNull(left.finish(0, "merge"))
+        assertEquals(2L, left.pointsDecoded)
+        assertFalse(result.wasTruncated)
+        assertTrue(result.grid.validData.count { it } >= 2)
+    }
+
+    @Test
+    fun finishReportsTruncationWhenReaderStopsEarly() {
+        val rasterizer = LidarRasterizer(
+            minX = 0.0, maxX = 10.0, minY = 0.0, maxY = 10.0,
+            options = LidarImportOptions(rasterResolution = 32),
+            declaredPointCount = 1_000,
+        )
+        rasterizer.addPoint(1.0, 1.0, 10f, 2)
+        rasterizer.markTruncated()
+        val result = requireNotNull(rasterizer.finish(0, "trunc"))
+        assertTrue(result.wasTruncated)
+        assertTrue(result.note.contains("truncated"))
+    }
+
+    @Test
+    fun unmeasuredCellsStayInvalidInsteadOfInventedFill() {
+        val rasterizer = LidarRasterizer(
+            minX = 0.0, maxX = 10.0, minY = 0.0, maxY = 10.0,
+            options = LidarImportOptions(rasterResolution = 16, groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            declaredPointCount = 1,
+        )
+        rasterizer.addPoint(0.0, 0.0, 10f, 2)
+        val result = requireNotNull(rasterizer.finish(0, "holes"))
+        assertTrue(result.grid.validData.any { it })
+        assertTrue(result.grid.validData.any { !it })
+        val emptyIndex = result.grid.validData.indexOfFirst { !it }
+        assertTrue(result.grid.bareEarth[emptyIndex].isNaN())
     }
 
     @Test
@@ -165,7 +223,7 @@ class LidarRasterizerTest {
         val targetIndex = targetY * result.grid.width + targetX
 
         assertEquals(20L, rasterizer.pointsDecoded)
-        assertEquals(2, rasterizer.pointsBinned)
+        assertEquals(20, rasterizer.pointsBinned)
         assertTrue(result.grid.validData[targetIndex])
     }
 

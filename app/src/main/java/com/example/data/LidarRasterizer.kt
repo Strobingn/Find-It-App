@@ -52,6 +52,9 @@ internal class LidarRasterizer(
     options: LidarImportOptions,
     declaredPointCount: Long,
     maxBinnedPoints: Double = MAX_BINNED_POINTS,
+    lasVersionMajor: Int = 1,
+    lasVersionMinor: Int = 2,
+    pointFormat: Int = 0,
 ) {
     private val options = options.sanitized()
     private val isOverview = this.options.focusBounds == null
@@ -88,12 +91,9 @@ internal class LidarRasterizer(
     private val estimatedPointsInFocus = declaredPointCount.coerceAtLeast(1L).toDouble() *
         ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
         ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
-    private val usefulSampleBudget: Double
-    private val sampleStride: Int
-    private val coverageStride: Int
-    /** Hard cap on decoded returns for full-footprint overview opens of huge tiles. */
-    private val maxDecodedPoints: Long
-    private val targetElevationCells: Int
+    private val lasVersionMajor: Int
+    private val lasVersionMinor: Int
+    private val pointFormat: Int
 
     var pointsDecoded: Long = 0
         private set
@@ -101,6 +101,8 @@ internal class LidarRasterizer(
         private set
     private var groundPointsBinned: Int = 0
     private var elevationCellsPopulated: Int = 0
+    /** Set when a reader stops before the declared point count (cancel, I/O, or early exit). */
+    var truncatedByReader: Boolean = false
 
     init {
         if (rangeX >= rangeY) {
@@ -120,53 +122,19 @@ internal class LidarRasterizer(
         allMax = FloatArray(width * height) { -Float.MAX_VALUE }
         allCount = IntArray(width * height)
         coverageCount = IntArray(width * height)
-
-        // First-paint overview is a detailed product (1,024+). Use the same per-cell sample budget
-        // as cropped refine so full-footprint opens are not soft/sparse compared with zoom-in.
-        usefulSampleBudget = minOf(
-            maxBinnedPoints.coerceAtLeast(1.0),
-            (width.toDouble() * height.toDouble() * TARGET_SAMPLES_PER_CELL).coerceAtLeast(1.0),
-        )
-        sampleStride = ceil(estimatedPointsInFocus / usefulSampleBudget).toInt().coerceAtLeast(1)
-        // Overview: every return at least marks coverage so first paint has no skip-holes.
-        // Focused refine keeps a capped coverage stride for speed on huge crops.
-        coverageStride = if (isOverview) {
-            1
-        } else {
-            sampleStride.coerceAtMost(MAX_COVERAGE_STRIDE)
-        }
-        // Only bail early on absurd multi-hundred-million-point tiles after a dense scan budget.
-        maxDecodedPoints = if (isOverview) {
-            minOf(
-                estimatedPointsInFocus.toLong().coerceAtLeast(1L),
-                maxOf(
-                    (usefulSampleBudget * OVERVIEW_SCAN_MULTIPLIER).toLong(),
-                    width.toLong() * height * OVERVIEW_MIN_RETURNS_PER_CELL,
-                ),
-            )
-        } else {
-            Long.MAX_VALUE
-        }
-        targetElevationCells = max(1, (width * height * OVERVIEW_CELL_FILL_TARGET).roundToInt())
+        this.lasVersionMajor = lasVersionMajor
+        this.lasVersionMinor = lasVersionMinor
+        this.pointFormat = pointFormat
+        // maxBinnedPoints is retained for API compatibility but no longer thins returns.
+        @Suppress("UNUSED_VARIABLE")
+        val ignoredBudget = maxBinnedPoints
     }
 
-    // Rolling counters replace three per-return Long modulo operations. A 200-million-point tile
-    // ran 600 million divisions purely to decide which returns to keep.
-    private var sampleCountdown = 0
-    private var coverageCountdown = 0
+    /** Full-detail path: every decoded return is an elevation sample. */
+    fun nextPointWork(): LidarPointWork = LidarPointWork.ELEVATION
 
-    /** Lets the low-level reader avoid coordinate/classification getters for discarded returns. */
-    fun nextPointWork(): LidarPointWork = when {
-        sampleCountdown == 0 -> LidarPointWork.ELEVATION
-        coverageCountdown == 0 -> LidarPointWork.COVERAGE
-        else -> LidarPointWork.SKIP
-    }
-
-    /** Advances both strides exactly as `pointsDecoded % stride == 0` used to. */
     private fun advance() {
         pointsDecoded++
-        if (++sampleCountdown >= sampleStride) sampleCountdown = 0
-        if (++coverageCountdown >= coverageStride) coverageCountdown = 0
     }
 
     fun skipPoint(): Boolean {
@@ -181,11 +149,10 @@ internal class LidarRasterizer(
     }
 
     /**
-     * Adds a complete elevation sample. Existing callers may still invoke this for every return;
-     * the method retains its own stride guard for compatibility.
+     * Adds a complete elevation sample. Every finite in-bounds return is binned; the grid itself
+     * is the memory bound, so there is no sample stride.
      */
     fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
-        val wasSampleReturn = sampleCountdown == 0
         advance()
         if (!z.isFinite()) return true
         val normalizedClass = classification.coerceIn(0, 255)
@@ -199,7 +166,6 @@ internal class LidarRasterizer(
         val index = cellIndex(x, y) ?: return true
 
         coverageCount[index]++
-        if (!wasSampleReturn) return true
 
         if (z < allMin[index]) {
             // A newly observed low demotes the previous minimum to second place. Returns that
@@ -224,9 +190,13 @@ internal class LidarRasterizer(
         // On multi-hundred-million-point tiles this avoids histogram + class tests for every sample.
         if (tracksSourceClasses) {
             classHistogram[normalizedClass]++
-            // Class 2 is Ground. Class 8 was historically Model Key-Point; modern files use the key-point flag.
-            val isSourceGround = normalizedClass == 2 || normalizedClass == 8 ||
-                (isKeyPoint && normalizedClass == 2)
+            val isSourceGround = isSourceGround(
+                classification = normalizedClass,
+                isKeyPoint = isKeyPoint,
+                versionMajor = lasVersionMajor,
+                versionMinor = lasVersionMinor,
+                pointFormat = pointFormat,
+            )
             if (isSourceGround) {
                 if (z < groundMin[index]) groundMin[index] = z
                 groundCount[index]++
@@ -237,12 +207,13 @@ internal class LidarRasterizer(
     }
 
     /**
-     * Safety valve for enormous full-footprint files only. Does not stop at a coarse “preview”
-     * density — the scan budget already targets full overview quality (see [usefulSampleBudget]).
+     * Full-detail path never drops remaining returns. Readers may still stop on cancellation;
+     * they must then call [markTruncated].
      */
-    fun shouldStopDecoding(): Boolean {
-        if (!isOverview) return false
-        return pointsDecoded >= maxDecodedPoints && pointsDecoded >= MIN_OVERVIEW_DECODE
+    fun shouldStopDecoding(): Boolean = false
+
+    fun markTruncated() {
+        truncatedByReader = true
     }
 
     private fun cellIndex(x: Double, y: Double): Int? {
@@ -304,12 +275,12 @@ internal class LidarRasterizer(
             else -> allCount
         }
 
-        val coverageMask = buildCoverageMask(coverageCount, width, height)
+        val measuredMask = BooleanArray(width * height) { sourceCounts[it] > 0 }
         val surface = FloatArray(width * height)
         for (index in surface.indices) {
-            surface[index] = if (sourceCounts[index] > 0) source[index] else Float.NaN
+            surface[index] = if (measuredMask[index]) source[index] else Float.NaN
         }
-        fillMissingNearest(surface, width, height)
+        // Holes stay NaN. Invented nearest-neighbor fill is never presented as measured ground.
 
         val cleaned = if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
             surface
@@ -331,13 +302,8 @@ internal class LidarRasterizer(
         }
 
         val totalCells = width * height
-        // Overview first view: draw the continuous filled surface (no skip-holes).
-        // Focused refine keeps the coverage mask so empty margins stay transparent.
-        val validData = if (isOverview) {
-            BooleanArray(totalCells) { bareEarth[it].isFinite() }
-        } else {
-            coverageMask
-        }
+        // Only cells that received a real return are valid. Filled/invented values are never shown.
+        val validData = measuredMask
         val groundSamplesPerCell = if (populatedCells > 0) {
             val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
@@ -378,16 +344,11 @@ internal class LidarRasterizer(
         val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
-        val earlyOutNote = if (isOverview && pointsDecoded < estimatedPointsInFocus.toLong()) {
-            " · overview early-out"
-        } else {
-            ""
-        }
-        val samplingNote = when {
-            sampleStride > 1 ->
-                "sampled every ${sampleStride}th elevation return and every ${coverageStride}th footprint return across $pointsDecoded decoded points$earlyOutNote"
-            else -> "$pointsDecoded points decoded$earlyOutNote"
-        }
+        val declared = estimatedPointsInFocus.toLong().coerceAtLeast(0L)
+        val wasTruncated = truncatedByReader ||
+            (declared > 0L && pointsDecoded < declared && pointsDecoded + 1L < declared)
+        val earlyOutNote = if (wasTruncated) " · truncated" else ""
+        val samplingNote = "every return used · $pointsDecoded points decoded$earlyOutNote"
         val modeNote = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED ->
                 "ASPRS ground classes: $groundPointsBinned / $pointsBinned sampled returns"
@@ -437,25 +398,77 @@ internal class LidarRasterizer(
             requestedGroundMode = requestedMode,
             appliedGroundMode = appliedMode,
             sampledPoints = pointsBinned,
-            wasTruncated = false,
+            wasTruncated = wasTruncated,
             groundReport = groundReport,
         )
+    }
+
+    /**
+     * Absorbs another rasterizer that used the same crop, resolution, and options.
+     * Used to merge per-core LAZ chunk ranges.
+     */
+    fun mergeFrom(other: LidarRasterizer) {
+        require(other.width == width && other.height == height) {
+            "Cannot merge rasters of different size (${other.width}×${other.height} into ${width}×${height})"
+        }
+        pointsDecoded += other.pointsDecoded
+        pointsBinned += other.pointsBinned
+        groundPointsBinned += other.groundPointsBinned
+        truncatedByReader = truncatedByReader || other.truncatedByReader
+        for (index in 0 until width * height) {
+            if (other.coverageCount[index] > 0) coverageCount[index] += other.coverageCount[index]
+            if (other.allCount[index] > 0) {
+                val previousMin = allMin[index]
+                if (other.allMin[index] < allMin[index]) {
+                    allSecondMin[index] = min(previousMin, other.allSecondMin[index])
+                    allMin[index] = other.allMin[index]
+                } else if (other.allMin[index] < allSecondMin[index]) {
+                    allSecondMin[index] = other.allMin[index]
+                }
+                if (other.allMax[index] > allMax[index]) allMax[index] = other.allMax[index]
+                if (allCount[index] == 0) elevationCellsPopulated++
+                allCount[index] += other.allCount[index]
+                allLowBandCount[index] = allLowBandCount[index] + other.allLowBandCount[index]
+            }
+            if (other.groundCount[index] > 0) {
+                if (other.groundMin[index] < groundMin[index]) groundMin[index] = other.groundMin[index]
+                groundCount[index] += other.groundCount[index]
+            }
+        }
+        for (cls in classHistogram.indices) {
+            classHistogram[cls] += other.classHistogram[cls]
+        }
     }
 
     companion object {
         private const val MIN_SHORT_SIDE = 48
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12
-        private const val TARGET_SAMPLES_PER_CELL = 12.0
-        /** Tighter than before so overview footprints fill continuously on first paint. */
-        private const val MAX_COVERAGE_STRIDE = 4
+        /** Retained so existing constructor call sites keep compiling. Unused for thinning. */
         private const val MAX_BINNED_POINTS = 8_000_000.0
-        /** Decoded returns per elevation sample budget for full-footprint opens. */
-        private const val OVERVIEW_SCAN_MULTIPLIER = 16.0
-        private const val OVERVIEW_MIN_RETURNS_PER_CELL = 20L
-        private const val MIN_OVERVIEW_DECODE = 200_000L
-        private const val OVERVIEW_CELL_FILL_TARGET = 0.92
     }
+}
+
+/**
+ * ASPRS ground used for [GroundSurfaceMode.SOURCE_CLASSIFIED].
+ *
+ * Class 2 is always Ground. Class 8 is Model Key-Point only in LAS 1.0–1.3 (point formats 0–5).
+ * LAS 1.4 moved key-points to a classification flag and reserved class 8, so class 8 is not
+ * treated as ground there. The key-point flag on class 2 is redundant and ignored.
+ */
+@Suppress("UNUSED_PARAMETER")
+internal fun isSourceGround(
+    classification: Int,
+    isKeyPoint: Boolean = false,
+    versionMajor: Int = 1,
+    versionMinor: Int = 2,
+    pointFormat: Int = 0,
+): Boolean {
+    // The key-point flag is ignored: class 2 is always ground, and LAS 1.4 key-points are a flag
+    // on whatever class they already have — they are not a substitute for class 8.
+    if (classification == 2) return true
+    val preLas14 = versionMajor < 1 || (versionMajor == 1 && versionMinor < 4) || pointFormat < 6
+    return preLas14 && classification == 8
 }
 
 internal fun fillMissingNearest(grid: FloatArray, width: Int, height: Int) {

@@ -377,7 +377,7 @@ fun AiAnalysisWorkspace(
         // The ViewModel is recreated after an update or process death, but the expensive derived
         // layers remain in the on-disk cache. Restore them as soon as the real terrain is ready.
         if (!isRendering && grid.width > 2 && grid.height > 2) {
-            assistantViewModel.restoreLocalAnalysis(grid, summary)
+            assistantViewModel.restoreLocalAnalysis(grid, summary, bounds = metadata.bounds)
         }
     }
 

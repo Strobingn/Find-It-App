@@ -37,13 +37,9 @@ data class TerrainGpuScene(
     }
 
     fun selectForZoom(zoom: Float): TerrainGpuLevel {
-        val safeZoom = zoom.coerceAtLeast(1f)
-        val desiredFactor = when {
-            safeZoom >= 5f -> 1
-            safeZoom >= 2.5f -> 2
-            safeZoom >= 1.5f -> 4
-            else -> Int.MAX_VALUE
-        }
+        val safeZoom = zoom.coerceAtLeast(0.1f)
+        if (safeZoom >= 1f) return levels.first()
+        val desiredFactor = if (safeZoom >= 0.6f) 2 else Int.MAX_VALUE
         return if (desiredFactor == Int.MAX_VALUE) {
             levels.last()
         } else {
@@ -69,7 +65,7 @@ object TerrainGpuSceneBuilder {
 
     fun build(
         source: ElevationGrid,
-        maxFinestDimension: Int = 1_024,
+        maxFinestDimension: Int = Int.MAX_VALUE,
         tileSize: Int = 64,
     ): TerrainGpuScene {
         // Cap so a full tile never exceeds 65,535 vertices (ushort index limit).
