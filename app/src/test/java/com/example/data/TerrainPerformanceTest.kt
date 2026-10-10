@@ -47,6 +47,46 @@ class TerrainPerformanceTest {
     }
 
     @Test
+    fun packedRelativeCoordinatesRestoreProjectedPrecision() {
+        val originX = 5_000_000.25
+        val originY = 4_250_000.75
+        val rasterizer = LidarRasterizer(
+            minX = originX,
+            maxX = originX + 20.0,
+            minY = originY,
+            maxY = originY + 20.0,
+            options = LidarImportOptions(rasterResolution = 32, groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            declaredPointCount = 2,
+        )
+        val packed = PackedPointRasterizer.allocate(2)
+        packed.putFloat(0.11f)
+        packed.putFloat(0.22f)
+        packed.putFloat(12f)
+        packed.put(2)
+        packed.put(0)
+        packed.putShort(0)
+        packed.putFloat(1.5f)
+        packed.putFloat(1.5f)
+        packed.putFloat(13f)
+        packed.put(2)
+        packed.put(0)
+        packed.putShort(0)
+        packed.flip()
+        assertTrue(
+            PackedPointRasterizer.addAll(
+                rasterizer,
+                packed,
+                2,
+                originX = originX,
+                originY = originY,
+                originZ = 0.0,
+            ),
+        )
+        assertEquals(2L, rasterizer.pointsDecoded)
+        assertTrue(requireNotNull(rasterizer.finish(0, "relative")).grid.validData.any { it })
+    }
+
+    @Test
     fun cdlodKeepsFullResolutionNearTheViewCenter() {
         val nodes = HeightmapCdlod.select(
             width = 128,

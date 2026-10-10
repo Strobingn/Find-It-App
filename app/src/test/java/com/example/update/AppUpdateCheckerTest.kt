@@ -141,6 +141,33 @@ class AppUpdateCheckerTest {
         val hex = AppUpdateParse.hexSha256("findit".toByteArray())
         assertEquals(64, hex.length)
         assertEquals(hex, AppUpdateParse.hexSha256("findit".toByteArray()))
+        val file = folder.newFile("hash.bin")
+        file.writeBytes("findit".toByteArray())
+        assertEquals(hex, AppUpdateParse.hexSha256(file))
+    }
+
+    @Test
+    fun backupRejectsZipSlipAndCredentialPrefs() {
+        val db = folder.newFolder("db-slip")
+        File(db, "find-it.db").writeText("room")
+        val prefs = folder.newFolder("prefs-slip")
+        File(prefs, "openai_credentials.xml").writeText("secret")
+        File(prefs, "terrain_decoder.xml").writeText("<map/>")
+        val historic = folder.newFile("index-slip.json")
+        historic.writeText("{}")
+        val lidar = folder.newFolder("lidar-slip")
+        val zip = AppDataBackup.exportZip(db, prefs, historic, lidar)
+        val asString = String(zip)
+        assertFalse(asString.contains("openai_credentials"))
+        assertTrue(asString.contains("terrain_decoder"))
+
+        val escaped = AppDataBackup.safeChild(folder.newFolder("root"), "ok.txt")
+        assertTrue(escaped.path.endsWith("ok.txt"))
+        try {
+            AppDataBackup.safeChild(folder.newFolder("root2"), "../escape.txt")
+            throw AssertionError("zip-slip path should be rejected")
+        } catch (_: IllegalArgumentException) {
+        }
     }
 
     @Test
@@ -153,6 +180,7 @@ class AppUpdateCheckerTest {
         historic.writeText("""{"records":[]}""")
         val lidar = folder.newFolder("lidar")
         File(lidar, "library.json").writeText("""{"files":[]}""")
+        File(lidar, ".sources.json").writeText("""{"https://example.test/huge.laz":"huge.laz"}""")
         File(lidar, "huge.laz").writeText("skip-me")
         File(lidar, "site.las").writeText("also-skip")
         val zip = AppDataBackup.exportZip(db, prefs, historic, lidar)
@@ -171,5 +199,10 @@ class AppUpdateCheckerTest {
         val refs = File(outLidar, "imported-refs.txt").readText()
         assertTrue(refs.contains("huge.laz"))
         assertTrue(refs.contains("site.las"))
+        assertTrue(File(outLidar, ".sources.json").readText().contains("https://example.test/huge.laz"))
+        val missing = com.example.data.LazDatasetStore(outLidar).missingSourceDownloads()
+        assertEquals(1, missing.size)
+        assertEquals("https://example.test/huge.laz", missing.first().first)
+        assertEquals(listOf("huge.laz", "site.las"), com.example.data.LazDatasetStore(outLidar).pendingReimportNames())
     }
 }

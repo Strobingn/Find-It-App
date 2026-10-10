@@ -231,6 +231,7 @@ jobs:
           EOF
           )
           gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
             --title "Find It $NAME" \
             --notes "$NOTES" \
             "$APK"

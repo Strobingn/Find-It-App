@@ -224,7 +224,7 @@ class TerrainDecodeCoordinator(
                 source = grid,
                 maxFinestDimension = maxOf(grid.width, grid.height, 64),
                 tileSize = GPU_PREVIEW_TILE_SIZE,
-                useIntIndices = true,
+                useIntIndices = false,
                 attachHeightmap = true,
             )
             TerrainMemoryMonitor.noteGpuScene(scene)
@@ -239,13 +239,11 @@ class TerrainDecodeCoordinator(
         val decodeContext = currentCoroutineContext()
         decodeContext.ensureActive()
         if (isLazFile(file, displayName)) {
-            val laz = TerrainStageProfiler.stage("decode", displayName) {
-                LazTerrainReader.read(
-                    file = file,
-                    options = options,
-                    shouldContinue = { decodeContext.isActive },
-                )
-            } ?: return@withContext null
+            val laz = LazTerrainReader.read(
+                file = file,
+                options = options,
+                shouldContinue = { decodeContext.isActive },
+            ) ?: return@withContext null
             DemGenerator.TerrainLoadResult(
                 grid = laz.grid,
                 summary = laz.note,

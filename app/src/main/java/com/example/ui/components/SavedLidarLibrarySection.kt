@@ -52,6 +52,7 @@ import com.example.data.TerrainDecodeCoordinator
 import com.example.data.TerrainImportSource
 import com.example.data.TerrainPerformanceSession
 import com.example.data.download.LazDownloadQueue
+import com.example.data.download.LazDownloadService
 import com.example.data.download.LazDownloadState
 import java.io.File
 import java.util.Locale
@@ -228,6 +229,35 @@ fun SavedLidarLibrarySection(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            val missingDownloads = remember(datasets, downloadTasks) { datasetStore.missingSourceDownloads() }
+            val missingManual = remember(datasets) { datasetStore.pendingReimportNames() }
+            if (missingDownloads.isNotEmpty() || missingManual.isNotEmpty()) {
+                Text(
+                    buildString {
+                        if (missingDownloads.isNotEmpty()) {
+                            append("${missingDownloads.size} saved tile(s) can be re-downloaded from their original URLs.")
+                        }
+                        if (missingManual.isNotEmpty()) {
+                            if (isNotEmpty()) append(' ')
+                            append("Re-import locally: ${missingManual.joinToString()}.")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.testTag("saved_lidar_missing_after_restore"),
+                )
+                if (missingDownloads.isNotEmpty()) {
+                    TextButton(
+                        onClick = {
+                            missingDownloads.forEach { (url, name) ->
+                                LazDownloadService.enqueue(context, url, name)
+                            }
+                        },
+                        modifier = Modifier.testTag("saved_lidar_redownload_missing"),
+                    ) { Text("Re-download ${missingDownloads.size} library file(s)") }
+                }
+            }
 
             if (isOpening) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())

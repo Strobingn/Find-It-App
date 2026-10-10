@@ -322,5 +322,13 @@ abstract class AppDatabase : RoomDatabase() {
                 .build()
                 .also { instance = it }
         }
+
+        /** Close the singleton so on-disk files can be replaced during backup restore. */
+        fun closeInstance() {
+            synchronized(this) {
+                instance?.close()
+                instance = null
+            }
+        }
     }
 }

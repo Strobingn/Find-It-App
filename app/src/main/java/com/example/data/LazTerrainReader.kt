@@ -48,9 +48,7 @@ internal object LazTerrainReader {
     ): DemGenerator.LasLoadResult? {
         if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
             val native = runCatching {
-                TerrainStageProfiler.stage("decode_lazrs", file.name) {
-                    readNativePacked(file, options, shouldContinue)
-                }
+                readNativePacked(file, options, shouldContinue)
             }.onFailure { exception ->
                 System.err.println("laz-rs decode failed for ${file.name}: ${exception.message}")
             }.getOrNull()
@@ -58,9 +56,7 @@ internal object LazTerrainReader {
         }
 
         val parallel = runCatching {
-            TerrainStageProfiler.stage("decode_parallel", file.name) {
-                readParallelChunks(file, options, shouldContinue, onProgress)
-            }
+            readParallelChunks(file, options, shouldContinue, onProgress)
         }.onFailure { exception ->
             System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
@@ -590,7 +586,9 @@ internal object LazTerrainReader {
                     }
                 }
             }
-            val parts = tasks.map { pool.submit(it) }.map { it.get() }
+            val parts = TerrainStageProfiler.stage("decode_parallel", file.name) {
+                tasks.map { pool.submit(it) }.map { it.get() }
+            }
             val merged = parts.filterNotNull()
             if (merged.isEmpty()) return null
             val primary = merged.first()
@@ -650,10 +648,21 @@ internal object LazTerrainReader {
         }
         if (pointCount <= 0L || pointCount > Int.MAX_VALUE.toLong()) return null
         val packed = PackedPointRasterizer.allocate(pointCount.toInt())
-        val decoded = LazRsNativeDecoder.decodePacked(file, packed)
+        val origins = DoubleArray(3)
+        val decoded = TerrainStageProfiler.stage("decode_lazrs", file.name) {
+            LazRsNativeDecoder.decodePacked(file, packed, origins, shouldContinue)
+        }
         if (decoded <= 0) return null
         val rasterizer = newRasterizer(header, options, pointCount)
-        PackedPointRasterizer.addAll(rasterizer, packed, decoded, shouldContinue)
+        PackedPointRasterizer.addAll(
+            rasterizer,
+            packed,
+            decoded,
+            shouldContinue,
+            originX = origins[0],
+            originY = origins[1],
+            originZ = origins[2],
+        )
         return finish(rasterizer, header, "laz-rs packed JNI")
     }
 
