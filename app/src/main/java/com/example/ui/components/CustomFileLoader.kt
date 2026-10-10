@@ -174,23 +174,21 @@ fun CustomFileLoader(
                     displayName = displayName,
                     options = options,
                 )
-                var paintedEarly = false
                 val outcome = decodeCoordinator.decode(
                     file = file,
                     displayName = displayName,
                     options = options,
                     onPreview = { preview ->
-                        // Hillshade can paint as soon as the elevation grid is ready.
+                        // Always apply: coordinator re-invokes this with the exact product after
+                        // awaiting full decode. Skipping after the first paint left 2D hillshade
+                        // stuck on the thinned preview.
                         withContext(Dispatchers.Main.immediate) {
                             TerrainPerformanceSession.publish(preview.gpuScene)
-                            if (!paintedEarly) {
-                                paintedEarly = true
-                                onCustomTerrainLoaded(preview.terrain, source)
-                                progressText = if (preview.isPreview) {
-                                    "Sparse preview visible — exact terrain decoding…"
-                                } else {
-                                    "Terrain visible — finishing GPU mesh…"
-                                }
+                            onCustomTerrainLoaded(preview.terrain, source)
+                            progressText = if (preview.isPreview) {
+                                "Sparse preview visible — exact terrain decoding…"
+                            } else {
+                                "Terrain visible — finishing GPU mesh…"
                             }
                         }
                     },
@@ -206,18 +204,12 @@ fun CustomFileLoader(
                     outcome.cacheHit == LazTerrainCache.Hit.DISK -> "disk cache"
                     else -> "streamed point-cloud decode"
                 }
-                if (!paintedEarly) {
-                    showResult(
-                        result = outcome.terrain,
-                        name = displayName,
-                        source = source,
-                        successMessage = openMessage(displayName, outcome.terrain, cacheLabel, downloadedNow),
-                    )
-                } else {
-                    resetWorkState()
-                    isError = false
-                    message = openMessage(displayName, outcome.terrain, cacheLabel, downloadedNow)
-                }
+                showResult(
+                    result = outcome.terrain,
+                    name = displayName,
+                    source = source,
+                    successMessage = openMessage(displayName, outcome.terrain, cacheLabel, downloadedNow),
+                )
                 // Upgrade sparse preview → exact product without blocking first paint.
                 val exactJob = outcome.exactOutcome
                 if (exactJob != null) {

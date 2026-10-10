@@ -128,7 +128,10 @@ internal object LazTerrainReader {
                 val pointsPerChunk = (PREVIEW_TARGET_POINTS / chunksToSample)
                     .coerceIn(1, sourceChunkSize)
                 // Keep full raster resolution; only thin the point sample budget.
-                val previewOptions = safeOptions.copy(smoothingRadius = 0).sanitized()
+                val previewOptions = densityLimitedOptions(
+                    header,
+                    safeOptions.copy(smoothingRadius = 0),
+                )
                 val rasterizer = LidarRasterizer(
                     minX = header.minX,
                     maxX = header.maxX,
@@ -237,12 +240,13 @@ internal object LazTerrainReader {
             minY = sourceHeader.min_y,
         )
         val selectedPointCount = selection.selectedPointCount.coerceAtLeast(1L)
+        val limited = densityLimitedOptions(header, options)
         val rasterizer = LidarRasterizer(
             minX = header.minX,
             maxX = header.maxX,
             minY = header.minY,
             maxY = header.maxY,
-            options = options,
+            options = limited,
             declaredPointCount = estimatedPoints(header.pointCount, options.sanitized().focusBounds),
             lasVersionMajor = header.versionMajor,
             lasVersionMinor = header.versionMinor,
@@ -345,7 +349,7 @@ internal object LazTerrainReader {
         return rasterizeLowLevel(
             reader = reader,
             header = header,
-            options = options,
+            options = densityLimitedOptions(header, options),
             progressTotal = estimatedPoints,
             shouldContinue = shouldContinue,
             onProgress = onProgress,
@@ -392,7 +396,7 @@ internal object LazTerrainReader {
             rasterizeHighLevel(
                 points = points,
                 header = header,
-                options = options,
+                options = densityLimitedOptions(header, options),
                 progressTotal = estimatedPoints(header.pointCount, focus),
                 shouldContinue = shouldContinue,
                 onProgress = onProgress,
@@ -533,7 +537,8 @@ internal object LazTerrainReader {
             chunkSize = sourceHeader.laszip?.chunk_size?.takeIf { it in 1..5_000_000 } ?: DEFAULT_CHUNK_POINTS
         }
         if (pointCount <= 0L) return null
-        val focus = options.sanitized().focusBounds
+        val limited = densityLimitedOptions(header, options)
+        val focus = limited.focusBounds
         if (focus != null) return null
         val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
         if (workers == 1 || pointCount < chunkSize.toLong() * 2L) return null
@@ -554,7 +559,7 @@ internal object LazTerrainReader {
                     val startPoint = startChunk.toLong() * chunkSize.toLong()
                     val endPoint = min(pointCount, endChunk.toLong() * chunkSize.toLong())
                     if (startPoint >= endPoint) return@Callable null
-                    val rasterizer = newRasterizer(header, options, endPoint - startPoint)
+                    val rasterizer = newRasterizer(header, limited, endPoint - startPoint)
                     SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
                         if (!reader.seek(startPoint)) return@use null
                         var remaining = endPoint - startPoint
@@ -660,6 +665,24 @@ internal object LazTerrainReader {
             header.minY + (1.0 - focus.bottom) * rangeY,
             header.minX + focus.right * rangeX,
             header.minY + (1.0 - focus.top) * rangeY,
+        )
+    }
+
+    /**
+     * Apply the 1.5–2× ground-spacing cell cap once from the **full** header. Chunk workers must
+     * not recompute this from their own point range or merged rasters will disagree in size.
+     */
+    private fun densityLimitedOptions(header: Header, options: LidarImportOptions): LidarImportOptions {
+        val sanitized = options.sanitized()
+        val focus = sanitized.focusBounds
+        val rangeX = ((header.maxX - header.minX) * ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)))
+            .takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+        val rangeY = ((header.maxY - header.minY) * ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0)))
+            .takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+        return sanitized.withDensityLimitedResolution(
+            rangeX = rangeX,
+            rangeY = rangeY,
+            pointCount = estimatedPoints(header.pointCount, focus),
         )
     }
 

@@ -87,7 +87,7 @@ class TerrainDecodeCoordinator(
                 if (canPreview) {
                     onStage("Painting a first-look preview…")
                     val previewTerrain = decodeSparsePreview(file, sanitized)
-                    if (previewTerrain != null) {
+                    if (previewTerrain != null && emptyShareInsideHull(previewTerrain.grid) < 0.30f) {
                         currentCoroutineContext().ensureActive()
                         val previewScene = buildGpuScene(previewTerrain.grid)
                         val exact = startExactJob(fullKey, file, displayName, sanitized)

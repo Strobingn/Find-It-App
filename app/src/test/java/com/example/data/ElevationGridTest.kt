@@ -1,6 +1,7 @@
 package com.example.data
 
 import android.graphics.Color
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
@@ -68,5 +69,40 @@ class ElevationGridTest {
 
         assertNotEquals(aspect.getPixel(2, 2), elevation.getPixel(2, 2))
         assertNotEquals(canopyHeight.getPixel(2, 2), canopyHeight.getPixel(0, 0))
+    }
+
+    @Test
+    fun invalidCellsRenderTransparentNeverBlack() {
+        val valid = BooleanArray(9) { it == 4 }
+        val elevations = FloatArray(9) { if (it == 4) 10f else Float.NaN }
+        val grid = ElevationGrid(3, 3, elevations, FloatArray(9), cellSizeMeters = 1f, validData = valid)
+
+        val bitmap = grid.renderHillshade(315f, 45f, 1f, palette = 0, contrast = 1f)
+
+        val hole = bitmap.getPixel(0, 0)
+        assertEquals(Color.TRANSPARENT, hole)
+        assertEquals(0, Color.alpha(hole))
+        assertNotEquals(Color.BLACK, hole)
+
+        val center = bitmap.getPixel(1, 1)
+        assertTrue(Color.alpha(center) > 0)
+        assertNotEquals(Color.BLACK, center)
+        assertTrue(Color.red(center) > 0 || Color.green(center) > 0 || Color.blue(center) > 0)
+    }
+
+    @Test
+    fun hornSubstitutesNanNeighborsInsteadOfBlack() {
+        val elevations = floatArrayOf(
+            Float.NaN, Float.NaN, Float.NaN,
+            Float.NaN, 12f, Float.NaN,
+            Float.NaN, Float.NaN, Float.NaN,
+        )
+        val valid = BooleanArray(9) { it == 4 }
+        val grid = ElevationGrid(3, 3, elevations, FloatArray(9), 1f, valid)
+        val bitmap = grid.renderHillshade(315f, 35f, 1f, palette = 0, contrast = 1f)
+        val center = bitmap.getPixel(1, 1)
+        assertTrue("NaN neighbours must not collapse Horn shade to black", Color.alpha(center) == 255)
+        assertNotEquals(Color.BLACK, center)
+        assertTrue(Color.red(center) > 20)
     }
 }

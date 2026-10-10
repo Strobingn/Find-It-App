@@ -62,4 +62,64 @@ internal object LasFixture {
         }
         return file
     }
+
+    /**
+     * Regular ground-classified lattice used to prove DEM coverage: cell size may be finer than
+     * spacing, but TIN + bounded fill must still produce a continuous hull.
+     */
+    fun writeLattice(
+        file: File,
+        columns: Int,
+        rows: Int,
+        spacingMeters: Double = 2.0,
+        classification: Int = 2,
+        originX: Double = 0.0,
+        originY: Double = 0.0,
+        baseZ: Double = 40.0,
+    ): File {
+        val pointCount = columns * rows
+        val maxX = originX + (columns - 1) * spacingMeters
+        val maxY = originY + (rows - 1) * spacingMeters
+        val header = ByteBuffer.allocate(HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+        header.put("LASF".toByteArray(Charsets.US_ASCII))
+        header.position(24); header.put(1); header.put(2)
+        header.position(94); header.putShort(HEADER_SIZE.toShort())
+        header.position(96); header.putInt(HEADER_SIZE)
+        header.position(100); header.putInt(0)
+        header.position(104); header.put(0)
+        header.position(105); header.putShort(RECORD_LENGTH.toShort())
+        header.position(107); header.putInt(pointCount)
+        header.position(131)
+        header.putDouble(SCALE); header.putDouble(SCALE); header.putDouble(SCALE)
+        header.putDouble(0.0); header.putDouble(0.0); header.putDouble(0.0)
+        header.position(179)
+        header.putDouble(maxX); header.putDouble(originX)
+        header.putDouble(maxY); header.putDouble(originY)
+        header.putDouble(baseZ + 20.0); header.putDouble(baseZ - 20.0)
+
+        RandomAccessFile(file, "rw").use { raf ->
+            raf.setLength(0)
+            raf.write(header.array())
+            val record = ByteBuffer.allocate(RECORD_LENGTH).order(ByteOrder.LITTLE_ENDIAN)
+            for (row in 0 until rows) {
+                for (col in 0 until columns) {
+                    val x = originX + col * spacingMeters
+                    val y = originY + row * spacingMeters
+                    val z = baseZ + sin(x * 0.05) * 2.0 + sin(y * 0.04) * 1.5
+                    record.clear()
+                    record.putInt((x / SCALE).toInt())
+                    record.putInt((y / SCALE).toInt())
+                    record.putInt((z / SCALE).toInt())
+                    record.putShort(1000)
+                    record.put(0b00001001.toByte())
+                    record.put(classification.toByte())
+                    record.put(0)
+                    record.put(0)
+                    record.putShort(0)
+                    raf.write(record.array())
+                }
+            }
+        }
+        return file
+    }
 }

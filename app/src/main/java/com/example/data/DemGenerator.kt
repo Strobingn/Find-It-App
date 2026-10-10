@@ -358,12 +358,17 @@ object DemGenerator {
             }
 
             if (!skipFully(buffered, offsetToPoints)) return null
+            val limited = options.withDensityLimitedResolution(
+                rangeX = maxX - minX,
+                rangeY = maxY - minY,
+                pointCount = pointCount,
+            )
             val rasterizer = LidarRasterizer(
                 minX = minX,
                 maxX = maxX,
                 minY = minY,
                 maxY = maxY,
-                options = options,
+                options = limited,
                 declaredPointCount = pointCount,
                 lasVersionMajor = versionMajor,
                 lasVersionMinor = versionMinor,

@@ -87,19 +87,54 @@ object TerrainGpuSceneBuilder {
         val levels = pyramid.levels.map { level ->
             val index = TerrainSpatialGridIndex.build(level.grid, safeTileSize)
             val elevationBounds = elevationBounds(level.grid)
+            var rendered = 0
+            var skippedEmpty = 0
+            var skippedNoQuads = 0
+            val batches = index.tiles.mapNotNull { tile ->
+                if (tile.isEmpty) {
+                    skippedEmpty++
+                    TerrainCoverageLog.emit(
+                        "FindItTerrain",
+                        "GPU tile r${tile.tileRow}c${tile.tileColumn} SKIP empty " +
+                            "(${tile.startX}..${tile.endXInclusive}," +
+                            "${tile.startY}..${tile.endYInclusive})",
+                    )
+                    return@mapNotNull null
+                }
+                val batch = buildBatch(
+                    level.grid,
+                    tile,
+                    elevationBounds.first,
+                    elevationBounds.second,
+                    useIntIndices,
+                )
+                if (batch == null) {
+                    skippedNoQuads++
+                    TerrainCoverageLog.emit(
+                        "FindItTerrain",
+                        "GPU tile r${tile.tileRow}c${tile.tileColumn} SKIP no-quads " +
+                            "valid=${tile.validCellCount}",
+                    )
+                } else {
+                    rendered++
+                    TerrainCoverageLog.emit(
+                        "FindItTerrain",
+                        "GPU tile r${tile.tileRow}c${tile.tileColumn} RENDER " +
+                            "valid=${tile.validCellCount} tris=${batch.triangleCount}",
+                    )
+                }
+                batch
+            }
+            TerrainCoverageLog.emit(
+                "FindItTerrain",
+                "GPU level ${level.grid.width}×${level.grid.height} tiles " +
+                    "render=$rendered empty=$skippedEmpty noQuads=$skippedNoQuads",
+            )
             TerrainGpuLevel(
                 reductionFactor = level.reductionFactor,
                 gridWidth = level.grid.width,
                 gridHeight = level.grid.height,
-                batches = index.nonEmptyTiles().mapNotNull { tile ->
-                    buildBatch(
-                        level.grid,
-                        tile,
-                        elevationBounds.first,
-                        elevationBounds.second,
-                        useIntIndices,
-                    )
-                },
+                batches = batches,
             )
         }.filter { it.batches.isNotEmpty() }
 
