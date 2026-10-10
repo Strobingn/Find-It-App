@@ -46,8 +46,21 @@ internal object LazTerrainReader {
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)? = null,
     ): DemGenerator.LasLoadResult? {
+        if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
+            val native = runCatching {
+                TerrainStageProfiler.stage("decode_lazrs", file.name) {
+                    readNativePacked(file, options, shouldContinue)
+                }
+            }.onFailure { exception ->
+                System.err.println("laz-rs decode failed for ${file.name}: ${exception.message}")
+            }.getOrNull()
+            if (native != null) return native
+        }
+
         val parallel = runCatching {
-            readParallelChunks(file, options, shouldContinue, onProgress)
+            TerrainStageProfiler.stage("decode_parallel", file.name) {
+                readParallelChunks(file, options, shouldContinue, onProgress)
+            }
         }.onFailure { exception ->
             System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
@@ -589,10 +602,55 @@ internal object LazTerrainReader {
         rasterizer: LidarRasterizer,
         header: Header,
         decoderLabel: String,
-    ): DemGenerator.LasLoadResult? = rasterizer.finish(
-        pointFormat = header.pointFormat,
-        sourceLabel = "LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat} $decoderLabel",
-    )
+    ): DemGenerator.LasLoadResult? = TerrainStageProfiler.stage("grid", decoderLabel) {
+        rasterizer.finish(
+            pointFormat = header.pointFormat,
+            sourceLabel = "LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat} $decoderLabel",
+        )
+    }
+
+    /**
+     * laz-rs JNI path: one packed buffer, then the same [LidarRasterizer] hot path.
+     * Falls back to laszip4j when the .so is missing or the decode returns no points.
+     */
+    private fun readNativePacked(
+        file: File,
+        options: LidarImportOptions,
+        shouldContinue: () -> Boolean,
+    ): DemGenerator.LasLoadResult? {
+        if (!LazRsNativeDecoder.isAvailable) return null
+        val probe = SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) ?: return null
+        val header: Header
+        val pointCount: Long
+        probe.use { reader ->
+            val sourceHeader = reader.header
+            pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
+                ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL)
+            header = Header(
+                versionMajor = sourceHeader.version_major.toInt() and 0xFF,
+                versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
+                pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
+                pointCount = pointCount,
+                scaleX = sourceHeader.x_scale_factor,
+                scaleY = sourceHeader.y_scale_factor,
+                scaleZ = sourceHeader.z_scale_factor,
+                offsetX = sourceHeader.x_offset,
+                offsetY = sourceHeader.y_offset,
+                offsetZ = sourceHeader.z_offset,
+                maxX = sourceHeader.max_x,
+                minX = sourceHeader.min_x,
+                maxY = sourceHeader.max_y,
+                minY = sourceHeader.min_y,
+            )
+        }
+        if (pointCount <= 0L || pointCount > Int.MAX_VALUE.toLong()) return null
+        val packed = PackedPointRasterizer.allocate(pointCount.toInt())
+        val decoded = LazRsNativeDecoder.decodePacked(file, packed)
+        if (decoded <= 0) return null
+        val rasterizer = newRasterizer(header, options, pointCount)
+        PackedPointRasterizer.addAll(rasterizer, packed, decoded, shouldContinue)
+        return finish(rasterizer, header, "laz-rs packed JNI")
+    }
 
     private fun applyFocus(reader: LASreaderLAS, header: Header, focus: NormalizedRasterBounds) {
         val rangeX = header.maxX - header.minX

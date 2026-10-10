@@ -167,7 +167,7 @@ class TerrainSpatialGridIndex private constructor(
 
     companion object {
         fun build(grid: ElevationGrid, tileSize: Int = 64): TerrainSpatialGridIndex {
-            require(tileSize in 16..256)
+            require(tileSize in 16..1024)
             val columns = ceil(grid.width / tileSize.toDouble()).toInt()
             val rows = ceil(grid.height / tileSize.toDouble()).toInt()
             val tiles = ArrayList<TerrainSpatialTile>(columns * rows)

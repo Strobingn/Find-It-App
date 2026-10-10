@@ -1,0 +1,17 @@
+[package]
+name = "lazrs_jni"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Optional Android JNI decoder: laz-rs (via the las crate) into a packed xyz buffer."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+las = { version = "0.9", features = ["laz"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
