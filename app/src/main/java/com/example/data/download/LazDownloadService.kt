@@ -12,7 +12,6 @@ import android.os.Build
 import android.os.IBinder
 import com.example.MainActivity
 import com.example.data.LazDownloadManager
-import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -90,8 +89,14 @@ class LazDownloadService : Service() {
             val file = downloader.download(
                 sourceUrl = task.url,
                 destinationDirectory = LazDownloadQueue.store(this).directory,
-                progress = { downloaded, total ->
-                    LazDownloadQueue.markProgress(task.url, downloaded, total)
+                progress = { transfer ->
+                    LazDownloadQueue.markProgress(
+                        url = task.url,
+                        downloaded = transfer.downloadedBytes,
+                        total = transfer.totalBytes,
+                        bytesPerSecond = transfer.bytesPerSecond,
+                        etaSeconds = transfer.etaSeconds,
+                    )
                     // The transfer reports every few megabytes; throttle the notification so a
                     // fast connection does not spend its time posting updates.
                     val now = System.currentTimeMillis()
@@ -101,6 +106,7 @@ class LazDownloadService : Service() {
                     }
                 },
                 shouldContinue = { !LazDownloadQueue.isCancelled(task.url) },
+                onCopcDetected = { LazDownloadQueue.markStreamable(task.url) },
             )
             // Recorded before the task is marked done, so anything reacting to completion already
             // sees the provenance and can reuse this file instead of fetching it again.
@@ -179,12 +185,7 @@ class LazDownloadService : Service() {
     private fun progressText(task: LazDownloadTask?, remaining: Int): String {
         val queued = if (remaining > 1) " · ${remaining - 1} more queued" else ""
         if (task == null) return "Preparing…$queued"
-        val fraction = task.fraction
-        return if (fraction != null) {
-            "${(fraction * 100).toInt()}% of ${formatBytes(task.totalBytes)}$queued"
-        } else {
-            "${formatBytes(task.downloadedBytes)} downloaded$queued"
-        }
+        return task.statusLine() + queued
     }
 
     private fun notify(notification: Notification) {
@@ -242,13 +243,6 @@ class LazDownloadService : Service() {
                         .putExtra(EXTRA_URL, url),
                 )
             }
-        }
-
-        private fun formatBytes(bytes: Long): String = when {
-            bytes <= 0L -> "unknown size"
-            bytes >= 1L shl 30 -> String.format(Locale.US, "%.2f GB", bytes.toDouble() / (1L shl 30))
-            bytes >= 1L shl 20 -> String.format(Locale.US, "%.0f MB", bytes.toDouble() / (1L shl 20))
-            else -> String.format(Locale.US, "%.0f KB", bytes.toDouble() / 1024.0)
         }
     }
 }

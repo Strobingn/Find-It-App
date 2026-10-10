@@ -20,7 +20,7 @@ import org.json.JSONObject
  * cached by the caller and downloaded through the existing LazImportRepository.
  */
 class NysHistoricLazTileCatalog(
-    private val httpClient: OkHttpClient = OkHttpClient(),
+    private val httpClient: OkHttpClient = LazHttp.shared,
 ) {
     data class Tile(
         val objectId: Long,

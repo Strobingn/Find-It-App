@@ -1,379 +1,538 @@
 package com.example.data
 
-import java.io.EOFException
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.net.HttpURLConnection
+import java.io.InputStream
+import java.io.RandomAccessFile
 import java.net.InetAddress
-import java.net.SocketException
-import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.Locale
-import java.util.concurrent.CancellationException
-import kotlin.math.min
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import okhttp3.Call
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
 
-/**
- * Downloads LAZ/LAS files into persistent app storage.
- *
- * Bytes are streamed directly to a resumable temporary file and atomically promoted only after the
- * complete download succeeds, so multi-gigabyte datasets never need to fit in the app heap. Large
- * NYS/USGS transfers occasionally close a mobile socket mid-stream; retryable failures retain the
- * partial bytes and continue with an HTTP Range request instead of discarding the whole download.
- */
-class LazDownloadManager {
-
-    companion object {
-        const val MAX_IMPORT_BYTES: Long = 10L * 1024L * 1024L * 1024L
-        private const val MAX_REDIRECTS = 5
-        private const val MAX_ATTEMPTS = 5
-        private const val HTTP_RANGE_NOT_SATISFIABLE = 416
-        private const val CONNECT_TIMEOUT_MS = 30_000
-        private const val READ_TIMEOUT_MS = 120_000
-        private const val BUFFER_BYTES = 1024 * 1024
-        private const val PROGRESS_STEP_BYTES = 4L * 1024L * 1024L
-        private const val RETRY_BASE_DELAY_MS = 1_000L
-        private const val RETRY_MAX_DELAY_MS = 8_000L
-
-        /** Shared by LAS and LAZ; LAZ is LAS with compressed point data. */
-        private val LIDAR_SIGNATURE = "LASF".toByteArray(Charsets.US_ASCII)
-    }
+class LazDownloadManager(
+    httpClient: OkHttpClient = LazHttp.shared,
+    private val allowPrivateHosts: Boolean = false,
+    private val maxParallelSegments: Int = DEFAULT_MAX_PARALLEL_SEGMENTS,
+    private val minParallelBytes: Long = MIN_PARALLEL_BYTES,
+    private val targetSegmentBytes: Long = TARGET_SEGMENT_BYTES,
+) {
+    private val http: OkHttpClient = httpClient.newBuilder()
+        .addNetworkInterceptor { chain ->
+            if (!allowPrivateHosts) {
+                validateRemoteUrl(chain.request().url.toUrl())
+            }
+            val request = chain.request().newBuilder()
+                .header("User-Agent", LazHttp.USER_AGENT)
+                .header("Accept", "application/octet-stream,*/*")
+                .header("Accept-Encoding", "identity")
+                .build()
+            chain.proceed(request)
+        }
+        .build()
 
     fun download(
         sourceUrl: String,
         destinationDirectory: File,
-        progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null,
-        shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+        progress: (LazTransferProgress) -> Unit = {},
+        shouldContinue: () -> Boolean = { true },
+        onCopcDetected: () -> Unit = {},
     ): File {
+        val source = URL(sourceUrl.trim())
+        if (!allowPrivateHosts) validateRemoteUrl(source)
         destinationDirectory.mkdirs()
-        require(destinationDirectory.isDirectory) { "Unable to create LAZ storage directory" }
+        val destination = File(destinationDirectory, uniqueFileName(source))
+        if (destination.exists() && destination.length() > 0L) {
+            validatePointCloudSignature(destination)
+            progress(LazTransferProgress(destination.length(), destination.length()))
+            if (LazDownloadMirrors.looksLikeCopcUrl(sourceUrl)) onCopcDetected()
+            return destination
+        }
 
-        val originalUrl = validateRemoteUrl(URL(sourceUrl.trim()))
-        var destination: File? = runCatching {
-            val urlName = originalUrl.path.substringAfterLast('/').ifBlank { "lidar-download.laz" }
-            uniqueDestination(destinationDirectory, sanitizeAndValidateName(urlName))
-        }.getOrNull()
-        var partial: File? = destination?.let { File(destinationDirectory, ".${it.name}.part") }
-        var expectedTotal = -1L
-        var lastFailure: Throwable? = null
+        val chosenUrl = pickFastestMirror(sourceUrl)
+        if (LazDownloadMirrors.looksLikeCopcUrl(chosenUrl) || LazDownloadMirrors.looksLikeCopcUrl(sourceUrl)) {
+            onCopcDetected()
+        }
 
-        repeat(MAX_ATTEMPTS) { attempt ->
-            if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
+        val partial = File(destinationDirectory, "${destination.name}.part")
+        val probe = probe(chosenUrl)
+        val resumeFrom = if (partial.exists()) partial.length() else 0L
+        val file = when {
+            // A leftover single-stream .part is cheaper to finish than to throw away for
+            // parallel segments that would re-fetch those bytes.
+            resumeFrom > 0L && (probe.totalBytes < 0L || resumeFrom < probe.totalBytes) ->
+                downloadSingle(chosenUrl, destination, partial, resumeFrom, probe.totalBytes, progress, shouldContinue)
+            probe.supportsRanges &&
+                probe.totalBytes >= minParallelBytes &&
+                maxParallelSegments > 1 ->
+                downloadParallelOrSingle(chosenUrl, destination, partial, probe.totalBytes, progress, shouldContinue)
+            else ->
+                downloadSingle(chosenUrl, destination, partial, 0L, probe.totalBytes, progress, shouldContinue)
+        }
+        if (looksLikeCopcFile(file)) onCopcDetected()
+        return file
+    }
 
-            var connection: HttpURLConnection? = null
-            try {
-                val existingBytes = partial?.takeIf(File::isFile)?.length()?.coerceAtLeast(0L) ?: 0L
-                val opened = openFollowingRedirects(originalUrl, existingBytes)
-                connection = opened.connection
-                val status = opened.status
+    private fun downloadParallelOrSingle(
+        sourceUrl: String,
+        destination: File,
+        partial: File,
+        totalBytes: Long,
+        progress: (LazTransferProgress) -> Unit,
+        shouldContinue: () -> Boolean,
+    ): File = try {
+        downloadParallel(sourceUrl, destination, partial, totalBytes, progress, shouldContinue)
+    } catch (cancelled: DownloadCancelledException) {
+        throw cancelled
+    } catch (_: Exception) {
+        val resumeFrom = if (partial.exists()) partial.length() else 0L
+        downloadSingle(sourceUrl, destination, partial, resumeFrom, totalBytes, progress, shouldContinue)
+    }
 
-                if (status == HTTP_RANGE_NOT_SATISFIABLE) {
-                    val serverLength = parseUnsatisfiedRangeTotal(connection.getHeaderField("Content-Range"))
-                    val completedPartial = partial
-                    val completedDestination = destination
-                    if (existingBytes > 0L && serverLength == existingBytes &&
-                        completedPartial != null && completedDestination != null
-                    ) {
-                        // Same gate as the streaming path: a retained partial holding the wrong
-                        // payload must not be promoted just because its length matches.
-                        validatePointCloudSignature(completedPartial)
-                        promote(completedPartial, completedDestination)
-                        progress?.invoke(existingBytes, existingBytes)
-                        return completedDestination
-                    }
-                    completedPartial?.delete()
-                    throw RetryableHttpException(status, "Server rejected the saved download range")
-                }
+    fun validatePointCloudSignature(file: File) {
+        val header = ByteArray(LAS_SIGNATURE.size)
+        val read = file.inputStream().use { input -> input.read(header) }
+        if (read < LAS_SIGNATURE.size || !header.contentEquals(LAS_SIGNATURE)) {
+            file.delete()
+            throw IllegalStateException(
+                "Downloaded file is not a LAS/LAZ point cloud (missing LASF signature). " +
+                    "The server likely returned an HTML error page.",
+            )
+        }
+    }
 
-                if (status == 408 || status == 425 || status == 429 || status in 500..599) {
-                    throw RetryableHttpException(status, "Temporary download server error HTTP $status")
-                }
-                check(status == HttpURLConnection.HTTP_OK || status == HttpURLConnection.HTTP_PARTIAL) {
-                    "Server returned HTTP $status"
-                }
+    internal fun planSegments(totalBytes: Long, maxSegments: Int = maxParallelSegments): List<ByteRange> {
+        require(totalBytes > 0L)
+        val count = segmentCount(totalBytes, maxSegments)
+        val size = totalBytes / count
+        return (0 until count).map { index ->
+            val start = index * size
+            val endInclusive = if (index == count - 1) totalBytes - 1L else start + size - 1L
+            ByteRange(index, start, endInclusive)
+        }
+    }
 
-                if (destination == null || partial == null) {
-                    val responseName = contentDispositionFileName(connection.getHeaderField("Content-Disposition"))
-                    val urlName = opened.url.path.substringAfterLast('/').ifBlank { "lidar-download.laz" }
-                    val finalName = sanitizeAndValidateName(responseName ?: urlName)
-                    destination = uniqueDestination(destinationDirectory, finalName)
-                    partial = File(destinationDirectory, ".${requireNotNull(destination).name}.part")
-                }
-
-                val target = requireNotNull(destination)
-                val workingFile = requireNotNull(partial)
-                var resumeFrom = workingFile.takeIf(File::isFile)?.length()?.coerceAtLeast(0L) ?: 0L
-                var append = status == HttpURLConnection.HTTP_PARTIAL && resumeFrom > 0L
-
-                if (status == HttpURLConnection.HTTP_PARTIAL) {
-                    val range = parseContentRange(connection.getHeaderField("Content-Range"))
-                        ?: throw IOException("Partial response had no valid Content-Range")
-                    if (range.start != resumeFrom) {
-                        workingFile.delete()
-                        throw RetryableHttpException(
-                            status,
-                            "Server resumed at byte ${range.start}, expected $resumeFrom",
-                        )
-                    }
-                    expectedTotal = range.total
-                } else {
-                    // Some servers ignore Range and return a complete 200 response. Restart this
-                    // attempt from byte zero rather than appending a second copy to the partial file.
-                    if (resumeFrom > 0L) {
-                        FileOutputStream(workingFile, false).use { }
-                        resumeFrom = 0L
-                    }
-                    append = false
-                    expectedTotal = connection.contentLengthLong
-                }
-
-                check(expectedTotal <= 0L || expectedTotal <= MAX_IMPORT_BYTES) {
-                    "LAZ file exceeds the 10 GB import limit"
-                }
-
-                var downloaded = resumeFrom
-                var lastReported = downloaded
-                progress?.invoke(downloaded, expectedTotal)
-
-                connection.inputStream.use { rawInput ->
-                    rawInput.buffered(BUFFER_BYTES).use { input ->
-                        FileOutputStream(workingFile, append).buffered(BUFFER_BYTES).use { output ->
-                            val buffer = ByteArray(BUFFER_BYTES)
-                            while (true) {
-                                if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                if (count == 0) continue
-
-                                downloaded += count
-                                check(downloaded <= MAX_IMPORT_BYTES) {
-                                    "LAZ file exceeds the 10 GB import limit"
-                                }
-                                output.write(buffer, 0, count)
-
-                                if (downloaded - lastReported >= PROGRESS_STEP_BYTES) {
-                                    lastReported = downloaded
-                                    progress?.invoke(downloaded, expectedTotal)
-                                }
-                            }
-                            output.flush()
-                        }
+    internal fun pickFastestMirror(sourceUrl: String): String {
+        val candidates = LazDownloadMirrors.candidates(sourceUrl)
+        if (candidates.size == 1) return candidates.first()
+        val probeClient = http.newBuilder()
+            .callTimeout(MIRROR_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .connectTimeout(MIRROR_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(MIRROR_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
+        val executor = Executors.newFixedThreadPool(candidates.size)
+        val completion = ExecutorCompletionService<String>(executor)
+        try {
+            candidates.forEach { candidate ->
+                completion.submit {
+                    val request = Request.Builder()
+                        .url(candidate)
+                        .header("Range", "bytes=0-0")
+                        .build()
+                    probeClient.newCall(request).execute().use { response ->
+                        if (response.code == 200 || response.code == 206) candidate
+                        else throw IOException("mirror probe HTTP ${response.code}")
                     }
                 }
+            }
+            repeat(candidates.size) {
+                val winner = runCatching { completion.take().get() }.getOrNull()
+                if (winner != null) return winner
+            }
+        } catch (_: Exception) {
+            // Fall through to the original listing URL.
+        } finally {
+            executor.shutdownNow()
+        }
+        return sourceUrl
+    }
 
-                if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
-                check(downloaded > 0L) { "Downloaded file was empty" }
-                if (expectedTotal > 0L && downloaded < expectedTotal) {
-                    throw EOFException("Connection ended at $downloaded of $expectedTotal bytes")
-                }
-                if (expectedTotal > 0L && downloaded > expectedTotal) {
-                    workingFile.delete()
-                    error("Downloaded more data than the server declared")
-                }
-                validatePointCloudSignature(workingFile)
-
-                promote(workingFile, target)
-                progress?.invoke(downloaded, if (expectedTotal > 0L) expectedTotal else downloaded)
-                return target
-            } catch (cancelled: CancellationException) {
-                // Deliberately retain the .part file. A later tap resumes instead of starting over.
-                throw cancelled
-            } catch (failure: Throwable) {
-                lastFailure = failure
-                val canRetry = attempt < MAX_ATTEMPTS - 1 && isRetryable(failure)
-                if (!canRetry) {
-                    val retained = partial?.takeIf(File::isFile)?.length() ?: 0L
-                    val suffix = if (retained > 0L) {
-                        " ($retained bytes saved; tap again to resume)"
-                    } else {
-                        ""
+    private fun downloadParallel(
+        sourceUrl: String,
+        destination: File,
+        partial: File,
+        totalBytes: Long,
+        progress: (LazTransferProgress) -> Unit,
+        shouldContinue: () -> Boolean,
+    ): File {
+        if (totalBytes > MAX_IMPORT_BYTES) {
+            throw IllegalStateException("Remote LAS/LAZ exceeds the ${MAX_IMPORT_BYTES / (1024 * 1024)} MB import limit")
+        }
+        val partsDir = File(destination.parentFile, "${destination.name}.parts")
+        partsDir.mkdirs()
+        val segments = planSegments(totalBytes)
+        val alreadyHave = segments.sumOf { segmentFile(partsDir, it).length().coerceAtMost(it.size) }
+        val downloaded = AtomicLong(alreadyHave)
+        val ticker = ProgressTicker(progress)
+        ticker.emit(downloaded.get(), totalBytes)
+        val failed = AtomicBoolean(false)
+        val calls = ConcurrentLinkedQueue<Call>()
+        val workers = Executors.newFixedThreadPool(segments.size.coerceAtMost(maxParallelSegments))
+        try {
+            val futures = segments.map { segment ->
+                workers.submit(Callable {
+                    downloadSegment(
+                        sourceUrl = sourceUrl,
+                        partsDir = partsDir,
+                        segment = segment,
+                        downloaded = downloaded,
+                        totalBytes = totalBytes,
+                        ticker = ticker,
+                        shouldContinue = shouldContinue,
+                        failed = failed,
+                        calls = calls,
+                    )
+                })
+            }
+            var firstError: Exception? = null
+            futures.forEach { future ->
+                try {
+                    future.get()
+                } catch (error: Exception) {
+                    failed.set(true)
+                    calls.forEach { it.cancel() }
+                    if (error.cause is DownloadCancelledException || error is DownloadCancelledException) {
+                        throw DownloadCancelledException()
                     }
-                    throw IOException(
-                        (failure.localizedMessage ?: "LAZ download failed") + suffix,
-                        failure,
+                    if (firstError == null) firstError = unwrap(error)
+                }
+            }
+            firstError?.let { throw it }
+            assembleSegments(partsDir, segments, partial)
+            return promote(partial, destination, totalBytes, progress)
+        } finally {
+            workers.shutdownNow()
+            partsDir.deleteRecursively()
+        }
+    }
+
+    private fun downloadSegment(
+        sourceUrl: String,
+        partsDir: File,
+        segment: ByteRange,
+        downloaded: AtomicLong,
+        totalBytes: Long,
+        ticker: ProgressTicker,
+        shouldContinue: () -> Boolean,
+        failed: AtomicBoolean,
+        calls: ConcurrentLinkedQueue<Call>,
+    ) {
+        val file = segmentFile(partsDir, segment)
+        val already = file.length().coerceAtMost(segment.size)
+        if (already == segment.size) return
+        val start = segment.start + already
+        val request = Request.Builder()
+            .url(sourceUrl)
+            .header("Range", "bytes=$start-${segment.endInclusive}")
+            .build()
+        val call = http.newCall(request)
+        calls.add(call)
+        try {
+            call.execute().use { response ->
+                if (failed.get() || !shouldContinue()) throw DownloadCancelledException()
+                when (response.code) {
+                    206 -> Unit
+                    200 -> throw IOException("Server ignored the Range header; falling back to a single stream")
+                    else -> throw IOException("Segment HTTP ${response.code} for bytes=$start-${segment.endInclusive}")
+                }
+                val body = response.body ?: throw IOException("Empty segment body")
+                FileOutputStream(file, already > 0L).use { output ->
+                    copyStream(
+                        input = body.byteStream(),
+                        output = output,
+                        expectedRemaining = segment.size - already,
+                        downloaded = downloaded,
+                        totalBytes = totalBytes,
+                        ticker = ticker,
+                        shouldContinue = { shouldContinue() && !failed.get() },
                     )
                 }
-                progress?.invoke(partial?.takeIf(File::isFile)?.length() ?: 0L, expectedTotal)
-                waitForRetry(attempt, shouldContinue)
-            } finally {
-                connection?.disconnect()
             }
+        } finally {
+            calls.remove(call)
         }
-
-        throw IOException(lastFailure?.localizedMessage ?: "LAZ download failed", lastFailure)
+        if (file.length() != segment.size) {
+            throw IOException("Segment ${segment.index} ended at ${file.length()} bytes, expected ${segment.size}")
+        }
     }
 
-    private fun openFollowingRedirects(source: URL, resumeFrom: Long): OpenedConnection {
-        var currentUrl = source
-        var redirects = 0
+    private fun downloadSingle(
+        sourceUrl: String,
+        destination: File,
+        partial: File,
+        resumeFrom: Long,
+        knownTotal: Long,
+        progress: (LazTransferProgress) -> Unit,
+        shouldContinue: () -> Boolean,
+    ): File {
+        if (resumeFrom > MAX_IMPORT_BYTES) {
+            throw IllegalStateException("Remote LAS/LAZ exceeds the ${MAX_IMPORT_BYTES / (1024 * 1024)} MB import limit")
+        }
+        val requestBuilder = Request.Builder().url(sourceUrl)
+        if (resumeFrom > 0L) requestBuilder.header("Range", "bytes=$resumeFrom-")
+        http.newCall(requestBuilder.build()).execute().use { response ->
+            if (!shouldContinue()) throw DownloadCancelledException()
+            val acceptedResume = resumeFrom > 0L && response.code == 206
+            if (resumeFrom > 0L && !acceptedResume && response.code != 200) {
+                throw IOException("Resume failed with HTTP ${response.code}")
+            }
+            if (response.code !in 200..206) {
+                throw IOException("Download failed with HTTP ${response.code}")
+            }
+            if (resumeFrom > 0L && response.code == 200) {
+                partial.delete()
+            }
+            val body = response.body ?: throw IOException("Empty download body")
+            val total = resolveTotal(response, if (acceptedResume) resumeFrom else 0L, knownTotal)
+            if (total > MAX_IMPORT_BYTES) {
+                throw IllegalStateException("Remote LAS/LAZ exceeds the ${MAX_IMPORT_BYTES / (1024 * 1024)} MB import limit")
+            }
+            val downloaded = AtomicLong(if (acceptedResume) resumeFrom else 0L)
+            val ticker = ProgressTicker(progress)
+            ticker.emit(downloaded.get(), total)
+            FileOutputStream(partial, acceptedResume).use { output ->
+                copyStream(
+                    input = body.byteStream(),
+                    output = output,
+                    expectedRemaining = if (total > 0L) total - downloaded.get() else -1L,
+                    downloaded = downloaded,
+                    totalBytes = total,
+                    ticker = ticker,
+                    shouldContinue = shouldContinue,
+                )
+            }
+            return promote(partial, destination, total, progress)
+        }
+    }
+
+    private fun copyStream(
+        input: InputStream,
+        output: FileOutputStream,
+        expectedRemaining: Long,
+        downloaded: AtomicLong,
+        totalBytes: Long,
+        ticker: ProgressTicker,
+        shouldContinue: () -> Boolean,
+    ) {
+        val buffer = ByteArray(STREAM_BUFFER_BYTES)
+        var remaining = expectedRemaining
         while (true) {
-            val connection = (currentUrl.openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
-                requestMethod = "GET"
-                useCaches = false
-                setRequestProperty("User-Agent", "Find-It-Android/1.0")
-                setRequestProperty("Accept", "application/octet-stream,*/*")
-                setRequestProperty("Accept-Encoding", "identity")
-                if (resumeFrom > 0L) setRequestProperty("Range", "bytes=$resumeFrom-")
+            if (!shouldContinue()) throw DownloadCancelledException()
+            val limit = when {
+                remaining < 0L -> buffer.size
+                remaining == 0L -> break
+                else -> minOf(buffer.size.toLong(), remaining).toInt()
             }
-            val status = connection.responseCode
-            if (status !in 300..399) return OpenedConnection(currentUrl, connection, status)
+            val read = input.read(buffer, 0, limit)
+            if (read < 0) break
+            output.write(buffer, 0, read)
+            val now = downloaded.addAndGet(read.toLong())
+            if (now > MAX_IMPORT_BYTES) {
+                throw IllegalStateException("Remote LAS/LAZ exceeds the ${MAX_IMPORT_BYTES / (1024 * 1024)} MB import limit")
+            }
+            if (remaining > 0L) remaining -= read.toLong()
+            ticker.maybeEmit(now, totalBytes)
+        }
+        output.fd.sync()
+        ticker.emit(downloaded.get(), totalBytes)
+    }
 
-            if (redirects++ >= MAX_REDIRECTS) {
-                connection.disconnect()
-                error("Too many redirects")
+    private fun assembleSegments(partsDir: File, segments: List<ByteRange>, partial: File) {
+        FileOutputStream(partial).use { output ->
+            val channel = output.channel
+            var position = 0L
+            segments.forEach { segment ->
+                val file = segmentFile(partsDir, segment)
+                file.inputStream().channel.use { input ->
+                    var remaining = file.length()
+                    var offset = 0L
+                    while (remaining > 0L) {
+                        val copied = channel.transferFrom(input, position + offset, remaining)
+                        if (copied <= 0L) throw IOException("Failed to assemble segment ${segment.index}")
+                        remaining -= copied
+                        offset += copied
+                    }
+                }
+                position += file.length()
             }
-            val location = connection.getHeaderField("Location")
-            connection.disconnect()
-            require(!location.isNullOrBlank()) { "Redirect had no destination" }
-            currentUrl = validateRemoteUrl(URL(currentUrl, location))
+            output.fd.sync()
         }
     }
 
-    private fun waitForRetry(attempt: Int, shouldContinue: () -> Boolean) {
-        val delayMillis = min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS shl attempt.coerceAtMost(3))
-        var remaining = delayMillis
-        while (remaining > 0L) {
-            if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
-            val step = min(250L, remaining)
-            Thread.sleep(step)
-            remaining -= step
+    private fun promote(
+        partial: File,
+        destination: File,
+        expectedTotal: Long,
+        progress: (LazTransferProgress) -> Unit,
+    ): File {
+        if (expectedTotal > 0L && partial.length() != expectedTotal) {
+            throw IOException("Download ended at ${partial.length()} bytes, expected $expectedTotal")
         }
-    }
-
-    private fun isRetryable(error: Throwable): Boolean = when (error) {
-        is RetryableHttpException,
-        is SocketTimeoutException,
-        is SocketException,
-        is EOFException,
-        is IOException,
-        -> true
-        else -> false
-    }
-
-    /**
-     * Rejects a completed transfer whose bytes are not a point cloud.
-     *
-     * Size checks alone pass a payload that is the wrong thing entirely — typically an HTML error
-     * or maintenance page served with 200 and an honest Content-Length. Without this the file is
-     * promoted, stored, and counted as a tile, and the mistake only surfaces much later when the
-     * decoder rejects it, potentially after fetching the rest of a large mosaic around it.
-     *
-     * LAZ is LAS with compressed point data, so both carry the same signature.
-     */
-    internal fun validatePointCloudSignature(file: File) {
-        val signature = ByteArray(LIDAR_SIGNATURE.size)
-        val read = FileInputStream(file).use { it.read(signature) }
-        if (read == LIDAR_SIGNATURE.size && signature.contentEquals(LIDAR_SIGNATURE)) return
-        // Resuming a wrong payload would only ever append more of the wrong file, so drop it and
-        // let a retry start the transfer cleanly.
-        file.delete()
-        error("Downloaded file is not a LAS/LAZ point cloud")
-    }
-
-    private fun promote(partial: File, destination: File) {
+        validatePointCloudSignature(partial)
+        if (destination.exists()) destination.delete()
         if (!partial.renameTo(destination)) {
-            partial.copyTo(destination, overwrite = false)
+            partial.copyTo(destination, overwrite = true)
             partial.delete()
         }
+        progress(LazTransferProgress(destination.length(), destination.length()))
+        return destination
     }
 
-    private fun parseContentRange(header: String?): ContentRange? {
-        if (header.isNullOrBlank()) return null
-        val match = Regex("bytes\\s+(\\d+)-(\\d+)/(\\d+)", RegexOption.IGNORE_CASE)
-            .find(header.trim()) ?: return null
-        val start = match.groupValues[1].toLongOrNull() ?: return null
-        val end = match.groupValues[2].toLongOrNull() ?: return null
-        val total = match.groupValues[3].toLongOrNull() ?: return null
-        if (start < 0L || end < start || total <= end) return null
-        return ContentRange(start, end, total)
-    }
-
-    private fun parseUnsatisfiedRangeTotal(header: String?): Long? {
-        if (header.isNullOrBlank()) return null
-        return Regex("bytes\\s+\\*/(\\d+)", RegexOption.IGNORE_CASE)
-            .find(header.trim())
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toLongOrNull()
-    }
-
-    private fun sanitizeAndValidateName(rawName: String): String {
-        val stripped = rawName.substringAfterLast('/').substringBefore('?').trim(' ', '"', '\'')
-        val safe = stripped.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "lidar-download.laz" }
-        val extension = safe.substringAfterLast('.', "").lowercase(Locale.US)
-        require(extension == "laz" || extension == "las") {
-            "The URL must resolve to a direct LAZ or LAS file"
+    private fun probe(sourceUrl: String): Probe {
+        val head = Request.Builder().url(sourceUrl).head().build()
+        runCatching {
+            http.newCall(head).execute().use { response ->
+                if (response.isSuccessful) {
+                    val total = contentLengthOf(response)
+                    val ranges = acceptsRanges(response) && total >= minParallelBytes
+                    if (total > 0L) return Probe(total, ranges)
+                }
+            }
         }
-        return safe
-    }
-
-    private fun uniqueDestination(directory: File, requestedName: String): File {
-        val first = File(directory, requestedName)
-        if (!first.exists()) return first
-
-        val extension = requestedName.substringAfterLast('.', "")
-        val base = requestedName.removeSuffix(if (extension.isBlank()) "" else ".$extension")
-        var index = 2
-        while (true) {
-            val candidate = File(directory, "$base-$index.$extension")
-            if (!candidate.exists()) return candidate
-            index++
+        val range = Request.Builder().url(sourceUrl).header("Range", "bytes=0-0").build()
+        return http.newCall(range).execute().use { response ->
+            when (response.code) {
+                206 -> Probe(contentRangeTotal(response) ?: contentLengthOf(response), true)
+                200 -> Probe(contentLengthOf(response), false)
+                else -> Probe(-1L, false)
+            }
         }
     }
 
-    private fun contentDispositionFileName(header: String?): String? {
-        if (header.isNullOrBlank()) return null
-        val encoded = Regex("filename\\*=UTF-8''([^;]+)", RegexOption.IGNORE_CASE)
-            .find(header)
-            ?.groupValues
-            ?.getOrNull(1)
-        if (!encoded.isNullOrBlank()) return java.net.URLDecoder.decode(encoded, Charsets.UTF_8.name())
-
-        return Regex("filename=\\\"?([^;\\\"]+)", RegexOption.IGNORE_CASE)
-            .find(header)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.trim()
+    private fun resolveTotal(response: Response, resumeFrom: Long, knownTotal: Long): Long {
+        contentRangeTotal(response)?.let { return it }
+        val length = contentLengthOf(response)
+        return when {
+            knownTotal > 0L -> knownTotal
+            length > 0L && resumeFrom > 0L -> resumeFrom + length
+            length > 0L -> length
+            else -> -1L
+        }
     }
 
-    private fun validateRemoteUrl(url: URL): URL {
-        require(url.protocol.equals("https", ignoreCase = true)) { "Only HTTPS downloads are allowed" }
-        require(url.userInfo == null) { "URLs containing credentials are not allowed" }
-        val host = url.host.lowercase(Locale.US)
-        require(host.isNotBlank() && host != "localhost" && !host.endsWith(".localhost")) {
-            "Invalid download host"
-        }
-        InetAddress.getAllByName(host).forEach { address ->
-            val bytes = address.address
-            val uniqueLocalV6 = bytes.size == 16 && (bytes[0].toInt() and 0xFE) == 0xFC
-            require(
-                !address.isAnyLocalAddress &&
-                    !address.isLoopbackAddress &&
-                    !address.isLinkLocalAddress &&
-                    !address.isSiteLocalAddress &&
-                    !address.isMulticastAddress &&
-                    !uniqueLocalV6,
-            ) { "Private and local network downloads are blocked" }
-        }
-        return url
+    private fun contentLengthOf(response: Response): Long {
+        val header = response.header("Content-Length")?.toLongOrNull() ?: -1L
+        val body = response.body?.contentLength() ?: -1L
+        return maxOf(header, body)
     }
 
-    private data class OpenedConnection(
-        val url: URL,
-        val connection: HttpURLConnection,
-        val status: Int,
-    )
+    private fun contentRangeTotal(response: Response): Long? {
+        val header = response.header("Content-Range") ?: return null
+        val total = header.substringAfter('/', missingDelimiterValue = "").trim()
+        return total.toLongOrNull()?.takeIf { it > 0L }
+    }
 
-    private data class ContentRange(
-        val start: Long,
-        val end: Long,
-        val total: Long,
-    )
+    private fun acceptsRanges(response: Response): Boolean {
+        val accept = response.header("Accept-Ranges").orEmpty()
+        return accept.contains("bytes", ignoreCase = true) || response.code == 206
+    }
 
-    private class RetryableHttpException(status: Int, message: String) :
-        IOException("$message (HTTP $status)")
+    private fun uniqueFileName(source: URL): String {
+        val raw = source.path.substringAfterLast('/').ifBlank { "remote-lidar.laz" }
+        val cleaned = raw.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val lower = cleaned.lowercase(Locale.US)
+        return when {
+            lower.endsWith(".laz") || lower.endsWith(".las") -> cleaned
+            else -> "$cleaned.laz"
+        }
+    }
+
+    private fun validateRemoteUrl(source: URL) {
+        require(source.protocol.equals("https", ignoreCase = true)) { "Only HTTPS LiDAR URLs are allowed" }
+        val host = source.host?.trim().orEmpty()
+        require(host.isNotBlank()) { "LiDAR URL is missing a host" }
+        val addresses = InetAddress.getAllByName(host)
+        require(addresses.isNotEmpty()) { "LiDAR host did not resolve" }
+        require(addresses.none { it.isAnyLocalAddress || it.isLoopbackAddress || it.isSiteLocalAddress || it.isLinkLocalAddress }) {
+            "LiDAR URL must not target a private or local address"
+        }
+    }
+
+    private fun looksLikeCopcFile(file: File): Boolean {
+        if (file.name.contains(".copc.", ignoreCase = true)) return true
+        if (file.length() < COPC_VLR_OFFSET + COPC_USER_ID.size) return false
+        return RandomAccessFile(file, "r").use { raf ->
+            raf.seek(COPC_VLR_OFFSET)
+            val userId = ByteArray(COPC_USER_ID.size)
+            raf.readFully(userId)
+            userId.contentEquals(COPC_USER_ID)
+        }
+    }
+
+    private fun unwrap(error: Exception): Exception {
+        var current: Throwable = error
+        while (current.cause is Exception) {
+            current = current.cause as Exception
+            if (current is DownloadCancelledException) return current
+        }
+        return (current as? Exception) ?: error
+    }
+
+    private fun segmentFile(partsDir: File, segment: ByteRange): File =
+        File(partsDir, "seg-${segment.index.toString().padStart(2, '0')}")
+
+    private fun segmentCount(totalBytes: Long, maxSegments: Int): Int {
+        if (totalBytes < minParallelBytes || maxSegments <= 1) return 1
+        val bySize = (totalBytes / targetSegmentBytes).toInt().coerceAtLeast(2)
+        return bySize.coerceAtMost(maxSegments)
+    }
+
+    private class ProgressTicker(
+        private val progress: (LazTransferProgress) -> Unit,
+    ) {
+        private val speed = LazSpeedWindow()
+        private val lastEmitMs = AtomicLong(0L)
+        private val lastEmitBytes = AtomicLong(0L)
+
+        fun maybeEmit(downloaded: Long, total: Long) {
+            val now = System.currentTimeMillis()
+            val previousBytes = lastEmitBytes.get()
+            val previousMs = lastEmitMs.get()
+            if (downloaded - previousBytes < PROGRESS_BYTE_INTERVAL && now - previousMs < PROGRESS_TIME_INTERVAL_MS) {
+                return
+            }
+            emit(downloaded, total, now)
+        }
+
+        fun emit(downloaded: Long, total: Long, now: Long = System.currentTimeMillis()) {
+            lastEmitBytes.set(downloaded)
+            lastEmitMs.set(now)
+            progress(speed.update(downloaded, total, now))
+        }
+    }
+
+    data class ByteRange(val index: Int, val start: Long, val endInclusive: Long) {
+        val size: Long get() = endInclusive - start + 1L
+    }
+
+    private data class Probe(val totalBytes: Long, val supportsRanges: Boolean)
+
+    private class DownloadCancelledException : IOException("Download cancelled")
+
+    companion object {
+        const val MAX_IMPORT_BYTES = 4L * 1024L * 1024L * 1024L
+        const val DEFAULT_MAX_PARALLEL_SEGMENTS = 6
+        internal const val MIN_PARALLEL_BYTES = 4L * 1024L * 1024L
+        internal const val TARGET_SEGMENT_BYTES = 8L * 1024L * 1024L
+        private const val STREAM_BUFFER_BYTES = 2 * 1024 * 1024
+        private const val PROGRESS_BYTE_INTERVAL = 256L * 1024L
+        private const val PROGRESS_TIME_INTERVAL_MS = 200L
+        private const val MIRROR_PROBE_TIMEOUT_SECONDS = 4L
+        private const val COPC_VLR_OFFSET = 375L
+        private val LAS_SIGNATURE = byteArrayOf(0x4C, 0x41, 0x53, 0x46)
+        private val COPC_USER_ID = byteArrayOf(
+            0x63, 0x6F, 0x70, 0x63, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        )
+    }
 }

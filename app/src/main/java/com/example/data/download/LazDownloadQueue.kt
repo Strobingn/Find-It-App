@@ -2,6 +2,7 @@ package com.example.data.download
 
 import android.content.Context
 import com.example.data.LazDatasetStore
+import com.example.data.LazTransferProgress
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +18,13 @@ data class LazDownloadTask(
     val state: LazDownloadState = LazDownloadState.QUEUED,
     val downloadedBytes: Long = 0L,
     val totalBytes: Long = -1L,
+    val bytesPerSecond: Long = 0L,
+    val etaSeconds: Long? = null,
+    /**
+     * True when the remote file is COPC, so the picker can start a range-stream decode
+     * while the full tile is still arriving for offline reuse.
+     */
+    val canStreamWhileDownloading: Boolean = false,
     /** Absolute path of the finished file, set only once [state] is COMPLETED. */
     val filePath: String? = null,
     val error: String? = null,
@@ -29,6 +37,11 @@ data class LazDownloadTask(
     /** Null when the server never declared a length, which some LiDAR hosts do not. */
     val fraction: Float?
         get() = if (totalBytes > 0L) (downloadedBytes.toFloat() / totalBytes).coerceIn(0f, 1f) else null
+
+    fun statusLine(): String = when (state) {
+        LazDownloadState.QUEUED -> "Waiting for the current download to finish"
+        else -> LazTransferProgress(downloadedBytes, totalBytes, bytesPerSecond, etaSeconds).statusLine()
+    }
 }
 
 /**
@@ -75,9 +88,22 @@ object LazDownloadQueue {
 
     fun markRunning(url: String) = update(url) { it.copy(state = LazDownloadState.RUNNING) }
 
-    fun markProgress(url: String, downloaded: Long, total: Long) = update(url) {
-        it.copy(downloadedBytes = downloaded, totalBytes = total)
+    fun markProgress(
+        url: String,
+        downloaded: Long,
+        total: Long,
+        bytesPerSecond: Long = 0L,
+        etaSeconds: Long? = null,
+    ) = update(url) {
+        it.copy(
+            downloadedBytes = downloaded,
+            totalBytes = total,
+            bytesPerSecond = bytesPerSecond,
+            etaSeconds = etaSeconds,
+        )
     }
+
+    fun markStreamable(url: String) = update(url) { it.copy(canStreamWhileDownloading = true) }
 
     fun markCompleted(url: String, file: File) = update(url) {
         it.copy(
@@ -85,6 +111,8 @@ object LazDownloadQueue {
             filePath = file.absolutePath,
             downloadedBytes = file.length(),
             totalBytes = file.length(),
+            bytesPerSecond = 0L,
+            etaSeconds = 0L,
             error = null,
         )
     }

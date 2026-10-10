@@ -14,7 +14,7 @@ class LazImportRepository(
     suspend fun importFromUrl(
         url: String,
         store: LazDatasetStore,
-        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+        onProgress: (LazTransferProgress) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
         require(isSupportedRemoteUrl(url)) { "Enter a direct HTTPS LAZ or LAS download URL" }
         val downloadContext = currentCoroutineContext()
