@@ -71,17 +71,22 @@ If the token is missing, the in-app updater says so. HTTP 401/403 shows **Update
 
 Releases stay in this private repo (the APK embeds API keys).
 
-## Keys that were in the public tree / BuildConfig
+## Secret audit (rotate if a public APK was ever shipped)
 
-These are still compiled into the APK (owner request: keep them). They were readable while the repo was public if a local.properties/.env ever landed in git or if CI injected them into a distributed APK. **Rotate them if they were ever committed or shipped in a public artifact:**
+No literal key material is in git. `.env.example` uses `YOUR_*` placeholders; `local.properties` / `.env` are gitignored. CI still **injects** these into `BuildConfig` and the manifest when the matching Actions secret is set, so anyone who downloaded a CI APK while the repo was public could extract them.
 
-- `OPENAI_API_KEY`
-- `OPENAI_PROXY_TOKEN`
-- `GEMINI_API_KEY`
-- `MAPS_API_KEY`
-- `SENTRY_DSN`
+| Field | Where it lands | Runtime alternative |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | `BuildConfig` | AI screen device vault (already preferred) |
+| `OPENAI_PROXY_TOKEN` / `PROXY_AUTH_TOKEN` | `BuildConfig` | same vault / proxy |
+| `GEMINI_API_KEY` | `BuildConfig` | AI screen “paste a key” (already preferred) |
+| `MAPS_API_KEY` | `BuildConfig` + manifest `com.google.android.geo.API_KEY` | Maps SDK reads the manifest at process start |
+| `SENTRY_DSN` | `BuildConfig` + manifest `io.sentry.dsn` | empty DSN disables Sentry |
+| `FINDIT_UPDATE_TOKEN` | `BuildConfig` (new) | required for private Releases API |
 
-Model/URL fields (`OPENAI_MODEL`, `OPENAI_BASE_URL`, `GEMINI_MODEL`) are not secrets but are also in BuildConfig.
+Also in BuildConfig (not secrets): `OPENAI_MODEL`, `OPENAI_BASE_URL`, `GEMINI_MODEL`.
+
+**Rotate** `OPENAI_API_KEY`, `OPENAI_PROXY_TOKEN`, `GEMINI_API_KEY`, `MAPS_API_KEY`, and `SENTRY_DSN` if any debug/release APK left this repo while it was public.
 
 ## When APKs build
 

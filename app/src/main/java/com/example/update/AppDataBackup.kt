@@ -31,6 +31,16 @@ object AppDataBackup {
             lidarDir?.listFiles()
                 ?.filter { it.isFile && it.extension.lowercase() in setOf("json", "txt", "idx") }
                 ?.forEach { putFile(zip, it, "lidar/${it.name}") }
+            val refs = lidarDir?.listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() in setOf("laz", "las") }
+                ?.sortedBy { it.name }
+                ?.joinToString("\n") { "${it.name}\t${it.length()}" }
+                .orEmpty()
+            if (refs.isNotBlank()) {
+                zip.putNextEntry(ZipEntry("lidar/imported-refs.txt"))
+                zip.write(refs.toByteArray())
+                zip.closeEntry()
+            }
         }
         return out.toByteArray()
     }

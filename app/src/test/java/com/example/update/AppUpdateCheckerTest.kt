@@ -119,6 +119,7 @@ class AppUpdateCheckerTest {
         val lidar = folder.newFolder("lidar")
         File(lidar, "library.json").writeText("""{"files":[]}""")
         File(lidar, "huge.laz").writeText("skip-me")
+        File(lidar, "site.las").writeText("also-skip")
         val zip = AppDataBackup.exportZip(db, prefs, historic, lidar)
         val outDb = folder.newFolder("out-db")
         val outPrefs = folder.newFolder("out-prefs")
@@ -131,5 +132,9 @@ class AppUpdateCheckerTest {
         assertEquals("""{"records":[]}""", File(outHist, "index.json").readText())
         assertEquals("""{"files":[]}""", File(outLidar, "library.json").readText())
         assertFalse(File(outLidar, "huge.laz").exists())
+        assertFalse(File(outLidar, "site.las").exists())
+        val refs = File(outLidar, "imported-refs.txt").readText()
+        assertTrue(refs.contains("huge.laz"))
+        assertTrue(refs.contains("site.las"))
     }
 }
