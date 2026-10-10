@@ -47,6 +47,8 @@ import com.example.data.TargetSignal
 import com.example.data.download.LazDownloadQueue
 import com.example.data.mosaic.MosaicStressSuite
 import com.example.data.export.ProjectArchiveImport
+import com.example.update.AppUpdateButtons
+import com.example.update.rememberAppUpdateController
 import com.example.data.export.QrSharePayload
 import com.example.data.field.BoundaryProximityLevel
 import com.example.data.field.FieldSessionStats
@@ -362,6 +364,7 @@ fun ToolsTab(
     val completedDigs = excavationLogs.count { it.isComplete }
     val savedLidarCount = remember(context) { LazDownloadQueue.store(context).list().size }
     val lidarFolderPath = remember(context) { LazDownloadQueue.store(context).directory.absolutePath }
+    val updateController = rememberAppUpdateController(checkOnLaunch = false)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(padding).testTag("tools_tab"),
@@ -374,6 +377,19 @@ fun ToolsTab(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        item {
+            ToolCard(
+                icon = Icons.Default.Sync,
+                title = "App updates",
+                status = updateController.status.ifBlank { "GitHub Releases · findit-v*" },
+                statusActive = updateController.available != null,
+                description = "Checks Strobingn/Find-It-App findit-v* releases, verifies sha256 and " +
+                    "the signing certificate, then opens the system installer. Export a backup " +
+                    "before the first release-signed install if this copy is still debug-signed.",
+            ) {
+                AppUpdateButtons(controller = updateController)
+            }
         }
         item {
             ToolCard(

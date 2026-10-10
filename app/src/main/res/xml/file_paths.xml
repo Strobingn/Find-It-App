@@ -2,4 +2,5 @@
 <paths>
     <!-- Temporary share-sheet exports (site package zip, etc.) -->
     <cache-path name="share" path="share/" />
+    <cache-path name="updates" path="updates/" />
 </paths>
