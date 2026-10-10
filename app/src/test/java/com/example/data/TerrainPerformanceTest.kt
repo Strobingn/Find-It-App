@@ -120,6 +120,39 @@ class TerrainPerformanceTest {
     }
 
     @Test
+    fun rasterizerHotPathAndFullResMeshHaveHostNumbers() {
+        val rasterizer = LidarRasterizer(
+            minX = 0.0, maxX = 400.0, minY = 0.0, maxY = 400.0,
+            options = LidarImportOptions(rasterResolution = 256, groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            declaredPointCount = 200_000,
+        )
+        val binMs = kotlin.system.measureNanoTime {
+            repeat(200_000) { i ->
+                rasterizer.addPoint(
+                    x = (i % 400).toDouble(),
+                    y = (i / 400 % 400).toDouble(),
+                    z = 10f,
+                    classification = 2,
+                )
+            }
+        } / 1_000_000.0
+        val grid = requireNotNull(rasterizer.finish(0, "throughput")).grid
+        val meshMs = kotlin.system.measureNanoTime {
+            TerrainGpuSceneBuilder.build(
+                source = grid,
+                maxFinestDimension = 256,
+                tileSize = 128,
+                useIntIndices = true,
+                attachHeightmap = true,
+            )
+        } / 1_000_000.0
+        println(String.format(java.util.Locale.US, "hotpath bin 200k pts %.2f ms (%.1f kpts/s)", binMs, 200_000.0 / binMs))
+        println(String.format(java.util.Locale.US, "mesh+heightmap 256² %.2f ms", meshMs))
+        assertTrue(binMs > 0.0)
+        assertTrue(meshMs > 0.0)
+    }
+
+    @Test
     fun decoderPreferenceFallsBackWhenNativeMissing() {
         LazDecoderSettings.preferred = LazDecoderBackend.NATIVE_LAZ_RS
         assertEquals(LazDecoderBackend.LASZIP4J, LazDecoderSettings.resolve())

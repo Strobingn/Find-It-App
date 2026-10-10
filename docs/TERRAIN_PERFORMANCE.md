@@ -19,14 +19,28 @@ Separate follow-up to the continuous-hillshade work. Full DEM detail is never th
 
 ## Host benchmark (this agent, x86_64 JVM)
 
-Synthetic **4 000-point LAS** (format 0, 200 m extent), raster 128, AUTO_LOWEST. Numbers come from `TerrainPerformanceTest.decoderBenchmarkTimesLaszipAndCacheReopen` and the raster/mesh micro-benches:
+Synthetic **4 000-point LAS** (format 0, 200 m extent), raster 128, AUTO_LOWEST, from
+`TerrainPerformanceTest.decoderBenchmarkTimesLaszipAndCacheReopen`:
 
 | Stage | Host JVM |
 | --- | --- |
-| laszip4j decode + grid | see unit-test stdout (`Decoder benchmark`) |
-| laz-rs native | **not loaded** (no `liblazrs_jni.so` in this environment) |
-| GPU mesh + heightmap/CDLOD | see `mesh_build` / `cdlod_select` |
-| Disk cache reopen | see `cache_reopen` — should be ≪ first decode |
+| laszip4j decode + grid | **6.95 ms** |
+| laz-rs native | **not loaded** (no `liblazrs_jni.so` here) |
+| GPU mesh + heightmap | **29.53 ms** |
+| CDLOD select | **0.89 ms** |
+| Disk cache write | **14.26 ms** |
+| Disk cache reopen | **4.96 ms** (≈3× faster than first decode+mesh is not claimed; reopen skips decode) |
+| Estimated GPU buffers | **181 KiB** for this 128² product |
+
+Hot path from `TerrainPerformanceTest.rasterizerHotPathAndFullResMeshHaveHostNumbers`
+(200k `addPoint` into a 256² raster, then full-res mesh + heightmap):
+
+| Stage | Host JVM |
+| --- | --- |
+| bin 200k points | **8.19 ms** (24 413 kpts/s) |
+| mesh + heightmap 256² | **36.90 ms** |
+
+These are host-JVM numbers, not a phone. Re-run Tools → Decoder benchmark on the device.
 
 Re-run on a device:
 
