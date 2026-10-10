@@ -85,8 +85,13 @@ class GitHubReleaseClient(
                 }
                 throw IOException("APK download HTTP ${response.code}")
             }
-            val bytes = response.body?.bytes() ?: throw IOException("Empty APK download")
-            destination.writeBytes(bytes)
+            val body = response.body ?: throw IOException("Empty APK download")
+            destination.outputStream().use { output ->
+                body.byteStream().copyTo(output)
+            }
+            if (!destination.isFile || destination.length() <= 0L) {
+                throw IOException("Empty APK download")
+            }
         }
     }
 

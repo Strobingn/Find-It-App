@@ -79,12 +79,36 @@ object TerrainDecoderBenchmark {
         val nativeAvailable = LazRsNativeDecoder.isAvailable
         if (nativeAvailable) {
             val headerPoints = javaResult.totalPointsRead.coerceAtLeast(1)
-            val packed = PackedPointRasterizer.allocate(headerPoints)
-            nativeMs = TerrainStageProfiler.stage("decode_lazrs", file.name) {
+            nativeMs = runCatching {
+            TerrainStageProfiler.stage("decode_lazrs", file.name) {
+                val packed = PackedPointRasterizer.allocate(headerPoints)
+                val origins = DoubleArray(3)
                 val nanos = measureNanoTime {
-                    LazRsNativeDecoder.decodePacked(file, packed)
+                    val decoded = LazRsNativeDecoder.decodePacked(file, packed, origins)
+                    require(decoded > 0) { "laz-rs decode failed (count=$decoded)" }
+                    val rasterizer = LidarRasterizer(
+                        minX = -1.0e9,
+                        maxX = 1.0e9,
+                        minY = -1.0e9,
+                        maxY = 1.0e9,
+                        options = sanitized,
+                        declaredPointCount = decoded.toLong(),
+                    )
+                    PackedPointRasterizer.addAll(
+                        rasterizer,
+                        packed,
+                        decoded,
+                        originX = origins[0],
+                        originY = origins[1],
+                        originZ = origins[2],
+                    )
+                    requireNotNull(rasterizer.finish(0, "laz-rs benchmark"))
                 }
                 nanos / 1_000_000.0
+            }
+            }.getOrElse { error ->
+                TerrainStageProfiler.emit("laz-rs benchmark failed: ${error.message}")
+                null
             }
         }
 
@@ -130,14 +154,14 @@ object TerrainDecoderBenchmark {
             nanos / 1_000_000.0
         }
 
-        val winner = when {
-            nativeMs == null -> "laszip4j (native unavailable)"
-            nativeMs < (TerrainStageProfiler.snapshot().firstOrNull { it.name == "decode_laszip4j" }?.millis ?: Double.MAX_VALUE) ->
-                "laz-rs"
-            else -> "laszip4j"
-        }
         val laszipMs = TerrainStageProfiler.snapshot().firstOrNull { it.name == "decode_laszip4j" }?.millis
             ?: rasterizeMs
+        val winner = when {
+            nativeMs == null && nativeAvailable -> "laszip4j (laz-rs failed)"
+            nativeMs == null -> "laszip4j (native unavailable)"
+            nativeMs < laszipMs -> "laz-rs"
+            else -> "laszip4j"
+        }
         return DecoderBenchmarkResult(
             fileName = file.name,
             points = javaResult.totalPointsRead.toLong(),

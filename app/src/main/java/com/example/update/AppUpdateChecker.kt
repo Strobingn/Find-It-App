@@ -13,12 +13,16 @@ object AppUpdateChecker {
         installedVersionCode: Int = BuildConfig.VERSION_CODE,
         client: GitHubReleaseClient = client(),
     ): UpdateCheckResult {
-        return when (val latest = client.latestFinditRelease()) {
-            is UpdateCheckResult.Available -> {
-                if (latest.release.versionCode > installedVersionCode) latest
-                else UpdateCheckResult.UpToDate
+        return runCatching {
+            when (val latest = client.latestFinditRelease()) {
+                is UpdateCheckResult.Available -> {
+                    if (latest.release.versionCode > installedVersionCode) latest
+                    else UpdateCheckResult.UpToDate
+                }
+                else -> latest
             }
-            else -> latest
+        }.getOrElse { error ->
+            UpdateCheckResult.Failed(error.message ?: "Update check failed")
         }
     }
 

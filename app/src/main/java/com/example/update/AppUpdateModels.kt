@@ -55,6 +55,19 @@ object AppUpdateParse {
         return digest.joinToString("") { b -> "%02x".format(b) }
     }
 
+    fun hexSha256(file: java.io.File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { b -> "%02x".format(b) }
+    }
+
     fun sha256Matches(expected: String?, actualHex: String): Boolean {
         val want = expected?.trim()?.lowercase().orEmpty()
         return want.length == 64 && want == actualHex.lowercase()

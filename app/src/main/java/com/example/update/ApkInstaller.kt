@@ -1,11 +1,14 @@
 package com.example.update
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.example.BuildConfig
@@ -27,7 +30,7 @@ object ApkInstaller {
         if (!apk.isFile || apk.length() <= 0L) {
             return VerifyResult(false, "Downloaded APK is missing")
         }
-        val actual = AppUpdateParse.hexSha256(apk.readBytes())
+        val actual = AppUpdateParse.hexSha256(apk)
         if (expectedSha256 != null && !AppUpdateParse.sha256Matches(expectedSha256, actual)) {
             return VerifyResult(false, "APK sha256 mismatch (expected ${expectedSha256.take(12)}…)")
         }
@@ -73,6 +76,39 @@ object ApkInstaller {
             }
         }
     }
+
+    /**
+     * Copy the APK to public Downloads so it survives uninstall during a signing-key switch.
+     * Returns a user-visible location, or null if the copy failed.
+     */
+    fun persistOutsideApp(context: Context, apk: File, displayName: String): String? = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                put(MediaStore.Downloads.MIME_TYPE, "application/vnd.android.package-archive")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return@runCatching null
+            resolver.openOutputStream(uri)?.use { apk.inputStream().copyTo(it) }
+                ?: return@runCatching null
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            "Downloads/$displayName"
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            dir.mkdirs()
+            val dest = File(dir, displayName)
+            apk.copyTo(dest, overwrite = true)
+            dest.absolutePath
+        }
+    }.getOrNull()
+
+    fun browserIntent(url: String): Intent =
+        Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     fun canRequestInstalls(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

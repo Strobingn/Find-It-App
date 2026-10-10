@@ -46,7 +46,6 @@ object TerrainMemoryMonitor {
                 bytes += batch.intIndices?.size?.toLong()?.times(4L) ?: 0L
             }
         }
-        scene.heightmap?.let { bytes += it.floats.size.toLong() * 4L }
         lastGpuBytes = bytes
         lastDemCells = scene.sourceWidth * scene.sourceHeight
     }

@@ -75,6 +75,26 @@ class LazDatasetStore(
         return File(directory, name).takeIf(File::isFile)
     }
 
+    /**
+     * Source URLs recorded before uninstall whose `.laz`/`.las` files are gone.
+     * Used after backup restore so the library can re-download instead of staying empty.
+     */
+    @Synchronized
+    fun missingSourceDownloads(): List<Pair<String, String>> {
+        return readIndex().mapNotNull { (url, name) ->
+            val file = File(directory, name)
+            if (file.isFile) null else url to name
+        }
+    }
+
+    fun pendingReimportNames(): List<String> {
+        val refs = File(directory, "imported-refs.txt")
+        if (!refs.isFile) return emptyList()
+        return refs.readLines()
+            .map { it.substringBefore('\t').trim() }
+            .filter { it.isNotBlank() && !File(directory, it).isFile }
+    }
+
     private fun readIndex(): Map<String, String> {
         val raw = indexFile.takeIf(File::isFile)?.let { runCatching(it::readText).getOrNull() }
             ?: return emptyMap()

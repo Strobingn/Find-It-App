@@ -37,6 +37,7 @@ fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateControl
     var busy by remember { mutableStateOf(false) }
     var showNotes by remember { mutableStateOf(false) }
     var installHelp by remember { mutableStateOf<String?>(null) }
+    var installHelpUrl by remember { mutableStateOf<String?>(null) }
 
     val controller = remember {
         AppUpdateController(
@@ -46,6 +47,7 @@ fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateControl
             setBusy = { busy = it },
             setShowNotes = { showNotes = it },
             setInstallHelp = { installHelp = it },
+            setInstallHelpUrl = { installHelpUrl = it },
         )
     }
     controller.status = status
@@ -53,6 +55,7 @@ fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateControl
     controller.busy = busy
     controller.showNotes = showNotes
     controller.installHelp = installHelp
+    controller.installHelpUrl = installHelpUrl
 
     LaunchedEffect(checkOnLaunch) {
         if (checkOnLaunch) controller.check(scope)
@@ -67,19 +70,26 @@ class AppUpdateController(
     private val setBusy: (Boolean) -> Unit,
     private val setShowNotes: (Boolean) -> Unit,
     private val setInstallHelp: (String?) -> Unit,
+    private val setInstallHelpUrl: (String?) -> Unit = {},
 ) {
     var status: String = ""
     var available: FinditRelease? = null
     var busy: Boolean = false
     var showNotes: Boolean = false
     var installHelp: String? = null
+    var installHelpUrl: String? = null
 
     fun check(scope: kotlinx.coroutines.CoroutineScope) {
         scope.launch {
             setBusy(true)
             setStatus("Checking GitHub releases…")
-            val result = withContext(Dispatchers.IO) { AppUpdateChecker.check() }
-            setBusy(false)
+            val result = try {
+                withContext(Dispatchers.IO) { AppUpdateChecker.check() }
+            } catch (error: Throwable) {
+                UpdateCheckResult.Failed(error.message ?: "Update check failed")
+            } finally {
+                setBusy(false)
+            }
             when (result) {
                 is UpdateCheckResult.Available -> {
                     setAvailable(result.release)
@@ -124,7 +134,24 @@ class AppUpdateController(
             }.onSuccess { (verify, apk) ->
                 if (!verify.ok) {
                     setStatus(verify.message)
-                    if (verify.needsUninstall) setInstallHelp(verify.message)
+                    if (verify.needsUninstall) {
+                        val saved = ApkInstaller.persistOutsideApp(context, apk, release.apkName)
+                        val url = release.browserDownloadUrl.ifBlank { null }
+                        setInstallHelpUrl(url)
+                        setInstallHelp(
+                            buildString {
+                                append(verify.message)
+                                if (saved != null) {
+                                    append(" The APK was also saved to ").append(saved)
+                                    append(" so it remains after uninstall.")
+                                }
+                                if (url != null) {
+                                    append(" You can also download ").append(url)
+                                    append(" after uninstall.")
+                                }
+                            },
+                        )
+                    }
                     return@onSuccess
                 }
                 if (!ApkInstaller.canRequestInstalls(context)) {
@@ -139,7 +166,10 @@ class AppUpdateController(
     }
 
     fun dismissNotes() = setShowNotes(false)
-    fun dismissHelp() = setInstallHelp(null)
+    fun dismissHelp() {
+        setInstallHelp(null)
+        setInstallHelpUrl(null)
+    }
     fun report(message: String) = setStatus(message)
 }
 
@@ -176,6 +206,7 @@ fun AppUpdateButtons(
                 sharedPrefsDir = File(context.applicationInfo.dataDir, "shared_prefs"),
                 historicDir = File(context.filesDir, "historic-map-archive"),
                 lidarDir = File(context.filesDir, "lidar"),
+                beforeReplace = { com.example.data.local.AppDatabase.closeInstance() },
             )
             controller.report("Restored $count file(s). Restart Find It.")
         }.onFailure {
@@ -234,10 +265,18 @@ fun AppUpdateButtons(
     controller.installHelp?.let { help ->
         AlertDialog(
             onDismissRequest = { controller.dismissHelp() },
-            title = { Text("Install permission") },
+            title = { Text("Install help") },
             text = { Text(help) },
             confirmButton = {
                 TextButton(onClick = { controller.dismissHelp() }) { Text("OK") }
+            },
+            dismissButton = {
+                val url = controller.installHelpUrl
+                if (!url.isNullOrBlank()) {
+                    TextButton(onClick = {
+                        context.startActivity(ApkInstaller.browserIntent(url))
+                    }) { Text("Open APK download") }
+                }
             },
         )
     }

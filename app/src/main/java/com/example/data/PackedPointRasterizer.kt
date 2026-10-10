@@ -5,7 +5,7 @@ import java.nio.ByteOrder
 
 /**
  * Bins packed xyz/class records into [LidarRasterizer] without allocating a per-return object.
- * Used by the laz-rs JNI path and by the mapped uncompressed-LAS reader.
+ * Packed XY/Z are origin-relative f32; add [originX]/[originY]/[originZ] back as doubles.
  */
 internal object PackedPointRasterizer {
     fun addAll(
@@ -13,6 +13,9 @@ internal object PackedPointRasterizer {
         packed: ByteBuffer,
         pointCount: Int,
         shouldContinue: () -> Boolean = { true },
+        originX: Double = 0.0,
+        originY: Double = 0.0,
+        originZ: Double = 0.0,
     ): Boolean {
         val buffer = packed.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         buffer.clear()
@@ -21,9 +24,9 @@ internal object PackedPointRasterizer {
                 rasterizer.markTruncated()
                 return false
             }
-            val x = buffer.float.toDouble()
-            val y = buffer.float.toDouble()
-            val z = buffer.float
+            val x = buffer.float.toDouble() + originX
+            val y = buffer.float.toDouble() + originY
+            val z = (buffer.float.toDouble() + originZ).toFloat()
             val classification = buffer.get().toInt() and 0xFF
             val flags = buffer.get().toInt() and 0xFF
             buffer.short

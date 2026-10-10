@@ -621,22 +621,26 @@ fun ToolsTab(
                         else -> "las"
                     }
                     val copy = File(context.cacheDir, "decoder-bench-${System.currentTimeMillis()}.$ext")
-                    runCatching {
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            copy.outputStream().use { input.copyTo(it) }
+                    try {
+                        runCatching {
+                            context.contentResolver.openInputStream(uri)?.use { input ->
+                                copy.outputStream().use { input.copyTo(it) }
+                            }
                         }
-                    }
-                    val result = runCatching {
-                        TerrainDecoderBenchmark.run(
-                            file = copy,
-                            cacheDir = File(context.cacheDir, "decoder-bench-cache"),
-                        )
-                    }.getOrElse { error ->
-                        decoderBenchStatus = error.message
-                        return@launch
-                    }
-                    withContext(Dispatchers.Main) {
-                        decoderBenchStatus = result.format().trim()
+                        val result = runCatching {
+                            TerrainDecoderBenchmark.run(
+                                file = copy,
+                                cacheDir = File(context.cacheDir, "decoder-bench-cache"),
+                            )
+                        }.getOrElse { error ->
+                            decoderBenchStatus = error.message
+                            return@launch
+                        }
+                        withContext(Dispatchers.Main) {
+                            decoderBenchStatus = result.format().trim()
+                        }
+                    } finally {
+                        copy.delete()
                     }
                 }
             }
