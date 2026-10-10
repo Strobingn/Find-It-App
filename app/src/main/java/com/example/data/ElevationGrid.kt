@@ -34,12 +34,18 @@ class ElevationGrid(
     val canopySpikes: FloatArray,
     val cellSizeMeters: Float = 1f,
     val validData: BooleanArray = BooleanArray(width * height) { true },
+    /**
+     * Cells whose elevation was TIN/IDW filled from nearby measured ground. Never presented as
+     * a field measurement; analysis code may ignore them when honesty matters.
+     */
+    val interpolatedData: BooleanArray = BooleanArray(width * height) { false },
 ) {
     init {
         require(width > 0 && height > 0) { "Grid dimensions must be positive" }
         require(bareEarth.size == width * height) { "bareEarth size must be width * height" }
         require(canopySpikes.size == width * height) { "canopySpikes size must be width * height" }
         require(validData.size == width * height) { "validData size must be width * height" }
+        require(interpolatedData.size == width * height) { "interpolatedData size must be width * height" }
     }
 
     // Sun angle, contrast, palette, zScale, overlay and contour sliders change on nearly every
@@ -193,13 +199,16 @@ class ElevationGrid(
             val interiorRow = y > 0 && y < lastY
             for (x in 0 until width) {
                 val index = y * width + x
-                if (!validData[index]) {
+                if (!validData[index] || !elevations[index].isFinite()) {
+                    // True no-data stays transparent. Never paint NaN as black.
                     pixels[index] = Color.TRANSPARENT
                     continue
                 }
+                val centerZ = elevations[index]
                 var gradientX = 0f
                 var gradientY = 0f
                 if (needsGradient) {
+                    // Horn 3×3: a missing neighbour takes the centre value, never 0.
                     val z00: Float
                     val z01: Float
                     val z02: Float
@@ -209,32 +218,34 @@ class ElevationGrid(
                     val z21: Float
                     val z22: Float
                     if (interiorRow && x > 0 && x < lastX) {
-                        // Interior pixels cannot leave the raster, so skip the per-neighbour
-                        // clamping that index() would otherwise apply sixteen times per pixel.
                         val above = index - width
                         val below = index + width
-                        z00 = elevations[above - 1]
-                        z01 = elevations[above]
-                        z02 = elevations[above + 1]
-                        z10 = elevations[index - 1]
-                        z12 = elevations[index + 1]
-                        z20 = elevations[below - 1]
-                        z21 = elevations[below]
-                        z22 = elevations[below + 1]
+                        z00 = hornSample(elevations, validData, above - 1, centerZ)
+                        z01 = hornSample(elevations, validData, above, centerZ)
+                        z02 = hornSample(elevations, validData, above + 1, centerZ)
+                        z10 = hornSample(elevations, validData, index - 1, centerZ)
+                        z12 = hornSample(elevations, validData, index + 1, centerZ)
+                        z20 = hornSample(elevations, validData, below - 1, centerZ)
+                        z21 = hornSample(elevations, validData, below, centerZ)
+                        z22 = hornSample(elevations, validData, below + 1, centerZ)
                     } else {
-                        z00 = elevations[index(x - 1, y - 1)]
-                        z01 = elevations[index(x, y - 1)]
-                        z02 = elevations[index(x + 1, y - 1)]
-                        z10 = elevations[index(x - 1, y)]
-                        z12 = elevations[index(x + 1, y)]
-                        z20 = elevations[index(x - 1, y + 1)]
-                        z21 = elevations[index(x, y + 1)]
-                        z22 = elevations[index(x + 1, y + 1)]
+                        z00 = hornSampleAt(elevations, validData, x - 1, y - 1, centerZ)
+                        z01 = hornSampleAt(elevations, validData, x, y - 1, centerZ)
+                        z02 = hornSampleAt(elevations, validData, x + 1, y - 1, centerZ)
+                        z10 = hornSampleAt(elevations, validData, x - 1, y, centerZ)
+                        z12 = hornSampleAt(elevations, validData, x + 1, y, centerZ)
+                        z20 = hornSampleAt(elevations, validData, x - 1, y + 1, centerZ)
+                        z21 = hornSampleAt(elevations, validData, x, y + 1, centerZ)
+                        z22 = hornSampleAt(elevations, validData, x + 1, y + 1, centerZ)
                     }
                     gradientX = ((z02 + 2f * z12 + z22) - (z00 + 2f * z10 + z20)) /
                         gradientDivisor * zMultiplier
                     gradientY = ((z20 + 2f * z21 + z22) - (z00 + 2f * z01 + z02)) /
                         gradientDivisor * zMultiplier
+                    if (!gradientX.isFinite() || !gradientY.isFinite()) {
+                        gradientX = 0f
+                        gradientY = 0f
+                    }
                 }
                 val slopeRadians = if (needsSlope) {
                     atan(sqrt(gradientX * gradientX + gradientY * gradientY))
@@ -621,6 +632,21 @@ class ElevationGrid(
 
     private fun index(x: Int, y: Int): Int =
         y.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)
+
+    private fun hornSample(elevations: FloatArray, valid: BooleanArray, sampleIndex: Int, centerZ: Float): Float {
+        if (sampleIndex !in elevations.indices) return centerZ
+        if (!valid[sampleIndex]) return centerZ
+        val value = elevations[sampleIndex]
+        return if (value.isFinite()) value else centerZ
+    }
+
+    private fun hornSampleAt(
+        elevations: FloatArray,
+        valid: BooleanArray,
+        x: Int,
+        y: Int,
+        centerZ: Float,
+    ): Float = hornSample(elevations, valid, index(x, y), centerZ)
 
     private fun rectangleSum(
         integral: DoubleArray,
