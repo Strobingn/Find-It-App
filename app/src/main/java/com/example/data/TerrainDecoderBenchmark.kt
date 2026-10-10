@@ -54,23 +54,30 @@ object TerrainDecoderBenchmark {
         val sanitized = options.sanitized()
 
         var rasterizeMs = 0.0
-        val javaResult = TerrainStageProfiler.stage("decode_laszip4j", file.name) {
-            val start = System.nanoTime()
-            val decoded = if (file.extension.equals("laz", ignoreCase = true)) {
-                LazTerrainReader.read(file, sanitized, shouldContinue)
-            } else {
-                file.inputStream().buffered(256 * 1024).use { input ->
-                    DemGenerator.parseLasStreamDetailed(input, sanitized, shouldContinue)
+        val previousPreferred = LazDecoderSettings.preferred
+        val javaResult = try {
+            // Force the Java backend so a native preference cannot contaminate the laszip4j timing.
+            LazDecoderSettings.preferred = LazDecoderBackend.LASZIP4J
+            TerrainStageProfiler.stage("decode_laszip4j", file.name) {
+                val start = System.nanoTime()
+                val decoded = if (file.extension.equals("laz", ignoreCase = true)) {
+                    LazTerrainReader.read(file, sanitized, shouldContinue)
+                } else {
+                    file.inputStream().buffered(256 * 1024).use { input ->
+                        DemGenerator.parseLasStreamDetailed(input, sanitized, shouldContinue)
+                    }
                 }
+                rasterizeMs = (System.nanoTime() - start) / 1_000_000.0
+                decoded
             }
-            rasterizeMs = (System.nanoTime() - start) / 1_000_000.0
-            decoded
+        } finally {
+            LazDecoderSettings.preferred = previousPreferred
         }
         requireNotNull(javaResult) { "laszip4j produced no terrain for ${file.name}" }
 
         var nativeMs: Double? = null
         val nativeAvailable = LazRsNativeDecoder.isAvailable
-        if (nativeAvailable && file.extension.equals("laz", ignoreCase = true)) {
+        if (nativeAvailable) {
             val headerPoints = javaResult.totalPointsRead.coerceAtLeast(1)
             val packed = PackedPointRasterizer.allocate(headerPoints)
             nativeMs = TerrainStageProfiler.stage("decode_lazrs", file.name) {

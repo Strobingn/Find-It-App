@@ -4,8 +4,8 @@ import android.content.Context
 
 /**
  * LAZ decode backend. Default stays laszip4j until the owner compares both on the same file
- * (Tools → Decoder benchmark). Native laz-rs is used only when the .so is present **and** the
- * preference is NATIVE_LAZ_RS.
+ * (Tools → Decoder benchmark). Native laz-rs (parallel chunk decompression via JNI direct
+ * buffers) is used only when the .so is present **and** the preference is NATIVE_LAZ_RS.
  */
 enum class LazDecoderBackend {
     LASZIP4J,

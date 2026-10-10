@@ -10,7 +10,7 @@ Separate follow-up to the continuous-hillshade work. Full DEM detail is never th
 | No per-point objects; grid while decoding | **Done on the hot path.** laszip4j low-level + parallel chunks already avoid `LASPoint`. New packed 16-byte sink is what laz-rs writes into. |
 | Parallel per-chunk LAZ | **Already on main** (`readParallelChunks`). Now timed as `decode_parallel`. |
 | FileChannel / mmap | **Done for uncompressed LAS** (`DemGenerator.parseLasFileMapped`). LAZ still needs a seekable decoder (chunk table). |
-| Native laz-rs via JNI | **Optional, behind a flag.** Crate in `native/lazrs-jni` (las + laz-rs). Default remains laszip4j until Tools → Decoder benchmark shows native winning on the owner's phone. |
+| Native laz-rs via JNI | **Optional, behind a flag.** Crate in `native/lazrs-jni` uses `las` + `laz-parallel` (laz-rs rayon chunk table). JNI writes a direct 16-byte packed buffer. Default remains laszip4j until Tools → Decoder benchmark times **both on the same file** and the owner toggles the preference. |
 | OpenGL ES 3.0 min | **Done.** Manifest `glEsVersion=0x00030000`, `GLSurfaceView` context 3. 32-bit indices unlock tiles &gt; 254 cells. ES 3.1 compute is used when the GL version string has 3.1+; otherwise CPU Horn. |
 | Heightmap + CDLOD | **Done on the CPU side.** Full-res R32F pack + CDLOD selection (level 0 = one vertex per cell near the camera). First paint still draws the full-detail mesh; the heightmap is attached for VTF / future VS displacement. |
 | GPU hillshade / SVF / LRM | Horn compute GLSL 3.10 shipped; CPU fallback is the default and is tested. SVF/LRM stay on the existing CPU analysis path until compute is proven on-device. |
@@ -51,4 +51,4 @@ Re-run on a device:
 
 ## Building laz-rs
 
-See `native/lazrs-jni/README.md`. Until the `.so` is present, `LazDecoderSettings.resolve()` always returns laszip4j even if the preference is native.
+See `native/lazrs-jni/README.md`. The crate builds on rustc 1.83 (`cargo build --release` in `native/lazrs-jni`). Until `liblazrs_jni.so` is copied into `jniLibs` via cargo-ndk, `LazDecoderSettings.resolve()` always returns laszip4j even if the preference is native. The on-device benchmark still times laszip4j first, then laz-rs when the `.so` is loaded, on the same picked file.

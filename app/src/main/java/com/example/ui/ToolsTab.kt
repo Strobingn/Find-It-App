@@ -620,7 +620,7 @@ fun ToolsTab(
                         return@launch
                     }
                     withContext(Dispatchers.Main) {
-                        decoderBenchStatus = result.format().lineSequence().take(10).joinToString(" · ")
+                        decoderBenchStatus = result.format().trim()
                     }
                 }
             }
@@ -630,9 +630,9 @@ fun ToolsTab(
                 status = decoderBenchStatus
                     ?: "laszip4j vs laz-rs on the same file · native=${LazRsNativeDecoder.isAvailable} · prefer=${LazDecoderSettings.preferred}",
                 statusActive = decoderBenchStatus != null,
-                description = "Times decode, grid, mesh, CDLOD, hillshade, and cache reopen. " +
-                    "Default stays laszip4j until native wins on this phone. " +
-                    TerrainMemoryMonitor.snapshot().format(),
+                description = "Times laszip4j and laz-rs on the same file (JNI direct buffer, " +
+                    "parallel chunk decompression). Default stays laszip4j until native wins " +
+                    "on this phone. " + TerrainMemoryMonitor.snapshot().format(),
             ) {
                 TextButton(
                     onClick = { decoderPicker.launch(arrayOf("*/*")) },

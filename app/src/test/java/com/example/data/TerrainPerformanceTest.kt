@@ -153,6 +153,23 @@ class TerrainPerformanceTest {
     }
 
     @Test
+    fun decoderBenchmarkTimesLaszipEvenWhenNativeIsPreferred() {
+        LazDecoderSettings.preferred = LazDecoderBackend.NATIVE_LAZ_RS
+        val file = LasFixture.write(folder.newFile("both-backends.las"), pointCount = 4_000, extentMeters = 200.0)
+        val result = TerrainDecoderBenchmark.run(
+            file = file,
+            options = LidarImportOptions(rasterResolution = 128, groundMode = GroundSurfaceMode.AUTO_LOWEST),
+            cacheDir = folder.newFolder("cache-both"),
+        )
+        assertTrue(result.laszip4jMs > 0.0)
+        assertFalse(result.nativeAvailable)
+        assertEquals("laszip4j (native unavailable)", result.winner)
+        assertTrue(result.format().contains("laszip4j"))
+        assertTrue(result.format().contains("laz-rs native"))
+        LazDecoderSettings.preferred = LazDecoderBackend.LASZIP4J
+    }
+
+    @Test
     fun decoderPreferenceFallsBackWhenNativeMissing() {
         LazDecoderSettings.preferred = LazDecoderBackend.NATIVE_LAZ_RS
         assertEquals(LazDecoderBackend.LASZIP4J, LazDecoderSettings.resolve())
