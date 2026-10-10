@@ -46,6 +46,8 @@ import com.example.R
 import com.example.data.basemap.OfflineBasemapStatus
 import com.example.data.download.LazDownloadQueue
 import com.example.data.field.FieldSessionStatsCalculator
+import com.example.update.AppUpdateButtons
+import com.example.update.rememberAppUpdateController
 
 /**
  * Modern home hub: project status + one card per major workspace so nothing is buried
@@ -87,6 +89,8 @@ fun HomeHubScreen(
         }
     }
 
+    val updateController = rememberAppUpdateController(checkOnLaunch = false)
+
     val workspaceCards = listOf(
         AppDestination.TERRAIN,
         AppDestination.FIELD,
@@ -127,6 +131,25 @@ fun HomeHubScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+                modifier = Modifier.fillMaxWidth().testTag("home_updates_card"),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Check for updates", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        updateController.status.ifBlank { "GitHub Releases · findit-v* builds" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    AppUpdateButtons(controller = updateController)
                 }
             }
         }

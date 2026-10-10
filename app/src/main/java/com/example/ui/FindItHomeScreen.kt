@@ -61,6 +61,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.geospatial.MeasurementFormat
+import com.example.update.AppUpdateButtons
+import com.example.update.rememberAppUpdateController
 import com.example.ui.theme.Grey200
 import com.example.ui.theme.Grey400
 import com.example.ui.theme.Grey700
@@ -82,6 +84,7 @@ private val HomeAccentHighlight = Grey200
 @Composable
 fun FindItAppRoot(viewModel: HillshadeViewModel) {
     var workspaceOpen by rememberSaveable { mutableStateOf(false) }
+    val updateController = rememberAppUpdateController(checkOnLaunch = true)
 
     BackHandler(enabled = workspaceOpen) {
         workspaceOpen = false
@@ -93,6 +96,7 @@ fun FindItAppRoot(viewModel: HillshadeViewModel) {
         FindItHomeScreen(
             viewModel = viewModel,
             onOpenWorkspace = { workspaceOpen = true },
+            updateController = updateController,
         )
     }
 }
@@ -102,6 +106,7 @@ fun FindItAppRoot(viewModel: HillshadeViewModel) {
 private fun FindItHomeScreen(
     viewModel: HillshadeViewModel,
     onOpenWorkspace: () -> Unit,
+    updateController: com.example.update.AppUpdateController,
 ) {
     val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
     val isRendering by viewModel.isRendering.collectAsStateWithLifecycle()
@@ -161,6 +166,24 @@ private fun FindItHomeScreen(
                     isRendering = isRendering,
                     onOpenWorkspace = onOpenWorkspace,
                 )
+            }
+
+            item {
+                Card(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("App updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            updateController.status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        AppUpdateButtons(controller = updateController)
+                    }
+                }
             }
 
             item {

@@ -1,56 +1,25 @@
 name: Find-it-appAPK
 
+# APK + GitHub Release only on pushes/merges to main (saves private-repo minutes).
+# Pull requests still run unit tests. Do not add extra release branches.
 on:
   push:
-    branches:
-      - main
-      - master
-      - CHATGPTV2.0
-      - grok
-      - grok-v7
-      - mistral-v18
-      - mitral-V16
-      - mitral-v15
-      - Mistral-V17
-      - Mistral-V20
-      - "feature/**"
-      - "fix/**"
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
 
+env:
+  APPLICATION_ID: com.aistudio.lidardetector.pkrxtz
+
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Verify OpenAI primary secret
-        shell: bash
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
-        run: |
-          if [ -z "$OPENAI_API_KEY" ] && [ -z "$OPENAI_PROXY_TOKEN" ]; then
-            echo "::error::OpenAI primary is missing. Add OPENAI_API_KEY or OPENAI_PROXY_TOKEN in repository Actions secrets."
-            exit 1
-          fi
-          echo "OpenAI primary secret: configured"
-
-      - name: Verify Gemini fallback secret
-        shell: bash
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "::error::Gemini fallback is missing. Add GEMINI_API_KEY in repository Actions secrets."
-            exit 1
-          fi
-          echo "Gemini 3.1 Pro fallback secret: configured"
 
       - name: Create local.properties before Gradle setup
         shell: bash
@@ -62,6 +31,8 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          FINDIT_UPDATE_TOKEN: ${{ secrets.FINDIT_UPDATE_TOKEN }}
         run: |
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
@@ -72,8 +43,9 @@ jobs:
             printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
             printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
             printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
+            printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
+            printf 'FINDIT_UPDATE_TOKEN=%s\n' "$FINDIT_UPDATE_TOKEN"
           } > "$GITHUB_WORKSPACE/local.properties"
-          test -f "$GITHUB_WORKSPACE/local.properties"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -107,9 +79,7 @@ jobs:
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
-          if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
+          if [ ! -f debug.keystore ]; then
             cp "$HOME/.android/debug.keystore" debug.keystore
           fi
 
@@ -119,46 +89,156 @@ jobs:
           set -o pipefail
           ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
 
-      - name: Build Debug APK
-        shell: bash
-        run: |
-          set -o pipefail
-          ./gradlew assembleDebug --stacktrace --no-configuration-cache 2>&1 | tee build-debug.log
-
-      - name: Build Release APK
-        shell: bash
-        run: |
-          set -o pipefail
-          ./gradlew assembleRelease --stacktrace --no-configuration-cache 2>&1 | tee build-release.log
-
-      - name: Upload build diagnostics
+      - name: Upload test diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: build-diagnostics-${{ github.run_number }}
-          path: |
-            build-debug.log
-            build-release.log
-            unit-test.log
+          name: unit-test-log-${{ github.run_number }}
+          path: unit-test.log
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Compute safe ref name for artifacts
-        id: safe_ref
-        run: echo "value=$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: lidar-metal-detector-debug-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 30
+      - name: Require release signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is missing. Add it once as a repository Actions secret and never rotate it."
+              missing=1
+            fi
+          done
+          exit "$missing"
 
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v7
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/findit-release.jks"
+          test -s "$GITHUB_WORKSPACE/findit-release.jks"
+
+      - name: Create local.properties
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          FINDIT_UPDATE_TOKEN: ${{ secrets.FINDIT_UPDATE_TOKEN }}
+        run: |
+          {
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+            printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
+            printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
+            printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
+            printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
+            printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
+            printf 'FINDIT_UPDATE_TOKEN=%s\n' "$FINDIT_UPDATE_TOKEN"
+          } > "$GITHUB_WORKSPACE/local.properties"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
         with:
-          name: lidar-metal-detector-release-${{ steps.safe_ref.outputs.value }}-${{ github.run_number }}
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Compute version
+        id: version
+        run: |
+          CODE=$((1000000 + ${{ github.run_number }}))
+          NAME="2.0.${{ github.run_number }}"
+          TAG="findit-v${CODE}"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure debug keystore for Gradle config
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          cp -f "$HOME/.android/debug.keystore" debug.keystore
+          touch .env
+
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/findit-release.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          test -n "$APK"
+          DEST="$GITHUB_WORKSPACE/findit-${{ steps.version.outputs.code }}.apk"
+          cp "$APK" "$DEST"
+          echo "apk=$DEST" >> "$GITHUB_OUTPUT"
+          sha256sum "$DEST" | awk '{print $1}' > "$GITHUB_WORKSPACE/findit.sha256"
+          echo "sha256=$(cat "$GITHUB_WORKSPACE/findit.sha256")" >> "$GITHUB_OUTPUT"
+        id: apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          CODE: ${{ steps.version.outputs.code }}
+          NAME: ${{ steps.version.outputs.name }}
+          SHA: ${{ steps.apk.outputs.sha256 }}
+          APK: ${{ steps.apk.outputs.apk }}
+          TOKEN_EXPIRY: ${{ vars.FINDIT_UPDATE_TOKEN_EXPIRY }}
+        run: |
+          NOTES=$(cat <<EOF
+          Find It Android build ${NAME} (${CODE})
+
+          app-id: ${APPLICATION_ID}
+          version-code: ${CODE}
+          sha256: ${SHA}
+          update-token-expiry: ${TOKEN_EXPIRY:-set FINDIT_UPDATE_TOKEN_EXPIRY as a repository variable}
+
+          Signed with the repository release keystore (never rotate KEYSTORE_BASE64 / STORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD).
+          EOF
+          )
+          gh release create "$TAG" \
+            --title "Find It $NAME" \
+            --notes "$NOTES" \
+            "$APK"
+          BODY=$(gh release view "$TAG" --json body --jq .body)
+          echo "$BODY" | grep -F "app-id: ${APPLICATION_ID}" >/dev/null \
+            || { echo "::error::Release notes missing app-id line"; exit 1; }
+          echo "$BODY" | grep -Eq 'sha256: [0-9a-f]{64}' \
+            || { echo "::error::Release notes missing sha256"; exit 1; }
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '\.apk$' >/dev/null \
+            || { echo "::error::Release missing APK asset"; exit 1; }
+          echo "First-release style URL: https://github.com/${{ github.repository }}/releases/download/${TAG}/$(basename "$APK")"

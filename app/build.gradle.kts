@@ -50,6 +50,10 @@ val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
 val mapsApiKey = projectSecret("MAPS_API_KEY")
 // Optional: Sentry DSN for crash + AI performance monitoring (never commit real DSN to git).
 val sentryDsn = projectSecret("SENTRY_DSN")
+val finditUpdateToken = projectSecret("FINDIT_UPDATE_TOKEN")
+val finditUpdateRepo = projectSecret("FINDIT_UPDATE_REPO").ifBlank { "Strobingn/Find-It-App" }
+val versionCodeOverride = System.getenv("VERSION_CODE")?.toIntOrNull()
+val versionNameOverride = System.getenv("VERSION_NAME")?.trim()?.ifBlank { null }
 
 val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
 val releaseKeystoreFile = releaseKeystorePath?.takeIf { it.isNotBlank() }?.let { file(it) }
@@ -76,8 +80,8 @@ android {
     applicationId = "com.aistudio.lidardetector.pkrxtz"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "2.0"
+    versionCode = versionCodeOverride ?: 3
+    versionName = versionNameOverride ?: "2.0"
     multiDexEnabled = true
 
     buildConfigField("String", "OPENAI_API_KEY", quotedBuildConfig(openAiApiKey))
@@ -88,6 +92,8 @@ android {
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
     buildConfigField("String", "MAPS_API_KEY", quotedBuildConfig(mapsApiKey))
     buildConfigField("String", "SENTRY_DSN", quotedBuildConfig(sentryDsn))
+    buildConfigField("String", "FINDIT_UPDATE_TOKEN", quotedBuildConfig(finditUpdateToken))
+    buildConfigField("String", "FINDIT_UPDATE_REPO", quotedBuildConfig(finditUpdateRepo))
     // Debug: sample more AI traces; release: lower default (overridable via Sentry init).
     buildConfigField("double", "SENTRY_TRACES_SAMPLE_RATE", "1.0")
     manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
