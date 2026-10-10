@@ -55,6 +55,7 @@ val finditUpdateRepo = projectSecret("FINDIT_UPDATE_REPO").ifBlank { "Strobingn/
 val versionCodeOverride = System.getenv("VERSION_CODE")?.toIntOrNull()
 val versionNameOverride = System.getenv("VERSION_NAME")?.trim()?.ifBlank { null }
 
+val committedDebugKeystore = file("${rootDir}/ci/findit-debug.keystore")
 val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
 val releaseKeystoreFile = releaseKeystorePath?.takeIf { it.isNotBlank() }?.let { file(it) }
 val releaseStorePassword = System.getenv("STORE_PASSWORD")
@@ -112,7 +113,7 @@ android {
       }
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      storeFile = committedDebugKeystore
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
@@ -124,7 +125,12 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
+      // Release secrets if present; otherwise the committed CI debug key so APKs update in place.
+      signingConfig = if (hasReleaseSigning) {
+        signingConfigs.getByName("release")
+      } else {
+        signingConfigs.getByName("debugConfig")
+      }
     }
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }

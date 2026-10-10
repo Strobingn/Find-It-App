@@ -6,23 +6,13 @@ Workflow name: **Find-it-appAPK** (`.github/workflows/android-build.yml`).
 
 ## Signing
 
-Current CI artifacts on `main` were **debug-signed**. `debug.keystore` is gitignored; the old workflow generated a fresh debug key on each runner unless a local file happened to exist. Those APKs will **not** update in place over a release-signed build.
+Releases do **not** require GitHub secrets. When `KEYSTORE_BASE64` / `STORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` are absent, the workflow signs with the committed **`ci/findit-debug.keystore`** (`androiddebugkey` / `android`). Every `findit-v*` APK after this commit uses that same key and can update over each other.
 
-Release APKs use **one keystore stored in GitHub Actions secrets**. Create it once and **never rotate** it:
+Older CI artifacts generated a **new** debug key on each runner. Those sideloads will **not** update in place over this committed key — export a backup, uninstall once, install the new APK, restore.
 
-| Secret | Purpose |
-| --- | --- |
-| `KEYSTORE_BASE64` | `base64 -w0 findit-release.jks` |
-| `STORE_PASSWORD` | keystore password |
-| `KEY_ALIAS` | key alias (Gradle default `upload` if unset locally) |
-| `KEY_PASSWORD` | key password |
+If release keystore secrets are added later, the workflow uses those instead. Do not commit a release `.jks`.
 
-```bash
-keytool -genkeypair -keystore findit-release.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000
-base64 -w0 findit-release.jks
-```
-
-The first release-signed install over a debug-signed copy requires uninstall. **Tools → App updates → Export app backup** first (Room finds/settings, historic-map index, LAZ library index). Restore after reinstall.
+Local debug/release builds also sign with `ci/findit-debug.keystore` so they match CI.
 
 ## Versioning and tags
 
@@ -34,7 +24,7 @@ The updater pages `/repos/Strobingn/Find-It-App/releases` (not `/latest`) and ke
 
 ## First release APK URL
 
-Created on the next **push/merge to `main`** after the signing secrets exist:
+Created on the next **push/merge to `main`**:
 
 `https://github.com/Strobingn/Find-It-App/releases/download/findit-v<versionCode>/findit-<versionCode>.apk`
 
