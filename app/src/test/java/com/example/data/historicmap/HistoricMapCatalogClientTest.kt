@@ -5,7 +5,10 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class HistoricMapCatalogClientTest {
     private val bbox = listOf(-75.5, 43.0, -75.2, 43.2)
     private val client = HistoricMapCatalogClient(opener = { null })

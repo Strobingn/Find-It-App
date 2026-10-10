@@ -830,14 +830,9 @@ object DemGenerator {
                 appendLine(firstLine)
                 if (secondLine.isNotEmpty()) appendLine(secondLine)
             }
-            val sequenced = java.io.SequenceInputStream(
-                java.io.ByteArrayInputStream(prepended.toByteArray(Charsets.UTF_8)),
-                object : java.io.InputStream() {
-                    override fun read(): Int = reader.read()
-                    override fun read(b: ByteArray, off: Int, len: Int): Int = reader.read(b, off, len)
-                },
+            val streamingReader = java.io.BufferedReader(
+                ConcatReader(prepended.reader(), reader),
             )
-            val streamingReader = java.io.BufferedReader(java.io.InputStreamReader(sequenced, Charsets.UTF_8))
             val firstLower = firstLine.lowercase()
             val grid =
                 if (firstLower.startsWith("ncols ") || firstLower.startsWith("ncols\t")) {
@@ -863,4 +858,23 @@ object DemGenerator {
         }
     }
 
+    private class ConcatReader(
+        first: java.io.Reader,
+        second: java.io.Reader,
+    ) : java.io.Reader() {
+        private val readers = arrayOf(first, second)
+        private var index = 0
+        override fun read(cbuf: CharArray, off: Int, len: Int): Int {
+            while (index < readers.size) {
+                val n = readers[index].read(cbuf, off, len)
+                if (n >= 0) return n
+                index++
+            }
+            return -1
+        }
+
+        override fun close() {
+            readers.forEach { runCatching { it.close() } }
+        }
+    }
 }

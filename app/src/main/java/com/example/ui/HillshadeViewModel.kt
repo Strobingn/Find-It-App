@@ -1145,10 +1145,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                             message = "Opening the original point cloud at ${options.rasterResolution} px…",
                     )
                     DemGenerator.parseFromStreamDetailed(
-                        source.displayName,
-                        input,
-                        options,
-                    ) { decoded, total ->
+                        fileName = source.displayName,
+                        inputStream = input,
+                        options = options,
+                        onLazProgress = { decoded, total ->
                         val decodedFraction = if (total > 0L) {
                             decoded.toFloat() / total.toFloat()
                         } else {
@@ -1163,7 +1163,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                                 "Decoding source detail…"
                             },
                         )
-                    }?.also {
+                        },
+                    )?.also {
                         sourceFile?.let { file -> refinementMemoryCache.put(file, options, it) }
                         decodedNow = true
                     }

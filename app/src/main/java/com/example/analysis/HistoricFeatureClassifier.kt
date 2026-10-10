@@ -145,6 +145,7 @@ object HistoricFeatureClassifier {
         if ((candidate.type == TerrainFeatureType.FOUNDATION ||
                 candidate.type == TerrainFeatureType.CELLAR_HOLE ||
                 candidate.type == TerrainFeatureType.DEPRESSION) &&
+            candidate.radiusMeters <= 3.2f &&
             looksLikeBurrowMound(width, height, cellSize, x, y, relief)
         ) {
             return "rejected: compact burrow-scale mound"
@@ -240,8 +241,8 @@ object HistoricFeatureClassifier {
                 if (value >= 0.08f) support++
             }
         }
-        val widthMeters = max(1, radius * 2) * cellSize
-        return peak in 0.08f..0.45f && support <= max(3, cells / 8) && widthMeters <= 2.6f
+        val footprintMeters = sqrt(support.toFloat().coerceAtLeast(1f)) * cellSize
+        return peak in 0.08f..0.45f && support <= max(3, cells / 8) && footprintMeters <= 2.6f
     }
 }
 

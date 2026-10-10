@@ -344,9 +344,7 @@ internal class LidarRasterizer(
         val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
-        val declared = estimatedPointsInFocus.toLong().coerceAtLeast(0L)
-        val wasTruncated = truncatedByReader ||
-            (declared > 0L && pointsDecoded < declared && pointsDecoded + 1L < declared)
+        val wasTruncated = truncatedByReader
         val earlyOutNote = if (wasTruncated) " · truncated" else ""
         val samplingNote = "every return used · $pointsDecoded points decoded$earlyOutNote"
         val modeNote = when (appliedMode) {
