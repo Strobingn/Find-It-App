@@ -125,6 +125,15 @@ class LidarRasterizerTest {
     }
 
     @Test
+    fun densityCapDoesNotDowngradeAFocusedRefine() {
+        val focused = LidarImportOptions(
+            rasterResolution = 1_536,
+            focusBounds = NormalizedRasterBounds(0.05, 0.05, 0.15, 0.15),
+        ).forTerrainDecode(rangeX = 100.0, rangeY = 100.0, pointCount = 100)
+        assertEquals(1_536, focused.rasterResolution)
+    }
+
+    @Test
     fun preservesSourceFootprintAndUsesClassifiedGround() {
         val rasterizer = LidarRasterizer(
             minX = 0.0,

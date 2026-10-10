@@ -1018,6 +1018,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (resetViewport) {
             _viewportResetKey.value = _viewportResetKey.value + 1
         }
+        // 2D hillshade updates immediately; rebuild the GPU mesh so 3D refine matches it.
+        viewModelScope.launch(Dispatchers.Default) {
+            val scene = TerrainGpuSceneBuilder.build(grid)
+            TerrainPerformanceSession.publish(scene)
+        }
     }
 
     private fun publishTerrainQuality(

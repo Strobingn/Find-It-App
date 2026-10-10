@@ -61,6 +61,22 @@ fun LidarImportOptions.withDensityLimitedResolution(
     return copy(rasterResolution = capped).sanitized()
 }
 
+/**
+ * Full-footprint opens stay density-capped so empty cells stay rare. Focused refine must keep
+ * the requested pixel count: that is how a zoomed viewport gets a smaller cell size and looks
+ * sharper than the overview.
+ */
+fun LidarImportOptions.forTerrainDecode(
+    rangeX: Double,
+    rangeY: Double,
+    pointCount: Long,
+    cellToSpacing: Double = DEFAULT_CELL_TO_SPACING,
+): LidarImportOptions {
+    val sanitized = sanitized()
+    if (sanitized.focusBounds != null) return sanitized
+    return sanitized.withDensityLimitedResolution(rangeX, rangeY, pointCount, cellToSpacing)
+}
+
 internal fun recommendedCellSizeMeters(
     areaMeters: Double,
     groundPointCount: Long,
