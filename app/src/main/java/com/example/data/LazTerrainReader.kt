@@ -46,8 +46,21 @@ internal object LazTerrainReader {
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)? = null,
     ): DemGenerator.LasLoadResult? {
+        if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
+            val native = runCatching {
+                TerrainStageProfiler.stage("decode_lazrs", file.name) {
+                    readNativePacked(file, options, shouldContinue)
+                }
+            }.onFailure { exception ->
+                System.err.println("laz-rs decode failed for ${file.name}: ${exception.message}")
+            }.getOrNull()
+            if (native != null) return native
+        }
+
         val parallel = runCatching {
-            readParallelChunks(file, options, shouldContinue, onProgress)
+            TerrainStageProfiler.stage("decode_parallel", file.name) {
+                readParallelChunks(file, options, shouldContinue, onProgress)
+            }
         }.onFailure { exception ->
             System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
@@ -115,7 +128,10 @@ internal object LazTerrainReader {
                 val pointsPerChunk = (PREVIEW_TARGET_POINTS / chunksToSample)
                     .coerceIn(1, sourceChunkSize)
                 // Keep full raster resolution; only thin the point sample budget.
-                val previewOptions = safeOptions.copy(smoothingRadius = 0).sanitized()
+                val previewOptions = densityLimitedOptions(
+                    header,
+                    safeOptions.copy(smoothingRadius = 0),
+                )
                 val rasterizer = LidarRasterizer(
                     minX = header.minX,
                     maxX = header.maxX,
@@ -224,12 +240,13 @@ internal object LazTerrainReader {
             minY = sourceHeader.min_y,
         )
         val selectedPointCount = selection.selectedPointCount.coerceAtLeast(1L)
+        val limited = densityLimitedOptions(header, options)
         val rasterizer = LidarRasterizer(
             minX = header.minX,
             maxX = header.maxX,
             minY = header.minY,
             maxY = header.maxY,
-            options = options,
+            options = limited,
             declaredPointCount = estimatedPoints(header.pointCount, options.sanitized().focusBounds),
             lasVersionMajor = header.versionMajor,
             lasVersionMinor = header.versionMinor,
@@ -332,7 +349,7 @@ internal object LazTerrainReader {
         return rasterizeLowLevel(
             reader = reader,
             header = header,
-            options = options,
+            options = densityLimitedOptions(header, options),
             progressTotal = estimatedPoints,
             shouldContinue = shouldContinue,
             onProgress = onProgress,
@@ -379,7 +396,7 @@ internal object LazTerrainReader {
             rasterizeHighLevel(
                 points = points,
                 header = header,
-                options = options,
+                options = densityLimitedOptions(header, options),
                 progressTotal = estimatedPoints(header.pointCount, focus),
                 shouldContinue = shouldContinue,
                 onProgress = onProgress,
@@ -520,7 +537,8 @@ internal object LazTerrainReader {
             chunkSize = sourceHeader.laszip?.chunk_size?.takeIf { it in 1..5_000_000 } ?: DEFAULT_CHUNK_POINTS
         }
         if (pointCount <= 0L) return null
-        val focus = options.sanitized().focusBounds
+        val limited = densityLimitedOptions(header, options)
+        val focus = limited.focusBounds
         if (focus != null) return null
         val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
         if (workers == 1 || pointCount < chunkSize.toLong() * 2L) return null
@@ -541,7 +559,7 @@ internal object LazTerrainReader {
                     val startPoint = startChunk.toLong() * chunkSize.toLong()
                     val endPoint = min(pointCount, endChunk.toLong() * chunkSize.toLong())
                     if (startPoint >= endPoint) return@Callable null
-                    val rasterizer = newRasterizer(header, options, endPoint - startPoint)
+                    val rasterizer = newRasterizer(header, limited, endPoint - startPoint)
                     SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
                         if (!reader.seek(startPoint)) return@use null
                         var remaining = endPoint - startPoint
@@ -589,10 +607,55 @@ internal object LazTerrainReader {
         rasterizer: LidarRasterizer,
         header: Header,
         decoderLabel: String,
-    ): DemGenerator.LasLoadResult? = rasterizer.finish(
-        pointFormat = header.pointFormat,
-        sourceLabel = "LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat} $decoderLabel",
-    )
+    ): DemGenerator.LasLoadResult? = TerrainStageProfiler.stage("grid", decoderLabel) {
+        rasterizer.finish(
+            pointFormat = header.pointFormat,
+            sourceLabel = "LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat} $decoderLabel",
+        )
+    }
+
+    /**
+     * laz-rs JNI path: one packed buffer, then the same [LidarRasterizer] hot path.
+     * Falls back to laszip4j when the .so is missing or the decode returns no points.
+     */
+    private fun readNativePacked(
+        file: File,
+        options: LidarImportOptions,
+        shouldContinue: () -> Boolean,
+    ): DemGenerator.LasLoadResult? {
+        if (!LazRsNativeDecoder.isAvailable) return null
+        val probe = SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) ?: return null
+        val header: Header
+        val pointCount: Long
+        probe.use { reader ->
+            val sourceHeader = reader.header
+            pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
+                ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL)
+            header = Header(
+                versionMajor = sourceHeader.version_major.toInt() and 0xFF,
+                versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
+                pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
+                pointCount = pointCount,
+                scaleX = sourceHeader.x_scale_factor,
+                scaleY = sourceHeader.y_scale_factor,
+                scaleZ = sourceHeader.z_scale_factor,
+                offsetX = sourceHeader.x_offset,
+                offsetY = sourceHeader.y_offset,
+                offsetZ = sourceHeader.z_offset,
+                maxX = sourceHeader.max_x,
+                minX = sourceHeader.min_x,
+                maxY = sourceHeader.max_y,
+                minY = sourceHeader.min_y,
+            )
+        }
+        if (pointCount <= 0L || pointCount > Int.MAX_VALUE.toLong()) return null
+        val packed = PackedPointRasterizer.allocate(pointCount.toInt())
+        val decoded = LazRsNativeDecoder.decodePacked(file, packed)
+        if (decoded <= 0) return null
+        val rasterizer = newRasterizer(header, options, pointCount)
+        PackedPointRasterizer.addAll(rasterizer, packed, decoded, shouldContinue)
+        return finish(rasterizer, header, "laz-rs packed JNI")
+    }
 
     private fun applyFocus(reader: LASreaderLAS, header: Header, focus: NormalizedRasterBounds) {
         val rangeX = header.maxX - header.minX
@@ -602,6 +665,24 @@ internal object LazTerrainReader {
             header.minY + (1.0 - focus.bottom) * rangeY,
             header.minX + focus.right * rangeX,
             header.minY + (1.0 - focus.top) * rangeY,
+        )
+    }
+
+    /**
+     * Apply the 1.5–2× ground-spacing cell cap once from the **full** header. Chunk workers must
+     * not recompute this from their own point range or merged rasters will disagree in size.
+     */
+    private fun densityLimitedOptions(header: Header, options: LidarImportOptions): LidarImportOptions {
+        val sanitized = options.sanitized()
+        val focus = sanitized.focusBounds
+        val rangeX = ((header.maxX - header.minX) * ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)))
+            .takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+        val rangeY = ((header.maxY - header.minY) * ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0)))
+            .takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+        return sanitized.withDensityLimitedResolution(
+            rangeX = rangeX,
+            rangeY = rangeY,
+            pointCount = estimatedPoints(header.pointCount, focus),
         )
     }
 

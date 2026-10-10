@@ -3,14 +3,16 @@ package com.example.data
 import kotlin.math.max
 import kotlin.math.sqrt
 
-/** Interleaved position/normal vertices and unsigned-short triangle indices for one spatial tile. */
+/** Interleaved position/normal vertices and triangle indices for one spatial tile. */
 data class TerrainGpuBatch(
     val tile: TerrainSpatialTile,
     val vertices: FloatArray,
     val indices: ShortArray,
+    val intIndices: IntArray? = null,
 ) {
     val vertexCount: Int get() = vertices.size / FLOATS_PER_VERTEX
-    val triangleCount: Int get() = indices.size / 3
+    val triangleCount: Int get() = (intIndices?.size ?: indices.size) / 3
+    val usesIntIndices: Boolean get() = intIndices != null
 
     companion object {
         const val FLOATS_PER_VERTEX = 6
@@ -31,6 +33,8 @@ data class TerrainGpuScene(
     val levels: List<TerrainGpuLevel>,
     val sourceWidth: Int,
     val sourceHeight: Int,
+    val heightmap: HeightmapTexture? = null,
+    val cdlodNodes: List<CdlodNode> = emptyList(),
 ) {
     init {
         require(levels.isNotEmpty())
@@ -62,14 +66,18 @@ object TerrainGpuSceneBuilder {
      * (tileSize + 1) vertices wide, so tileSize must stay ≤ 254 for ushort batches (255² ≤ 65,535).
      */
     const val MAX_SAFE_TILE_SIZE = 254
+    /** ES 3.0 unsigned-int index tiles. 1025² vertices still fit a 32-bit element buffer. */
+    const val MAX_INT_TILE_SIZE = 1_024
 
     fun build(
         source: ElevationGrid,
         maxFinestDimension: Int = Int.MAX_VALUE,
         tileSize: Int = 64,
+        useIntIndices: Boolean = false,
+        attachHeightmap: Boolean = false,
     ): TerrainGpuScene {
-        // Cap so a full tile never exceeds 65,535 vertices (ushort index limit).
-        val safeTileSize = tileSize.coerceIn(16, MAX_SAFE_TILE_SIZE)
+        val cap = if (useIntIndices) MAX_INT_TILE_SIZE else MAX_SAFE_TILE_SIZE
+        val safeTileSize = tileSize.coerceIn(16, cap)
         val pyramid = TerrainLodPyramid.build(
             source = source,
             maxFinestDimension = maxFinestDimension,
@@ -79,23 +87,74 @@ object TerrainGpuSceneBuilder {
         val levels = pyramid.levels.map { level ->
             val index = TerrainSpatialGridIndex.build(level.grid, safeTileSize)
             val elevationBounds = elevationBounds(level.grid)
+            var rendered = 0
+            var skippedEmpty = 0
+            var skippedNoQuads = 0
+            val batches = index.tiles.mapNotNull { tile ->
+                if (tile.isEmpty) {
+                    skippedEmpty++
+                    TerrainCoverageLog.emit(
+                        "FindItTerrain",
+                        "GPU tile r${tile.tileRow}c${tile.tileColumn} SKIP empty " +
+                            "(${tile.startX}..${tile.endXInclusive}," +
+                            "${tile.startY}..${tile.endYInclusive})",
+                    )
+                    return@mapNotNull null
+                }
+                val batch = buildBatch(
+                    level.grid,
+                    tile,
+                    elevationBounds.first,
+                    elevationBounds.second,
+                    useIntIndices,
+                )
+                if (batch == null) {
+                    skippedNoQuads++
+                    TerrainCoverageLog.emit(
+                        "FindItTerrain",
+                        "GPU tile r${tile.tileRow}c${tile.tileColumn} SKIP no-quads " +
+                            "valid=${tile.validCellCount}",
+                    )
+                } else {
+                    rendered++
+                    TerrainCoverageLog.emit(
+                        "FindItTerrain",
+                        "GPU tile r${tile.tileRow}c${tile.tileColumn} RENDER " +
+                            "valid=${tile.validCellCount} tris=${batch.triangleCount}",
+                    )
+                }
+                batch
+            }
+            TerrainCoverageLog.emit(
+                "FindItTerrain",
+                "GPU level ${level.grid.width}×${level.grid.height} tiles " +
+                    "render=$rendered empty=$skippedEmpty noQuads=$skippedNoQuads",
+            )
             TerrainGpuLevel(
                 reductionFactor = level.reductionFactor,
                 gridWidth = level.grid.width,
                 gridHeight = level.grid.height,
-                batches = index.nonEmptyTiles().mapNotNull { tile ->
-                    buildBatch(level.grid, tile, elevationBounds.first, elevationBounds.second)
-                },
+                batches = batches,
             )
         }.filter { it.batches.isNotEmpty() }
 
         require(levels.isNotEmpty()) { "Terrain contains no renderable cells" }
-        return TerrainGpuScene(levels, source.width, source.height)
+        val heightmap = if (attachHeightmap) HeightmapCdlod.pack(source) else null
+        val nodes = if (heightmap != null) {
+            HeightmapCdlod.select(
+                width = heightmap.width,
+                height = heightmap.height,
+                rangeInCells = HeightmapCdlod.rangeInCellsForZoom(1.4f, maxOf(heightmap.width, heightmap.height)),
+            )
+        } else {
+            emptyList()
+        }
+        return TerrainGpuScene(levels, source.width, source.height, heightmap, nodes)
     }
 
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
         val bounds = elevationBounds(grid)
-        return buildBatch(grid, tile, bounds.first, bounds.second)
+        return buildBatch(grid, tile, bounds.first, bounds.second, useIntIndices = false)
     }
 
     private fun buildBatch(
@@ -103,14 +162,15 @@ object TerrainGpuSceneBuilder {
         tile: TerrainSpatialTile,
         minElevation: Float,
         maxElevation: Float,
+        useIntIndices: Boolean = false,
     ): TerrainGpuBatch? {
         if (tile.isEmpty) return null
         val localWidth = tile.endXInclusive - tile.startX + 1
         val localHeight = tile.endYInclusive - tile.startY + 1
         if (localWidth < 2 || localHeight < 2) return null
-        // OpenGL ES commonly uses unsigned short indices → max 65,535 vertices per batch.
-        require(localWidth.toLong() * localHeight <= 65_535L) {
-            "GPU tile too large (${localWidth}×${localHeight}); tile size must keep vertices ≤ 65,535"
+        val vertexLimit = if (useIntIndices) 2_000_000L else 65_535L
+        require(localWidth.toLong() * localHeight <= vertexLimit) {
+            "GPU tile too large (${localWidth}×${localHeight}); vertices must stay ≤ $vertexLimit"
         }
         val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
 
@@ -131,7 +191,9 @@ object TerrainGpuSceneBuilder {
             }
         }
 
-        val indices = ShortArray((localWidth - 1) * (localHeight - 1) * 6)
+        val quadCapacity = (localWidth - 1) * (localHeight - 1) * 6
+        val shortIndices = if (useIntIndices) ShortArray(0) else ShortArray(quadCapacity)
+        val intIndices = if (useIntIndices) IntArray(quadCapacity) else null
         var indexCount = 0
         for (localY in 0 until localHeight - 1) {
             for (localX in 0 until localWidth - 1) {
@@ -148,16 +210,30 @@ object TerrainGpuSceneBuilder {
                 val v10 = v00 + 1
                 val v01 = v00 + localWidth
                 val v11 = v01 + 1
-                indices[indexCount++] = v00.toShort()
-                indices[indexCount++] = v01.toShort()
-                indices[indexCount++] = v10.toShort()
-                indices[indexCount++] = v10.toShort()
-                indices[indexCount++] = v01.toShort()
-                indices[indexCount++] = v11.toShort()
+                if (intIndices != null) {
+                    intIndices[indexCount++] = v00
+                    intIndices[indexCount++] = v01
+                    intIndices[indexCount++] = v10
+                    intIndices[indexCount++] = v10
+                    intIndices[indexCount++] = v01
+                    intIndices[indexCount++] = v11
+                } else {
+                    shortIndices[indexCount++] = v00.toShort()
+                    shortIndices[indexCount++] = v01.toShort()
+                    shortIndices[indexCount++] = v10.toShort()
+                    shortIndices[indexCount++] = v10.toShort()
+                    shortIndices[indexCount++] = v01.toShort()
+                    shortIndices[indexCount++] = v11.toShort()
+                }
             }
         }
         if (indexCount == 0) return null
-        return TerrainGpuBatch(tile, vertices, indices.copyOf(indexCount))
+        return TerrainGpuBatch(
+            tile = tile,
+            vertices = vertices,
+            indices = if (intIndices != null) ShortArray(0) else shortIndices.copyOf(indexCount),
+            intIndices = intIndices?.copyOf(indexCount),
+        )
     }
 
     private fun elevationBounds(grid: ElevationGrid): Pair<Float, Float> {

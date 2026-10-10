@@ -71,7 +71,9 @@ class TerrainDecodeCoordinator(
                             LazTerrainCache.Hit.MISS -> "Reading point cloud…"
                         },
                     )
-                    val scene = buildGpuScene(fullLookup.result.grid)
+                    val scene = TerrainStageProfiler.stageSuspend("mesh", "cache") {
+                        buildGpuScene(fullLookup.result.grid)
+                    }
                     LazSpatialIndex.ensureBuiltAsync(file)
                     val outcome = TerrainDecodeOutcome(fullLookup.result, fullLookup.hit, scene)
                     onPreview?.invoke(outcome)
@@ -85,7 +87,7 @@ class TerrainDecodeCoordinator(
                 if (canPreview) {
                     onStage("Painting a first-look preview…")
                     val previewTerrain = decodeSparsePreview(file, sanitized)
-                    if (previewTerrain != null) {
+                    if (previewTerrain != null && emptyShareInsideHull(previewTerrain.grid) < 0.30f) {
                         currentCoroutineContext().ensureActive()
                         val previewScene = buildGpuScene(previewTerrain.grid)
                         val exact = startExactJob(fullKey, file, displayName, sanitized)
@@ -114,7 +116,9 @@ class TerrainDecodeCoordinator(
                 cache.putDisk(file, sanitized, decoded)
                 LazSpatialIndex.ensureBuiltAsync(file)
                 onStage("Preparing full-detail GPU terrain…")
-                val scene = buildGpuScene(decoded.grid)
+                val scene = TerrainStageProfiler.stageSuspend("mesh", "${decoded.grid.width}x${decoded.grid.height}") {
+                    buildGpuScene(decoded.grid)
+                }
                 val outcome = TerrainDecodeOutcome(decoded, LazTerrainCache.Hit.MISS, scene)
                 onPreview?.invoke(outcome)
                 outcome
@@ -136,7 +140,9 @@ class TerrainDecodeCoordinator(
                 val decoded = decodeFile(file, displayName, options) ?: return@async null
                 cache.putMemory(file, options, decoded)
                 cache.putDisk(file, options, decoded)
-                val scene = buildGpuScene(decoded.grid)
+                val scene = TerrainStageProfiler.stageSuspend("mesh", "exact") {
+                    buildGpuScene(decoded.grid)
+                }
                 TerrainDecodeOutcome(
                     terrain = decoded,
                     cacheHit = LazTerrainCache.Hit.MISS,
@@ -207,18 +213,22 @@ class TerrainDecodeCoordinator(
             )
         }
         onStage("Preparing full-detail GPU terrain…")
-        val scene = buildGpuScene(terrain.grid)
+        val scene = TerrainStageProfiler.stageSuspend("mesh", "copc") { buildGpuScene(terrain.grid) }
         return TerrainDecodeOutcome(terrain, LazTerrainCache.Hit.MISS, scene)
     }
 
     private suspend fun buildGpuScene(grid: ElevationGrid): TerrainGpuScene =
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            TerrainGpuSceneBuilder.build(
+            val scene = TerrainGpuSceneBuilder.build(
                 source = grid,
                 maxFinestDimension = maxOf(grid.width, grid.height, 64),
                 tileSize = GPU_PREVIEW_TILE_SIZE,
+                useIntIndices = true,
+                attachHeightmap = true,
             )
+            TerrainMemoryMonitor.noteGpuScene(scene)
+            scene
         }
 
     private suspend fun decodeFile(
@@ -229,24 +239,45 @@ class TerrainDecodeCoordinator(
         val decodeContext = currentCoroutineContext()
         decodeContext.ensureActive()
         if (isLazFile(file, displayName)) {
-            val laz = LazTerrainReader.read(
-                file = file,
-                options = options,
-                shouldContinue = { decodeContext.isActive },
-            ) ?: return@withContext null
+            val laz = TerrainStageProfiler.stage("decode", displayName) {
+                LazTerrainReader.read(
+                    file = file,
+                    options = options,
+                    shouldContinue = { decodeContext.isActive },
+                )
+            } ?: return@withContext null
             DemGenerator.TerrainLoadResult(
                 grid = laz.grid,
                 summary = laz.note,
                 isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
             )
         } else {
-            FileInputStream(file).buffered(256 * 1024).use { input ->
-                DemGenerator.parseFromStreamDetailed(
-                    fileName = displayName,
-                    inputStream = input,
-                    options = options,
-                    shouldContinue = { decodeContext.isActive },
-                )
+            if (displayName.substringAfterLast('.', "").equals("las", ignoreCase = true) ||
+                file.extension.equals("las", ignoreCase = true)
+            ) {
+                TerrainStageProfiler.stage("decode", displayName) {
+                    val las = DemGenerator.parseLasFileMapped(
+                        file = file,
+                        options = options,
+                        shouldContinue = { decodeContext.isActive },
+                    ) ?: return@stage null
+                    DemGenerator.TerrainLoadResult(
+                        grid = las.grid,
+                        summary = las.note,
+                        isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+                    )
+                }
+            } else {
+                FileInputStream(file).buffered(256 * 1024).use { input ->
+                    TerrainStageProfiler.stage("decode", displayName) {
+                        DemGenerator.parseFromStreamDetailed(
+                            fileName = displayName,
+                            inputStream = input,
+                            options = options,
+                            shouldContinue = { decodeContext.isActive },
+                        )
+                    }
+                }
             }
         }
     }

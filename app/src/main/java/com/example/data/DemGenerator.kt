@@ -358,12 +358,17 @@ object DemGenerator {
             }
 
             if (!skipFully(buffered, offsetToPoints)) return null
+            val limited = options.withDensityLimitedResolution(
+                rangeX = maxX - minX,
+                rangeY = maxY - minY,
+                pointCount = pointCount,
+            )
             val rasterizer = LidarRasterizer(
                 minX = minX,
                 maxX = maxX,
                 minY = minY,
                 maxY = maxY,
-                options = options,
+                options = limited,
                 declaredPointCount = pointCount,
                 lasVersionMajor = versionMajor,
                 lasVersionMinor = versionMinor,
@@ -402,13 +407,50 @@ object DemGenerator {
                     break
                 }
             }
-            rasterizer.finish(
-                pointFormat = pointFormat,
-                sourceLabel = "LAS $versionMajor.$versionMinor format $pointFormat",
-            )
+            TerrainStageProfiler.stage("grid", "LAS stream") {
+                rasterizer.finish(
+                    pointFormat = pointFormat,
+                    sourceLabel = "LAS $versionMajor.$versionMinor format $pointFormat",
+                )
+            }
         } catch (exception: Exception) {
             exception.printStackTrace()
             null
+        }
+    }
+
+    /**
+     * Uncompressed LAS via FileChannel mmap: no per-record heap copy beyond the mapped page.
+     * Falls back to the stream reader if mapping fails.
+     */
+    fun parseLasFileMapped(
+        file: java.io.File,
+        options: LidarImportOptions,
+        shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+    ): LasLoadResult? = TerrainStageProfiler.stage("decode_mapped_las", file.name) {
+        runCatching {
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                val mapped = raf.channel.map(
+                    java.nio.channels.FileChannel.MapMode.READ_ONLY,
+                    0,
+                    file.length(),
+                ).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                parseLasStreamDetailed(java.nio.channels.Channels.newInputStream(object : java.nio.channels.ReadableByteChannel {
+                    override fun isOpen(): Boolean = true
+                    override fun close() = Unit
+                    override fun read(dst: java.nio.ByteBuffer): Int {
+                        if (!mapped.hasRemaining()) return -1
+                        val n = minOf(dst.remaining(), mapped.remaining())
+                        val limit = mapped.limit()
+                        mapped.limit(mapped.position() + n)
+                        dst.put(mapped)
+                        mapped.limit(limit)
+                        return n
+                    }
+                }).buffered(256 * 1024), options, shouldContinue)
+            }
+        }.getOrElse {
+            file.inputStream().buffered(256 * 1024).use { parseLasStreamDetailed(it, options, shouldContinue) }
         }
     }
 

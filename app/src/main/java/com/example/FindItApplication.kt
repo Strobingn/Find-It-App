@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import com.example.data.LazDecoderSettings
 import io.sentry.Sentry
 import io.sentry.SentryLevel
 import io.sentry.android.core.SentryAndroid
@@ -13,6 +14,7 @@ import io.sentry.protocol.User
 class FindItApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        LazDecoderSettings.load(this)
         initSentry()
     }
 

@@ -88,12 +88,15 @@ class TerrainLodPyramid private constructor(
             val bare = FloatArray(width * height)
             val canopy = FloatArray(width * height)
             val valid = BooleanArray(width * height)
+            val interpolated = BooleanArray(width * height)
 
             for (y in 0 until height) {
                 for (x in 0 until width) {
                     var elevationSum = 0.0
                     var elevationCount = 0
                     var maxCanopy = 0f
+                    var hadMeasured = false
+                    var hadInterpolated = false
                     for (dy in 0..1) {
                         for (dx in 0..1) {
                             val sx = x * 2 + dx
@@ -104,6 +107,11 @@ class TerrainLodPyramid private constructor(
                             elevationSum += source.bareEarth[sourceIndex]
                             elevationCount++
                             maxCanopy = max(maxCanopy, source.canopySpikes[sourceIndex])
+                            if (source.interpolatedData[sourceIndex]) {
+                                hadInterpolated = true
+                            } else {
+                                hadMeasured = true
+                            }
                         }
                     }
                     val outputIndex = y * width + x
@@ -111,6 +119,7 @@ class TerrainLodPyramid private constructor(
                         valid[outputIndex] = true
                         bare[outputIndex] = (elevationSum / elevationCount).toFloat()
                         canopy[outputIndex] = maxCanopy
+                        interpolated[outputIndex] = !hadMeasured && hadInterpolated
                     }
                 }
             }
@@ -122,6 +131,7 @@ class TerrainLodPyramid private constructor(
                 canopySpikes = canopy,
                 cellSizeMeters = source.cellSizeMeters * 2f,
                 validData = valid,
+                interpolatedData = interpolated,
             )
         }
     }
@@ -167,7 +177,7 @@ class TerrainSpatialGridIndex private constructor(
 
     companion object {
         fun build(grid: ElevationGrid, tileSize: Int = 64): TerrainSpatialGridIndex {
-            require(tileSize in 16..256)
+            require(tileSize in 16..1024)
             val columns = ceil(grid.width / tileSize.toDouble()).toInt()
             val rows = ceil(grid.height / tileSize.toDouble()).toInt()
             val tiles = ArrayList<TerrainSpatialTile>(columns * rows)

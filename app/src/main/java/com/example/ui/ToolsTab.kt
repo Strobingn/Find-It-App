@@ -42,7 +42,13 @@ import com.example.analysis.ml.RegionalCorpus
 import com.example.analysis.ml.RegionalCorpusCatalog
 import com.example.data.DetectionSource
 import com.example.data.MetalType
+import com.example.data.LazDecoderBackend
+import com.example.data.LazDecoderSettings
+import com.example.data.LazRsNativeDecoder
 import com.example.data.PerfHarness
+import com.example.data.TerrainDecoderBenchmark
+import com.example.data.TerrainMemoryMonitor
+import com.example.data.TerrainStageProfiler
 import com.example.data.TargetSignal
 import com.example.data.download.LazDownloadQueue
 import com.example.data.mosaic.MosaicStressSuite
@@ -143,6 +149,7 @@ fun ToolsTab(
     var archiveImportDialog by remember { mutableStateOf<String?>(null) }
     var regionalCorpusStatus by remember { mutableStateOf<String?>(null) }
     var perfHarnessStatus by remember { mutableStateOf<String?>(null) }
+    var decoderBenchStatus by remember { mutableStateOf<String?>(null) }
     var mosaicStressStatus by remember { mutableStateOf<String?>(null) }
     val arCoreStatus = remember(context) { ArCoreAvailability.status(context) }
     val reviewedStore = remember(context) {
@@ -602,6 +609,69 @@ fun ToolsTab(
                     },
                     modifier = Modifier.testTag("tool_perf_harness_report"),
                 ) { Text("Show last report") }
+            }
+        }
+        item {
+            val decoderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                if (uri == null) return@rememberLauncherForActivityResult
+                scope.launch(Dispatchers.IO) {
+                    val name = uri.lastPathSegment.orEmpty()
+                    val ext = when {
+                        name.endsWith(".laz", ignoreCase = true) -> "laz"
+                        else -> "las"
+                    }
+                    val copy = File(context.cacheDir, "decoder-bench-${System.currentTimeMillis()}.$ext")
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            copy.outputStream().use { input.copyTo(it) }
+                        }
+                    }
+                    val result = runCatching {
+                        TerrainDecoderBenchmark.run(
+                            file = copy,
+                            cacheDir = File(context.cacheDir, "decoder-bench-cache"),
+                        )
+                    }.getOrElse { error ->
+                        decoderBenchStatus = error.message
+                        return@launch
+                    }
+                    withContext(Dispatchers.Main) {
+                        decoderBenchStatus = result.format().trim()
+                    }
+                }
+            }
+            ToolCard(
+                icon = Icons.Default.Insights,
+                title = "Decoder benchmark",
+                status = decoderBenchStatus
+                    ?: "laszip4j vs laz-rs on the same file · native=${LazRsNativeDecoder.isAvailable} · prefer=${LazDecoderSettings.preferred}",
+                statusActive = decoderBenchStatus != null,
+                description = "Times laszip4j and laz-rs on the same file (JNI direct buffer, " +
+                    "parallel chunk decompression). Default stays laszip4j until native wins " +
+                    "on this phone. " + TerrainMemoryMonitor.snapshot().format(),
+            ) {
+                TextButton(
+                    onClick = { decoderPicker.launch(arrayOf("*/*")) },
+                    modifier = Modifier.testTag("tool_decoder_benchmark_run"),
+                ) { Text("Benchmark a LAS/LAZ file") }
+                TextButton(
+                    onClick = {
+                        val next = if (LazDecoderSettings.preferred == LazDecoderBackend.LASZIP4J) {
+                            LazDecoderBackend.NATIVE_LAZ_RS
+                        } else {
+                            LazDecoderBackend.LASZIP4J
+                        }
+                        LazDecoderSettings.persist(context, next)
+                        decoderBenchStatus = "Preferred ${next.name} · resolved ${LazDecoderSettings.resolve()}"
+                    },
+                    modifier = Modifier.testTag("tool_decoder_backend_toggle"),
+                ) { Text("Toggle preferred decoder") }
+                TextButton(
+                    onClick = {
+                        decoderBenchStatus = TerrainStageProfiler.formatReport()
+                    },
+                    modifier = Modifier.testTag("tool_decoder_stage_report"),
+                ) { Text("Show stage timings") }
             }
         }
         item {
