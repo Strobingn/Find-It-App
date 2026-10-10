@@ -680,6 +680,7 @@ internal object LazTerrainReader {
     /**
      * Apply the 1.5–2× ground-spacing cell cap once from the **full** header. Chunk workers must
      * not recompute this from their own point range or merged rasters will disagree in size.
+     * Focused refine skips the cap so the zoomed view can use a finer cell than the overview.
      */
     private fun densityLimitedOptions(header: Header, options: LidarImportOptions): LidarImportOptions {
         val sanitized = options.sanitized()
@@ -688,7 +689,7 @@ internal object LazTerrainReader {
             .takeIf { it.isFinite() && it > 0.0 } ?: 1.0
         val rangeY = ((header.maxY - header.minY) * ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0)))
             .takeIf { it.isFinite() && it > 0.0 } ?: 1.0
-        return sanitized.withDensityLimitedResolution(
+        return sanitized.forTerrainDecode(
             rangeX = rangeX,
             rangeY = rangeY,
             pointCount = estimatedPoints(header.pointCount, focus),
