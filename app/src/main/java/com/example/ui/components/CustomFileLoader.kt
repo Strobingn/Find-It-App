@@ -613,7 +613,7 @@ private fun displayName(context: Context, uri: Uri): String {
     return uri.lastPathSegment?.substringAfterLast('/') ?: "terrain-file"
 }
 
-private suspend fun copyContentUriToStore(
+internal suspend fun copyContentUriToStore(
     context: Context,
     uri: Uri,
     name: String,

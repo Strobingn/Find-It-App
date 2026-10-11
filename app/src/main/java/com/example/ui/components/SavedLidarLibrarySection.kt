@@ -42,6 +42,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.DemGenerator
+import com.example.data.DeviceLidarFile
 import com.example.data.LazDataset
 import com.example.data.LazDatasetStore
 import com.example.data.LazTerrainCache
@@ -123,6 +124,7 @@ fun SavedLidarLibrarySection(
                     displayName = dataset.displayName,
                     options = options,
                 )
+                var paintedEarly = false
                 val outcome = decodeCoordinator.decode(
                     file = dataset.file,
                     displayName = dataset.displayName,
@@ -130,11 +132,14 @@ fun SavedLidarLibrarySection(
                     onPreview = { preview ->
                         withContext(Dispatchers.Main.immediate) {
                             TerrainPerformanceSession.publish(preview.gpuScene)
-                            onTerrainLoaded(preview.terrain, source)
-                            progressText = if (preview.isPreview) {
-                                "Sparse preview visible — exact terrain decoding…"
-                            } else {
-                                "Terrain visible — finishing GPU mesh…"
+                            if (!paintedEarly) {
+                                paintedEarly = true
+                                onTerrainLoaded(preview.terrain, source)
+                                progressText = if (preview.isPreview) {
+                                    "Sparse preview visible — exact terrain decoding…"
+                                } else {
+                                    "Terrain visible — finishing GPU mesh…"
+                                }
                             }
                         }
                     },
@@ -143,7 +148,9 @@ fun SavedLidarLibrarySection(
                     },
                 )
                 TerrainPerformanceSession.publish(outcome.gpuScene)
-                onTerrainLoaded(outcome.terrain, source)
+                if (!paintedEarly) {
+                    onTerrainLoaded(outcome.terrain, source)
+                }
                 isOpening = false
                 progressText = null
                 message = buildString {
@@ -172,6 +179,40 @@ fun SavedLidarLibrarySection(
                 isOpening = false
                 progressText = null
                 message = error.localizedMessage ?: "Could not open this LAZ file"
+                isError = true
+            }
+        }
+    }
+
+    fun openDeviceFile(file: DeviceLidarFile) {
+        if (isOpening) return
+        openJob?.cancel()
+        isOpening = true
+        progressText = "Copying ${file.name} into the library…"
+        message = null
+        isError = false
+        openJob = scope.launch {
+            try {
+                val uri = file.contentUri?.let(Uri::parse) ?: Uri.fromFile(File(file.path))
+                val stored = copyContentUriToStore(context, uri, file.name, datasetStore) { copied ->
+                    withContext(Dispatchers.Main.immediate) {
+                        progressText = "Copied ${formatLidarBytes(copied)}"
+                    }
+                }
+                refresh()
+                isOpening = false
+                val dataset = datasets.firstOrNull { it.file == stored }
+                    ?: LazDataset(stored, stored.name, stored.length(), stored.lastModified())
+                openDataset(dataset)
+            } catch (_: CancellationException) {
+                isOpening = false
+                progressText = null
+                message = "Open cancelled."
+                isError = false
+            } catch (error: Throwable) {
+                isOpening = false
+                progressText = null
+                message = error.localizedMessage ?: "Could not open ${file.name}"
                 isError = true
             }
         }
@@ -307,6 +348,12 @@ fun SavedLidarLibrarySection(
                     )
                 }
             }
+
+            DeviceLidarFilesSection(
+                library = datasets,
+                enabled = !isOpening,
+                onOpen = { openDeviceFile(it) },
+            )
         }
     }
 

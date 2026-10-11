@@ -1263,6 +1263,7 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ImportTab(
     viewModel: HillshadeViewModel,
@@ -1276,10 +1277,15 @@ private fun ImportTab(
     val offlineProgress by viewModel.offlineBasemapProgress.collectAsStateWithLifecycle()
     val offlineMessage by viewModel.offlineBasemapMessage.collectAsStateWithLifecycle()
     val offlineDownloading by viewModel.offlineBasemapDownloading.collectAsStateWithLifecycle()
+    val deviceScanning by com.example.data.DeviceLidarScanner.scanning.collectAsStateWithLifecycle()
+    androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = deviceScanning,
+        onRefresh = { com.example.ui.components.DeviceLidarScanRequests.request() },
+        modifier = Modifier.fillMaxSize().padding(padding),
+    ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(padding)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
@@ -1343,6 +1349,7 @@ private fun ImportTab(
                 onImported()
             },
         )
+    }
     }
 }
 
