@@ -4,6 +4,9 @@ import android.content.Context
 import com.example.BuildConfig
 
 object AppUpdateChecker {
+    /** The UI always resolves to available / up to date / error within this budget. */
+    const val CHECK_TIMEOUT_MS = 15_000L
+
     fun client(
         token: String = BuildConfig.FINDIT_UPDATE_TOKEN.trim(),
         repo: String = BuildConfig.FINDIT_UPDATE_REPO.trim().ifBlank { "Strobingn/Find-It-App" },
@@ -22,7 +25,9 @@ object AppUpdateChecker {
                 else -> latest
             }
         }.getOrElse { error ->
-            UpdateCheckResult.Failed(error.message ?: "Update check failed")
+            UpdateCheckResult.Failed(
+                "Update check failed: " + (error.message ?: error.javaClass.simpleName),
+            )
         }
     }
 

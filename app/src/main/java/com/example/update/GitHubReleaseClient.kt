@@ -2,6 +2,7 @@ package com.example.update
 
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -13,13 +14,13 @@ import org.json.JSONArray
 class GitHubReleaseClient(
     private val repo: String = "Strobingn/Find-It-App",
     private val token: String = "",
-    private val http: OkHttpClient = OkHttpClient(),
+    private val http: OkHttpClient = defaultHttpClient(),
 ) {
     fun latestFinditRelease(): UpdateCheckResult {
         val tokenPresent = token.isNotBlank()
         val releases = ArrayList<FinditRelease>()
         var page = 1
-        while (page <= 20) {
+        while (page <= MAX_PAGES) {
             val url = "https://api.github.com/repos/$repo/releases?per_page=30&page=$page"
             val request = Request.Builder()
                 .url(url)
@@ -38,10 +39,13 @@ class GitHubReleaseClient(
                 if (!response.isSuccessful) {
                     return UpdateCheckResult.Failed("GitHub releases HTTP ${response.code}")
                 }
-                val array = JSONArray(body)
+                val array = runCatching { JSONArray(body) }.getOrElse {
+                    return UpdateCheckResult.Failed("GitHub releases response was not a release list")
+                }
                 if (array.length() == 0) break
                 for (i in 0 until array.length()) {
-                    parseRelease(array.getJSONObject(i).toString())?.let { releases.add(it) }
+                    val item = array.optJSONObject(i) ?: continue
+                    runCatching { parseRelease(item.toString()) }.getOrNull()?.let { releases.add(it) }
                 }
                 if (array.length() < 30) break
             }
@@ -96,6 +100,16 @@ class GitHubReleaseClient(
     }
 
     companion object {
+        /** Release list pages are small; keep the whole check well under the 15 s UI budget. */
+        private const val MAX_PAGES = 5
+
+        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(12, TimeUnit.SECONDS)
+            .build()
+
         fun parseRelease(json: String): FinditRelease? {
             val obj = org.json.JSONObject(json)
             val tag = obj.optString("tag_name")
