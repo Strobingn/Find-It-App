@@ -431,38 +431,52 @@ class ElevationGrid(
         return blend(baseColor, Color.rgb(255, 70, 0), strength)
     }
 
+    private fun isUsable(elevations: FloatArray, i: Int): Boolean =
+        validData[i] && elevations[i].isFinite()
+
     private fun localStatistics(elevations: FloatArray, radius: Int): LocalStatistics {
+        // NaN-aware box statistics: no-data cells (NaN since the DEM stopped nearest-filling)
+        // are excluded from the sums and counted separately so they cannot poison the
+        // integral image for every cell below/right of them.
         val stride = width + 1
         val sum = DoubleArray((width + 1) * (height + 1))
         val squareSum = DoubleArray(sum.size)
+        val validCount = IntArray(sum.size)
         for (y in 0 until height) {
             var rowSum = 0.0
             var rowSquareSum = 0.0
+            var rowCount = 0
             for (x in 0 until width) {
-                val value = elevations[y * width + x].toDouble()
-                rowSum += value
-                rowSquareSum += value * value
-                sum[(y + 1) * stride + x + 1] = sum[y * stride + x + 1] + rowSum
-                squareSum[(y + 1) * stride + x + 1] = squareSum[y * stride + x + 1] + rowSquareSum
+                val i = y * width + x
+                if (isUsable(elevations, i)) {
+                    val value = elevations[i].toDouble()
+                    rowSum += value
+                    rowSquareSum += value * value
+                    rowCount++
+                }
+                val o = (y + 1) * stride + x + 1
+                sum[o] = sum[y * stride + x + 1] + rowSum
+                squareSum[o] = squareSum[y * stride + x + 1] + rowSquareSum
+                validCount[o] = validCount[y * stride + x + 1] + rowCount
             }
         }
         val residual = FloatArray(elevations.size)
         val roughness = FloatArray(elevations.size)
-        // The prefix-sum pass above is inherently sequential, but this one only reads it, so rows
-        // are independent. Local relief and the disturbance view both wait on this before their
-        // first frame can appear.
         forEachRowInParallel { y ->
             val y0 = (y - radius).coerceAtLeast(0)
             val y1 = (y + radius).coerceAtMost(height - 1)
             for (x in 0 until width) {
+                val index = y * width + x
+                if (!isUsable(elevations, index)) continue
                 val x0 = (x - radius).coerceAtLeast(0)
                 val x1 = (x + radius).coerceAtMost(width - 1)
-                val count = (x1 - x0 + 1) * (y1 - y0 + 1)
+                val count = validCount[(y1 + 1) * stride + x1 + 1] - validCount[y0 * stride + x1 + 1] -
+                    validCount[(y1 + 1) * stride + x0] + validCount[y0 * stride + x0]
+                if (count <= 0) continue
                 val localSum = rectangleSum(sum, stride, x0, y0, x1, y1)
                 val localSquareSum = rectangleSum(squareSum, stride, x0, y0, x1, y1)
                 val mean = localSum / count
                 val variance = max(0.0, localSquareSum / count - mean * mean)
-                val index = y * width + x
                 residual[index] = (elevations[index] - mean).toFloat()
                 roughness[index] = sqrt(variance).toFloat()
             }
@@ -471,29 +485,21 @@ class ElevationGrid(
     }
 
     private fun curvature(elevations: FloatArray, cellDistance: Float): FloatArray {
+        // Laplacian; a missing (NaN/invalid) neighbour takes the centre value, invalid centres
+        // yield 0 (they are rendered transparent anyway).
         val output = FloatArray(elevations.size)
         val divisor = cellDistance * cellDistance
-        val lastX = width - 1
-        val lastY = height - 1
         forEachRowInParallel { y ->
-            val interiorRow = y > 0 && y < lastY
-            val rowStart = y * width
             for (x in 0 until width) {
-                val i = rowStart + x
-                // As in the render loop, only the border needs index()'s clamping; interior cells
-                // reach their four neighbours directly.
-                output[i] = if (interiorRow && x > 0 && x < lastX) {
-                    (
-                        elevations[i - 1] + elevations[i + 1] +
-                            elevations[i - width] + elevations[i + width] - 4f * elevations[i]
-                        ) / divisor
-                } else {
-                    (
-                        elevations[index(x - 1, y)] + elevations[index(x + 1, y)] +
-                            elevations[index(x, y - 1)] + elevations[index(x, y + 1)] -
-                            4f * elevations[index(x, y)]
-                        ) / divisor
+                val i = y * width + x
+                if (!isUsable(elevations, i)) continue
+                val c = elevations[i]
+                fun n(nx: Int, ny: Int): Float {
+                    val j = index(nx, ny)
+                    return if (isUsable(elevations, j)) elevations[j] else c
                 }
+                val v = (n(x - 1, y) + n(x + 1, y) + n(x, y - 1) + n(x, y + 1) - 4f * c) / divisor
+                output[i] = if (v.isFinite()) v else 0f
             }
         }
         return output
@@ -502,12 +508,15 @@ class ElevationGrid(
     private fun robustMagnitudeScale(values: FloatArray): Float {
         var magnitudeSum = 0.0
         var maximum = 0f
+        var counted = 0
         for (value in values) {
+            if (!value.isFinite()) continue
+            counted++
             val magnitude = abs(value)
             magnitudeSum += magnitude
             if (magnitude > maximum) maximum = magnitude
         }
-        val mean = (magnitudeSum / values.size.coerceAtLeast(1)).toFloat()
+        val mean = (magnitudeSum / counted.coerceAtLeast(1)).toFloat()
         return max(max(mean * 4.5f, maximum * 0.08f), 1e-5f)
     }
 

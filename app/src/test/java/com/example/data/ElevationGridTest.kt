@@ -105,4 +105,55 @@ class ElevationGridTest {
         assertNotEquals(Color.BLACK, center)
         assertTrue(Color.red(center) > 20)
     }
+
+    private fun nanDem(): ElevationGrid {
+        val w = 24
+        val h = 24
+        val z = FloatArray(w * h) { i ->
+            val x = i % w
+            val y = i / w
+            10f + 0.05f * x + 0.8f * kotlin.math.sin(x * 0.7f) * kotlin.math.cos(y * 0.5f)
+        }
+        val valid = BooleanArray(w * h) { true }
+        for (i in listOf(0, 5, 3 * w + 7, 10 * w + 10, 10 * w + 11, 15 * w + 3, w * h - 1)) {
+            z[i] = Float.NaN
+            valid[i] = false
+        }
+        // Some NaN cells still flagged valid to mimic decoder holes.
+        z[20 * w + 20] = Float.NaN
+        return ElevationGrid(w, h, z, FloatArray(w * h), cellSizeMeters = 1f, validData = valid)
+    }
+
+    private fun assertModeRendersWithNaN(mode: Int) {
+        val grid = nanDem()
+        val bmp = grid.renderHillshade(
+            sunAzimuth = 315f,
+            sunAltitude = 35f,
+            vegetationFilter = 1f,
+            palette = 0,
+            visualizationMode = mode,
+            featureScaleMeters = 3f,
+        )
+        val colors = HashSet<Int>()
+        var opaque = 0
+        for (y in 0 until 24) for (x in 0 until 24) {
+            val c = bmp.getPixel(x, y)
+            if (Color.alpha(c) == 255) {
+                opaque++
+                colors += c
+            }
+        }
+        assertEquals(Color.TRANSPARENT, bmp.getPixel(10, 10))
+        assertTrue("mode $mode: most cells must render", opaque >= 24 * 24 - 8)
+        assertTrue("mode $mode: output must not be constant, got ${colors.size}", colors.size > 8)
+    }
+
+    @Test
+    fun localReliefSurvivesNaNCells() = assertModeRendersWithNaN(3)
+
+    @Test
+    fun curvatureSurvivesNaNCells() = assertModeRendersWithNaN(4)
+
+    @Test
+    fun disturbanceSurvivesNaNCells() = assertModeRendersWithNaN(5)
 }
