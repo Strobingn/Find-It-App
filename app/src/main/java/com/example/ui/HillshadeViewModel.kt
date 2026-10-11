@@ -1226,8 +1226,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun setGroundSurfaceMode(mode: GroundSurfaceMode) {
         _activeGroundMode.value = mode
-        reloadTerrainWithOptions { options -> options.copy(groundMode = mode) }
+        val started = reloadTerrainWithOptions { options -> options.copy(groundMode = mode) }
+        // A dropped reload (another decode/refine in flight, or no project) must not leave the
+        // chip claiming a surface that is not on screen (e.g. "Auto lowest" over a DSM).
+        if (!started) _activeGroundMode.value = displayedGroundMode()
     }
+
+    private fun displayedGroundMode(): GroundSurfaceMode =
+        terrainSource?.options?.groundMode ?: GroundSurfaceMode.SOURCE_CLASSIFIED
 
     /**
      * Re-rasterize the open LiDAR with an ASPRS class filter preset (or all returns).
@@ -1362,13 +1368,13 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         return true
     }
 
-    private fun reloadTerrainWithOptions(transform: (LidarImportOptions) -> LidarImportOptions) {
+    private fun reloadTerrainWithOptions(transform: (LidarImportOptions) -> LidarImportOptions): Boolean {
         val source = terrainSource
         if (source == null) {
             _surfaceReloadMessage.value = "Open a LiDAR project to change surface mode or class filter."
-            return
+            return false
         }
-        if (_isReloadingSurface.value || _isRefiningTerrain.value) return
+        if (_isReloadingSurface.value || _isRefiningTerrain.value) return false
 
         // Dual surface / class filter always reopen the full footprint (not a refined crop).
         val options = transform(source.options).copy(focusBounds = null).sanitized()
@@ -1433,6 +1439,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
                 withContext(Dispatchers.Main.immediate) {
                     if (result == null) {
+                        _activeGroundMode.value = displayedGroundMode()
                         if (_surfaceReloadMessage.value?.startsWith("Surface reload failed") != true) {
                             _surfaceReloadMessage.value =
                                 "Could not reload the LiDAR surface with the selected options."
@@ -1482,6 +1489,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
         }
+        return true
     }
 
     private fun presetFromAllowedClasses(allowed: Set<Int>?): PointClassPreset {
