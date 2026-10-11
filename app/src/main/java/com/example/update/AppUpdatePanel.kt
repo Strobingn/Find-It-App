@@ -24,15 +24,19 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.example.BuildConfig
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateController {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var status by remember { mutableStateOf("Checking for updates…") }
+    var status by remember {
+        mutableStateOf(if (checkOnLaunch) "Checking for updates…" else "Tap to check for updates")
+    }
     var available by remember { mutableStateOf<FinditRelease?>(null) }
     var busy by remember { mutableStateOf(false) }
     var showNotes by remember { mutableStateOf(false) }
@@ -84,7 +88,13 @@ class AppUpdateController(
             setBusy(true)
             setStatus("Checking GitHub releases…")
             val result = try {
-                withContext(Dispatchers.IO) { AppUpdateChecker.check() }
+                withTimeoutOrNull(AppUpdateChecker.CHECK_TIMEOUT_MS) {
+                    withContext(Dispatchers.IO) { AppUpdateChecker.check() }
+                } ?: UpdateCheckResult.Failed("Update check timed out. Check your connection and try again.")
+            } catch (error: CancellationException) {
+                setBusy(false)
+                setStatus("Update check cancelled. Tap to try again.")
+                throw error
             } catch (error: Throwable) {
                 UpdateCheckResult.Failed(error.message ?: "Update check failed")
             } finally {
