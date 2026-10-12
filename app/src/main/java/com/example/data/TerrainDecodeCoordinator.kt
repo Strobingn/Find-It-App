@@ -39,8 +39,8 @@ data class TerrainDecodeOutcome(
  *
  * Large full-footprint LAZ opens may return a **full-resolution sparse chunk preview** first
  * (same raster size, fewer points), then upgrade to the exact product in the background. Focused
- * refinements, small files, and non-LAZ formats stay exact-first. The GPU mesh is built once per
- * product (preview and exact each get a single build).
+ * refinements, small files, and non-LAZ formats stay exact-first. Product grid quality never
+ * drops below the requested resolution (typically ≥ 1,024).
  */
 class TerrainDecodeCoordinator(
     private val cache: LazTerrainCache,
@@ -71,57 +71,45 @@ class TerrainDecodeCoordinator(
                             LazTerrainCache.Hit.MISS -> "Reading point cloud…"
                         },
                     )
-                    val scene = TerrainStageProfiler.stageSuspend("mesh", "cache") {
-                        buildGpuScene(fullLookup.result.grid)
-                    }
+                    // Cache hit: single GPU build, no intermediate mesh (no double-build).
+                    val scene = buildGpuScene(fullLookup.result.grid, fastTiles = false)
                     LazSpatialIndex.ensureBuiltAsync(file)
                     val outcome = TerrainDecodeOutcome(fullLookup.result, fullLookup.hit, scene)
                     onPreview?.invoke(outcome)
                     return@withLock outcome
                 }
 
-                val canPreview = onPreview != null &&
-                    sanitized.focusBounds == null &&
-                    isLazFile(file, displayName) &&
-                    file.length() >= PREVIEW_MIN_FILE_BYTES
-                if (canPreview) {
-                    onStage("Painting a first-look preview…")
-                    val previewTerrain = decodeSparsePreview(file, sanitized)
-                    if (previewTerrain != null && emptyShareInsideHull(previewTerrain.grid) < 0.30f) {
-                        currentCoroutineContext().ensureActive()
-                        val previewScene = buildGpuScene(previewTerrain.grid)
-                        val exact = startExactJob(fullKey, file, displayName, sanitized)
-                        val previewOutcome = TerrainDecodeOutcome(
-                            terrain = previewTerrain,
-                            cacheHit = LazTerrainCache.Hit.MISS,
-                            gpuScene = previewScene,
-                            exactOutcome = exact,
-                            isPreview = true,
-                        )
-                        onPreview.invoke(previewOutcome)
-                        onStage("Preview visible — decoding every return…")
-                        val exactOutcome = exact.await()
-                        if (exactOutcome != null) {
-                            onPreview.invoke(exactOutcome)
-                            return@withLock exactOutcome
-                        }
-                    }
-                }
-
-                onStage("Decoding LAZ/LAS at ${sanitized.rasterResolution} px — every return…")
+                // Sparse chunk previews used to paint first, but they left swiss-cheese holes and
+                // soft detail users hated as the first view. Always decode the exact full-footprint
+                // product first (still memory-bounded by sample stride). Focused Refine stays exact.
+                onStage("Decoding LAZ/LAS at ${sanitized.rasterResolution} px…")
                 val decoded = decodeFile(file, displayName, sanitized)
                     ?: error("Could not decode ${file.name}")
                 currentCoroutineContext().ensureActive()
+                // Memory first so reopen is instant; disk write is generation-gated off-thread.
                 cache.putMemory(file, sanitized, decoded)
                 cache.putDisk(file, sanitized, decoded)
                 LazSpatialIndex.ensureBuiltAsync(file)
-                onStage("Preparing full-detail GPU terrain…")
-                val scene = TerrainStageProfiler.stageSuspend("mesh", "${decoded.grid.width}x${decoded.grid.height}") {
-                    buildGpuScene(decoded.grid)
+
+                currentCoroutineContext().ensureActive()
+                if (onPreview != null) {
+                    onStage("Terrain ready — finishing GPU mesh…")
+                    onPreview(
+                        TerrainDecodeOutcome(
+                            terrain = decoded,
+                            cacheHit = LazTerrainCache.Hit.MISS,
+                            gpuScene = buildGpuScene(decoded.grid, fastTiles = true),
+                            isPreview = false,
+                        ),
+                    )
+                    // One standard-tile final mesh (upgrade from fast-tile intermediate).
+                    val scene = buildGpuScene(decoded.grid, fastTiles = false)
+                    TerrainDecodeOutcome(decoded, LazTerrainCache.Hit.MISS, scene)
+                } else {
+                    onStage("Preparing detailed GPU terrain…")
+                    val scene = buildGpuScene(decoded.grid, fastTiles = false)
+                    TerrainDecodeOutcome(decoded, LazTerrainCache.Hit.MISS, scene)
                 }
-                val outcome = TerrainDecodeOutcome(decoded, LazTerrainCache.Hit.MISS, scene)
-                onPreview?.invoke(outcome)
-                outcome
             }
         } finally {
             if (!lock.isLocked) locks.remove(fullKey, lock)
@@ -133,28 +121,21 @@ class TerrainDecodeCoordinator(
         file: File,
         displayName: String,
         options: LidarImportOptions,
-    ): Deferred<TerrainDecodeOutcome?> {
-        exactJobs[key]?.let { return it }
-        val job = maintenanceScope.async {
-            try {
-                val decoded = decodeFile(file, displayName, options) ?: return@async null
-                cache.putMemory(file, options, decoded)
-                cache.putDisk(file, options, decoded)
-                val scene = TerrainStageProfiler.stageSuspend("mesh", "exact") {
-                    buildGpuScene(decoded.grid)
-                }
-                TerrainDecodeOutcome(
-                    terrain = decoded,
-                    cacheHit = LazTerrainCache.Hit.MISS,
-                    gpuScene = scene,
-                    isPreview = false,
-                )
-            } finally {
-                exactJobs.remove(key)
-            }
+    ): Deferred<TerrainDecodeOutcome?> = maintenanceScope.async {
+        try {
+            val decoded = decodeFile(file, displayName, options) ?: return@async null
+            cache.putMemory(file, options, decoded)
+            cache.putDisk(file, options, decoded)
+            val scene = buildGpuScene(decoded.grid, fastTiles = false)
+            TerrainDecodeOutcome(
+                terrain = decoded,
+                cacheHit = LazTerrainCache.Hit.MISS,
+                gpuScene = scene,
+                isPreview = false,
+            )
+        } finally {
+            exactJobs.remove(key)
         }
-        exactJobs[key] = job
-        return job
     }
 
     private suspend fun decodeSparsePreview(
@@ -198,6 +179,7 @@ class TerrainDecodeCoordinator(
                     shouldContinue = { context.isActive },
                 )
             }.getOrElse { ex ->
+                // Soft-fail path: surface a clear message instead of crashing the open pipeline.
                 throw java.io.IOException(
                     "COPC stream failed (network, range, or format). Try again or download LAZ. " +
                         (ex.message ?: ex::class.java.simpleName),
@@ -212,23 +194,19 @@ class TerrainDecodeCoordinator(
                 isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
             )
         }
-        onStage("Preparing full-detail GPU terrain…")
-        val scene = TerrainStageProfiler.stageSuspend("mesh", "copc") { buildGpuScene(terrain.grid) }
+        onStage("Preparing detailed GPU terrain…")
+        val scene = buildGpuScene(terrain.grid, fastTiles = false)
         return TerrainDecodeOutcome(terrain, LazTerrainCache.Hit.MISS, scene)
     }
 
-    private suspend fun buildGpuScene(grid: ElevationGrid): TerrainGpuScene =
+    private suspend fun buildGpuScene(grid: ElevationGrid, fastTiles: Boolean): TerrainGpuScene =
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            val scene = TerrainGpuSceneBuilder.build(
+            TerrainGpuSceneBuilder.build(
                 source = grid,
-                maxFinestDimension = maxOf(grid.width, grid.height, 64),
-                tileSize = GPU_PREVIEW_TILE_SIZE,
-                useIntIndices = false,
-                attachHeightmap = true,
+                maxFinestDimension = GPU_PREVIEW_MAX_DIMENSION,
+                tileSize = if (fastTiles) GPU_FAST_TILE_SIZE else GPU_PREVIEW_TILE_SIZE,
             )
-            TerrainMemoryMonitor.noteGpuScene(scene)
-            scene
         }
 
     private suspend fun decodeFile(
@@ -250,32 +228,8 @@ class TerrainDecodeCoordinator(
                 isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
             )
         } else {
-            if (displayName.substringAfterLast('.', "").equals("las", ignoreCase = true) ||
-                file.extension.equals("las", ignoreCase = true)
-            ) {
-                TerrainStageProfiler.stage("decode", displayName) {
-                    val las = DemGenerator.parseLasFileMapped(
-                        file = file,
-                        options = options,
-                        shouldContinue = { decodeContext.isActive },
-                    ) ?: return@stage null
-                    DemGenerator.TerrainLoadResult(
-                        grid = las.grid,
-                        summary = las.note,
-                        isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
-                    )
-                }
-            } else {
-                FileInputStream(file).buffered(256 * 1024).use { input ->
-                    TerrainStageProfiler.stage("decode", displayName) {
-                        DemGenerator.parseFromStreamDetailed(
-                            fileName = displayName,
-                            inputStream = input,
-                            options = options,
-                            shouldContinue = { decodeContext.isActive },
-                        )
-                    }
-                }
+            FileInputStream(file).buffered(256 * 1024).use { input ->
+                DemGenerator.parseFromStreamDetailed(displayName, input, options)
             }
         }
     }
@@ -298,15 +252,16 @@ class TerrainDecodeCoordinator(
     }
 
     companion object {
-        /** Finest GPU level matches the decoded grid; this is only a safety ceiling. */
-        internal const val GPU_PREVIEW_MAX_DIMENSION = Int.MAX_VALUE
+        internal const val GPU_PREVIEW_MAX_DIMENSION = 1_024
         internal const val GPU_PREVIEW_TILE_SIZE = 128
         /**
          * Larger tiles = fewer GPU batches for intermediate first-paint publish.
-         * Spatial tiles use inclusive ends → (tileSize+1)² vertices; stay ≤ 254 for ushort.
+         * Spatial tiles use inclusive ends → about (tileSize+1)² vertices; 256 blew past the
+         * ushort 65,535 limit and crashed LAS/LAZ open with bare "Failed requirement".
+         * Spatial tiles use inclusive ends → (tileSize+1)² vertices; 256 was one over the
+         * ushort limit and crashed LAS/LAZ open with bare "Failed requirement".
          */
         internal const val GPU_FAST_TILE_SIZE = 192
-        private const val PREVIEW_MIN_FILE_BYTES = 32L * 1024L * 1024L
     }
 }
 
