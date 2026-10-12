@@ -132,7 +132,10 @@ fun SavedLidarLibrarySection(
                     onPreview = { preview ->
                         withContext(Dispatchers.Main.immediate) {
                             TerrainPerformanceSession.publish(preview.gpuScene)
-                            if (!paintedEarly) {
+                            // Paint the first outcome, and always let a non-preview (exact) outcome
+                            // replace an earlier sparse preview. The old guard ignored the exact
+                            // product, leaving the chunk preview's gaps on screen (#56 regression).
+                            if (!paintedEarly || !preview.isPreview) {
                                 paintedEarly = true
                                 onTerrainLoaded(preview.terrain, source)
                                 progressText = if (preview.isPreview) {

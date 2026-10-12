@@ -80,7 +80,12 @@ class TerrainDecodeCoordinator(
                     return@withLock outcome
                 }
 
-                val canPreview = onPreview != null &&
+                // First paint is the exact, TIN-filled decode. The sparse chunk preview bins only a
+                // subset of LAZ chunks, and each chunk is one flight-line segment, so it painted as
+                // diagonal "brick" strips with black gaps (and could stay on screen if a caller
+                // ignored the exact upgrade). Kept behind a flag; see LazTerrainReader.readSparsePreview.
+                val canPreview = SPARSE_PREVIEW_ENABLED &&
+                    onPreview != null &&
                     sanitized.focusBounds == null &&
                     isLazFile(file, displayName) &&
                     file.length() >= PREVIEW_MIN_FILE_BYTES
@@ -306,6 +311,7 @@ class TerrainDecodeCoordinator(
          * Spatial tiles use inclusive ends → (tileSize+1)² vertices; stay ≤ 254 for ushort.
          */
         internal const val GPU_FAST_TILE_SIZE = 192
+        private const val SPARSE_PREVIEW_ENABLED = false
         private const val PREVIEW_MIN_FILE_BYTES = 32L * 1024L * 1024L
     }
 }
