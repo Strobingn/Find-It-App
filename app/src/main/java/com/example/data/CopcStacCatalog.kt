@@ -19,7 +19,7 @@ data class CopcAsset(
 )
 
 /** Spatial search and access client for the public USGS 3DEP COPC collection. */
-class CopcStacCatalog(private val httpClient: OkHttpClient = OkHttpClient()) {
+class CopcStacCatalog(private val httpClient: OkHttpClient = LazHttp.shared) {
     @Volatile private var cachedSasToken: String? = null
     @Volatile private var cachedSasTokenExpiresAt: Long = 0L
 

@@ -197,6 +197,7 @@ internal object LazTerrainReader {
                 cacheFile = rangeCacheFile,
                 selectiveFields = TERRAIN_DECOMPRESS_FIELDS,
                 focus = NormalizedCopcBounds(focus.left, focus.top, focus.right, focus.bottom),
+                client = LazHttp.shared,
             )?.use { selection ->
                 readOpenedCopc(selection, options, shouldContinue, onProgress)
             }

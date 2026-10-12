@@ -157,6 +157,7 @@ fun NysLazTilePicker(
     // observes them and opens a tile once its bytes have landed.
     val downloadTasks by LazDownloadQueue.tasks.collectAsStateWithLifecycle()
     var awaitingOpenUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var streamedWhileDownloading by rememberSaveable { mutableStateOf<String?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { /* Declined only costs the progress notification; the transfer itself still runs. */ }
@@ -362,19 +363,25 @@ fun NysLazTilePicker(
         }
     }
 
-    fun streamCopc(asset: CopcAsset) {
+    fun startCopcStream(
+        url: String,
+        title: String,
+        assetBounds: com.example.geospatial.GeoSpatialLibrary.GeographicBounds?,
+        assetId: String? = null,
+        authorize: (suspend () -> String)? = null,
+    ) {
         if (downloadJob?.isActive == true) return
         val query = lastSearchBounds ?: run {
             error = "Select an area before starting a COPC stream."
             return
         }
-        val assetBounds = asset.bounds ?: query
-        val clippedMinLon = maxOf(query.minLon, assetBounds.minLon)
-        val clippedMaxLon = minOf(query.maxLon, assetBounds.maxLon)
-        val clippedMinLat = maxOf(query.minLat, assetBounds.minLat)
-        val clippedMaxLat = minOf(query.maxLat, assetBounds.maxLat)
-        val width = assetBounds.maxLon - assetBounds.minLon
-        val height = assetBounds.maxLat - assetBounds.minLat
+        val bounds = assetBounds ?: query
+        val clippedMinLon = maxOf(query.minLon, bounds.minLon)
+        val clippedMaxLon = minOf(query.maxLon, bounds.maxLon)
+        val clippedMinLat = maxOf(query.minLat, bounds.minLat)
+        val clippedMaxLat = minOf(query.maxLat, bounds.maxLat)
+        val width = bounds.maxLon - bounds.minLon
+        val height = bounds.maxLat - bounds.minLat
         if (width <= 0.0 || height <= 0.0 ||
             clippedMinLon >= clippedMaxLon || clippedMinLat >= clippedMaxLat
         ) {
@@ -382,10 +389,10 @@ fun NysLazTilePicker(
             return
         }
         val focus = NormalizedRasterBounds(
-            left = (clippedMinLon - assetBounds.minLon) / width,
-            top = (assetBounds.maxLat - clippedMaxLat) / height,
-            right = (clippedMaxLon - assetBounds.minLon) / width,
-            bottom = (assetBounds.maxLat - clippedMinLat) / height,
+            left = (clippedMinLon - bounds.minLon) / width,
+            top = (bounds.maxLat - clippedMaxLat) / height,
+            right = (clippedMaxLon - bounds.minLon) / width,
+            bottom = (bounds.maxLat - clippedMinLat) / height,
         ).sanitized()
         val options = LidarImportOptions(
             groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
@@ -394,13 +401,18 @@ fun NysLazTilePicker(
             focusBounds = focus,
         )
         error = null
-        activeCopcAssetId = asset.id
+        activeCopcAssetId = assetId
+        streamedWhileDownloading = url
         downloadJob = scope.launch {
             try {
-                status = "Authorizing the USGS COPC stream…"
-                val signedAsset = copcCatalog.signedAsset(asset)
+                val href = if (authorize != null) {
+                    status = "Authorizing the USGS COPC stream…"
+                    authorize()
+                } else {
+                    url
+                }
                 val outcome = decodeCoordinator.decodeRemoteCopc(
-                    url = signedAsset.href,
+                    url = href,
                     // COPC is range-streamed rather than fully downloaded. Keep the sparse range
                     // file beside the normal LAZ datasets so it survives cache cleanup and can be
                     // reused when the same source is opened after leaving the map.
@@ -410,17 +422,28 @@ fun NysLazTilePicker(
                 )
                 TerrainPerformanceSession.publish(outcome.gpuScene)
                 onCustomTerrainLoaded(outcome.terrain, null)
-                status = "Streamed ${asset.title} for the selected area."
+                status = "Streamed $title for the selected area."
             } catch (_: CancellationException) {
                 status = "COPC stream cancelled. Cached byte ranges remain available."
             } catch (t: Throwable) {
                 error = t.localizedMessage ?: "COPC streaming failed."
                 status = null
+                if (streamedWhileDownloading == url) streamedWhileDownloading = null
             } finally {
                 activeCopcAssetId = null
                 downloadJob = null
             }
         }
+    }
+
+    fun streamCopc(asset: CopcAsset) {
+        startCopcStream(
+            url = asset.href,
+            title = asset.title,
+            assetBounds = asset.bounds,
+            assetId = asset.id,
+            authorize = { copcCatalog.signedAsset(asset).href },
+        )
     }
 
     // A box handed over from the map arrives here after the tab switch. Consuming it means
@@ -581,19 +604,47 @@ fun NysLazTilePicker(
         // Open this one automatically when its bytes land, but only if the user is still here.
         awaitingOpenUrl = tile.downloadUrl
         LazDownloadService.enqueue(context, tile.downloadUrl, tile.name)
-        status = "Downloading ${tile.name} in the background. You can leave this screen."
+        if (com.example.data.LazDownloadMirrors.looksLikeCopcUrl(tile.downloadUrl) && lastSearchBounds != null) {
+            startCopcStream(
+                url = tile.downloadUrl,
+                title = tile.name,
+                assetBounds = tile.geographicBounds(),
+            )
+            status = "Streaming ${tile.name} now. The full file keeps downloading for later reuse."
+        } else {
+            status = "Downloading ${tile.name} in the background. You can leave this screen."
+        }
     }
 
     // The service owns the transfer, so completion can arrive while this screen is composed or
     // long after it was left and re-entered. Either way, act on it exactly once.
-    LaunchedEffect(downloadTasks, awaitingOpenUrl) {
+    LaunchedEffect(downloadTasks, awaitingOpenUrl, lastSearchBounds) {
         val url = awaitingOpenUrl ?: return@LaunchedEffect
         val task = downloadTasks.firstOrNull { it.url == url } ?: return@LaunchedEffect
+        if (task.canStreamWhileDownloading &&
+            task.state == LazDownloadState.RUNNING &&
+            streamedWhileDownloading != url &&
+            lastSearchBounds != null &&
+            downloadJob?.isActive != true
+        ) {
+            val tile = tiles.firstOrNull { it.downloadUrl == url }
+            startCopcStream(
+                url = url,
+                title = task.displayName,
+                assetBounds = tile?.geographicBounds(),
+            )
+        }
         when (task.state) {
             LazDownloadState.COMPLETED -> {
+                val alreadyStreamed = streamedWhileDownloading == url
                 awaitingOpenUrl = null
+                streamedWhileDownloading = null
                 LazDownloadQueue.dismiss(url)
-                task.filePath?.let { openDownloadedFile(File(it), task.displayName) }
+                if (alreadyStreamed) {
+                    status = "Saved ${task.displayName} for offline reuse."
+                } else {
+                    task.filePath?.let { openDownloadedFile(File(it), task.displayName) }
+                }
             }
             LazDownloadState.FAILED -> {
                 awaitingOpenUrl = null
@@ -683,9 +734,7 @@ fun NysLazTilePicker(
                         displayName = tile.displayName,
                         expectedLocalFileName = tile.localFileName,
                     ) { task ->
-                        status = task.fraction?.let {
-                            "${index + 1}/${project.tiles.size}: ${tile.displayName} ${(it * 100).toInt()}%"
-                        } ?: "${index + 1}/${project.tiles.size}: ${formatBytesCompact(task.downloadedBytes)} downloaded"
+                        status = "${index + 1}/${project.tiles.size}: ${tile.displayName} · ${task.statusLine()}"
                     }
                     project = project.copy(
                         tiles = project.tiles.map { member ->
@@ -1296,12 +1345,7 @@ fun NysLazTilePicker(
                             Column(Modifier.weight(1f)) {
                                 Text(task.displayName, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
                                 Text(
-                                    when (task.state) {
-                                        LazDownloadState.QUEUED -> "Waiting for the current download to finish"
-                                        else -> task.fraction
-                                            ?.let { "${(it * 100).toInt()}% of ${formatBytesCompact(task.totalBytes)}" }
-                                            ?: "${formatBytesCompact(task.downloadedBytes)} downloaded"
-                                    },
+                                    task.statusLine(),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -1367,6 +1411,21 @@ fun NysLazTilePicker(
     }
 }
 
+
+private fun NysHistoricLazTileCatalog.Tile.geographicBounds():
+    com.example.geospatial.GeoSpatialLibrary.GeographicBounds? {
+    val minLon = minLongitude ?: return null
+    val minLat = minLatitude ?: return null
+    val maxLon = maxLongitude ?: return null
+    val maxLat = maxLatitude ?: return null
+    if (minLon >= maxLon || minLat >= maxLat) return null
+    return com.example.geospatial.GeoSpatialLibrary.GeographicBounds(
+        minLat = minLat,
+        maxLat = maxLat,
+        minLon = minLon,
+        maxLon = maxLon,
+    )
+}
 
 private fun formatBytesCompact(bytes: Long): String {
     val mib = bytes / (1024.0 * 1024.0)

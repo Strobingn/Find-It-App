@@ -454,14 +454,10 @@ fun CustomFileLoader(
                                     val file = importRepository.importFromUrl(
                                         url = url,
                                         store = datasetStore,
-                                        onProgress = { downloaded, total ->
+                                        onProgress = { transfer ->
                                             scope.launch {
-                                                progress = if (total > 0L) downloaded.toFloat() / total.toFloat() else null
-                                                progressText = if (total > 0L) {
-                                                    "${formatBytes(downloaded)} of ${formatBytes(total)}"
-                                                } else {
-                                                    "${formatBytes(downloaded)} downloaded"
-                                                }
+                                                progress = transfer.fraction
+                                                progressText = transfer.statusLine()
                                             }
                                         },
                                     )
