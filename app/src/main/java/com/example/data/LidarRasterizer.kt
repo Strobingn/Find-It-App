@@ -311,6 +311,14 @@ internal class LidarRasterizer(
         } else {
             cleaned
         }
+        if (appliedMode != GroundSurfaceMode.SURFACE_MODEL) {
+            // Ground can never sit above the highest return in its own cell. Low-noise median
+            // replacement (and smoothing) could lift a cell to its neighbours' level, e.g. at a
+            // pit or cliff edge, putting "auto lowest" up to ~50 m above the DSM on real LAZ.
+            for (index in bareEarth.indices) {
+                if (allCount[index] > 0 && bareEarth[index] > allMax[index]) bareEarth[index] = allMax[index]
+            }
+        }
         val canopy = FloatArray(surface.size)
         if (appliedMode != GroundSurfaceMode.SURFACE_MODEL) {
             for (index in canopy.indices) {

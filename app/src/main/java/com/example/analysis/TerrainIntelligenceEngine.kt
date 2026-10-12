@@ -354,6 +354,10 @@ class TerrainIntelligenceEngine(
             put(TerrainDerivedLayer.NATURAL_FEATURE_PENALTY, naturalFeaturePenalty)
             put(TerrainDerivedLayer.MODERN_DISTURBANCE_PENALTY, modernDisturbancePenalty)
         }
+        // Cells with no measured data stay NaN (honest gaps), but no NaN reaches valid cells.
+        for (array in layers.values) {
+            for (i in array.indices) if (!sampled.valid[i]) array[i] = Float.NaN
+        }
         return TerrainDerivedLayers(width, height, cell, layers)
     }
 
@@ -454,7 +458,9 @@ class TerrainIntelligenceEngine(
         for (definition in definitions) {
             val rankedScore = FloatArray(size) { i ->
                 val afterNatural = applyNaturalFeaturePenalty(definition.score[i], naturalPenalty[i], definition.naturalPenaltyWeight)
-                applyNaturalFeaturePenalty(afterNatural, modernPenalty[i], definition.modernPenaltyWeight)
+                val ranked = applyNaturalFeaturePenalty(afterNatural, modernPenalty[i], definition.modernPenaltyWeight)
+                // No-data cells are NaN; NaN < threshold is false, so they must not reach maxima.
+                if (ranked.isFinite()) ranked else 0f
             }
             val maxima = localMaxima(rankedScore, width, height, definition.threshold, perTypeLimit = 14)
             for ((index, rawScore) in maxima) {
@@ -485,7 +491,7 @@ class TerrainIntelligenceEngine(
                     else -> null
                 }
                 val geometryAdjusted = (adjusted + (geometry?.scoreDelta ?: 0f)).coerceIn(0f, 1f)
-                if (geometryAdjusted < definition.threshold * 0.88f) continue
+                if (!geometryAdjusted.isFinite() || geometryAdjusted < definition.threshold * 0.88f) continue
                 output += TerrainFeatureCandidate(
                     id = stableCandidateId(datasetKey, definition.type, xPercent, yPercent),
                     type = definition.type,
@@ -554,7 +560,10 @@ class TerrainIntelligenceEngine(
     }
 
     private fun buildRecommendation(candidates: List<TerrainFeatureCandidate>, summary: String): String {
-        val top = candidates.filter { it.type == TerrainFeatureType.DIG_RECOMMENDATION }.take(3)
+        val top = candidates.filter {
+            it.type == TerrainFeatureType.DIG_RECOMMENDATION &&
+                it.score.isFinite() && it.xPercent.isFinite() && it.yPercent.isFinite()
+        }.take(3)
         if (top.isEmpty()) {
             return "No high-confidence dig-priority zone cleared the current screening threshold. Review local-relief, openness, ruggedness, and ancient-stream layers manually before lowering thresholds."
         }
@@ -616,6 +625,7 @@ class TerrainIntelligenceEngine(
             val width = ceil(grid.width / scale).toInt().coerceAtLeast(1)
             val height = ceil(grid.height / scale).toInt().coerceAtLeast(1)
             val output = FloatArray(width * height)
+            val valid = BooleanArray(width * height)
             for (y in 0 until height) {
                 val y0 = floor(y * scale).toInt().coerceIn(0, grid.height - 1)
                 val y1 = ceil((y + 1) * scale).toInt().coerceIn(y0 + 1, grid.height)
@@ -627,15 +637,22 @@ class TerrainIntelligenceEngine(
                     for (sy in y0 until y1) {
                         for (sx in x0 until x1) {
                             val i = sy * grid.width + sx
-                            if (!grid.validData[i]) continue
+                            if (!grid.validData[i] || !grid.bareEarth[i].isFinite()) continue
                             sum += grid.bareEarth[i]
                             count++
                         }
                     }
-                    output[y * width + x] = if (count > 0) (sum / count).toFloat() else grid.bareEarth[y0 * grid.width + x0]
+                    // No-data blocks (outside the data hull) are NaN in the source grid. Feeding NaN
+                    // into the windowed kernels poisoned whole layers (local relief, ruggedness,
+                    // depression were 100% NaN on real LAZ) and produced NaN candidate scores.
+                    val index = y * width + x
+                    valid[index] = count > 0
+                    output[index] = if (count > 0) (sum / count).toFloat() else Float.NaN
                 }
             }
-            return SampledGrid(width, height, grid.cellSizeMeters * scale.toFloat(), output)
+            // Kernels run on a finite surface; no-data cells are masked back out afterwards.
+            com.example.data.fillMissingNearest(output, width, height)
+            return SampledGrid(width, height, grid.cellSizeMeters * scale.toFloat(), output, valid)
         }
 
         /**
@@ -1040,7 +1057,13 @@ class TerrainIntelligenceEngine(
                 integral[(y1 + 1) * stride + x0] + integral[y0 * stride + x0]
     }
 
-    private data class SampledGrid(val width: Int, val height: Int, val cellSizeMeters: Float, val elevation: FloatArray)
+    private data class SampledGrid(
+        val width: Int,
+        val height: Int,
+        val cellSizeMeters: Float,
+        val elevation: FloatArray,
+        val valid: BooleanArray = BooleanArray(width * height) { true },
+    )
     private data class Detector(
         val type: TerrainFeatureType,
         val score: FloatArray,
