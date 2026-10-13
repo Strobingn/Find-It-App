@@ -57,10 +57,10 @@ class TerrainNoDataRegressionTest {
         val dsm = LazTerrainReader.read(file, LidarImportOptions(groundMode = GroundSurfaceMode.SURFACE_MODEL).sanitized())!!.grid
         var violations = 0
         for (i in low.bareEarth.indices) {
-            val measured = low.validData[i] && dsm.validData[i] && !low.interpolatedData[i] && !dsm.interpolatedData[i]
+            val measured = low.validData[i] && dsm.validData[i] // measured and gap-filled cells alike
             if (measured && low.bareEarth[i] > dsm.bareEarth[i] + 1e-3f) violations++
         }
-        assertEquals("auto-lowest above DSM in measured cells", 0, violations)
+        assertEquals("auto-lowest above DSM (measured or gap-filled)", 0, violations)
         assertAnalysisFinite(low)
         val classified = LazTerrainReader.read(file, LidarImportOptions().sanitized())!!.grid
         assertAnalysisFinite(classified)

@@ -976,7 +976,7 @@ fun AiCloudPanel(
             }
         }
 
-        if (showConfirmCard && findSuggestions != null && lastModelMessage != null) {
+        if (showConfirmCard) {
             item {
                 val targets = loggedSignals
                 val resolvedId = selectedSuggestionSignalId

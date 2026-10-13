@@ -293,6 +293,30 @@ internal object LazTerrainReader {
         options: LidarImportOptions,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)? = null,
+    ): DemGenerator.LasLoadResult? {
+        // laszip4j's non-seekable stream reader stops at the first chunk boundary of chunked LAZ
+        // (it read 50,000 of 10.6M points on autzen), so spool to a temp file and use the seekable
+        // file path. The stream decoder remains the fallback when spooling is not possible.
+        val spooled = runCatching {
+            File.createTempFile("laz-stream-", ".laz").also { temp ->
+                temp.outputStream().buffered(FILE_BUFFER_BYTES).use { out -> inputStream.copyTo(out, FILE_BUFFER_BYTES) }
+            }
+        }.getOrNull()
+        if (spooled != null) {
+            try {
+                return read(spooled, options, shouldContinue, onProgress)
+            } finally {
+                spooled.delete()
+            }
+        }
+        return readStreamDirect(inputStream, options, shouldContinue, onProgress)
+    }
+
+    private fun readStreamDirect(
+        inputStream: InputStream,
+        options: LidarImportOptions,
+        shouldContinue: () -> Boolean,
+        onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
     ): DemGenerator.LasLoadResult? = runCatching {
         val buffered = if (inputStream is BufferedInputStream) {
             inputStream
