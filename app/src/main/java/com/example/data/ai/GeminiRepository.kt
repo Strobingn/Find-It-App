@@ -279,7 +279,7 @@ object GeminiRepository {
                 AnomalyClassification(
                     region = region,
                     label = parts[1].trim(),
-                    confidence = parts[2].trim().toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f,
+                    confidence = parts[2].trim().toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f,
                     description = parts[3].trim(),
                 )
             } else {

@@ -560,8 +560,15 @@ internal object LazTerrainReader {
         val limited = densityLimitedOptions(header, options)
         val focus = limited.focusBounds
         if (focus != null) return null
-        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
-        if (workers == 1 || pointCount < chunkSize.toLong() * 2L) return null
+        if (pointCount < chunkSize.toLong() * 2L) return null
+        // Worker 0's raster doubles as the size probe, so nothing is allocated twice.
+        val firstRaster = newRasterizer(header, limited, pointCount)
+        val workers = parallelDecodeWorkers(
+            cores = Runtime.getRuntime().availableProcessors(),
+            maxHeapBytes = Runtime.getRuntime().maxMemory(),
+            rasterCells = firstRaster.width.toLong() * firstRaster.height.toLong(),
+        )
+        if (workers == 1) return null
 
         val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
         val chunksPerWorker = (totalChunks + workers - 1) / workers
@@ -579,7 +586,7 @@ internal object LazTerrainReader {
                     val startPoint = startChunk.toLong() * chunkSize.toLong()
                     val endPoint = min(pointCount, endChunk.toLong() * chunkSize.toLong())
                     if (startPoint >= endPoint) return@Callable null
-                    val rasterizer = newRasterizer(header, limited, endPoint - startPoint)
+                    val rasterizer = if (worker == 0) firstRaster else newRasterizer(header, limited, endPoint - startPoint)
                     SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
                         if (!reader.seek(startPoint)) return@use null
                         var remaining = endPoint - startPoint
@@ -741,3 +748,17 @@ internal object LazTerrainReader {
         val minY: Double,
     )
 }
+
+/**
+ * Each parallel worker owns a full private raster (8 per-cell arrays = 32 B/cell). At 1536² that
+ * is ~75 MB per worker, so 8 cores could ask for ~600 MB and OOM a 256–512 MB app heap. Keep the
+ * worker rasters within ~40% of the heap; output is identical for any worker count.
+ */
+internal fun parallelDecodeWorkers(cores: Int, maxHeapBytes: Long, rasterCells: Long): Int {
+    val perWorker = (rasterCells * RASTER_BYTES_PER_CELL).coerceAtLeast(1L)
+    val byMemory = ((maxHeapBytes * 0.4) / perWorker).toLong().coerceIn(1L, 8L).toInt()
+    return minOf(cores.coerceIn(1, 8), byMemory)
+}
+
+internal const val RASTER_BYTES_PER_CELL = 32L
+

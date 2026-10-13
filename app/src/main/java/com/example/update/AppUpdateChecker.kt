@@ -7,6 +7,14 @@ object AppUpdateChecker {
     /** The UI always resolves to available / up to date / error within this budget. */
     const val CHECK_TIMEOUT_MS = 15_000L
 
+    /** e.g. "Build 1000685 (findit-v1000685)"; the name is dropped when blank or redundant. */
+    fun buildLabel(versionName: String?, versionCode: Int): String {
+        val name = versionName?.trim().orEmpty()
+        return if (name.isEmpty() || name == versionCode.toString()) "Build $versionCode" else "Build $versionCode ($name)"
+    }
+
+    fun installedBuildLabel(): String = buildLabel(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE)
+
     fun client(
         token: String = BuildConfig.FINDIT_UPDATE_TOKEN.trim(),
         repo: String = BuildConfig.FINDIT_UPDATE_REPO.trim().ifBlank { "Strobingn/Find-It-App" },

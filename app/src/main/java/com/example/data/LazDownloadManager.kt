@@ -22,7 +22,10 @@ import kotlin.math.min
  * NYS/USGS transfers occasionally close a mobile socket mid-stream; retryable failures retain the
  * partial bytes and continue with an HTTP Range request instead of discarding the whole download.
  */
-class LazDownloadManager {
+class LazDownloadManager(
+    /** Parallel ranged connections for large files; 1 disables the multipart path. */
+    private val parallelConnections: Int = DEFAULT_PARALLEL_CONNECTIONS,
+) {
 
     companion object {
         const val MAX_IMPORT_BYTES: Long = 10L * 1024L * 1024L * 1024L
@@ -35,6 +38,10 @@ class LazDownloadManager {
         private const val PROGRESS_STEP_BYTES = 4L * 1024L * 1024L
         private const val RETRY_BASE_DELAY_MS = 1_000L
         private const val RETRY_MAX_DELAY_MS = 8_000L
+        internal const val DEFAULT_PARALLEL_CONNECTIONS = 6
+        /** Below this, one connection is already near line rate and setup cost dominates. */
+        private const val PARALLEL_MIN_BYTES = 16L * 1024L * 1024L
+        private const val SEGMENT_STATE_SUFFIX = ".segments"
 
         /** Shared by LAS and LAZ; LAZ is LAS with compressed point data. */
         private val LIDAR_SIGNATURE = "LASF".toByteArray(Charsets.US_ASCII)
@@ -57,6 +64,14 @@ class LazDownloadManager {
         var partial: File? = destination?.let { File(destinationDirectory, ".${it.name}.part") }
         var expectedTotal = -1L
         var lastFailure: Throwable? = null
+
+        val parallelTarget = destination
+        val parallelPartial = partial
+        if (parallelConnections > 1 && parallelTarget != null && parallelPartial != null) {
+            val done = downloadParallel(originalUrl, parallelTarget, parallelPartial, progress, shouldContinue)
+            if (done != null) return done
+            // Server does not support ranges (or the file is small): sequential path below.
+        }
 
         repeat(MAX_ATTEMPTS) { attempt ->
             if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
@@ -204,7 +219,182 @@ class LazDownloadManager {
         throw IOException(lastFailure?.localizedMessage ?: "LAZ download failed", lastFailure)
     }
 
-    private fun openFollowingRedirects(source: URL, resumeFrom: Long): OpenedConnection {
+    /**
+     * Multipart download: N HTTP Range connections each fill a disjoint byte range of a
+     * preallocated .part file. Per-segment progress is persisted in a .segments sidecar so a
+     * cancelled or failed transfer resumes every segment where it stopped. Returns null (and
+     * leaves no parallel state behind) when the server does not honour ranges or the file is small,
+     * so the caller falls back to the single-connection path.
+     */
+    private fun downloadParallel(
+        url: URL,
+        target: File,
+        partial: File,
+        progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)?,
+        shouldContinue: () -> Boolean,
+    ): File? {
+        val stateFile = File(partial.path + SEGMENT_STATE_SUFFIX)
+        val probe = runCatching { openFollowingRedirects(url, 0L, rangeEnd = 0L) }.getOrNull() ?: return null
+        val finalUrl: URL
+        val total: Long
+        try {
+            if (probe.status != HttpURLConnection.HTTP_PARTIAL) return null.also { clearParallelState(partial, stateFile) }
+            val range = parseContentRange(probe.connection.getHeaderField("Content-Range"))
+                ?: return null.also { clearParallelState(partial, stateFile) }
+            if (range.start != 0L) return null.also { clearParallelState(partial, stateFile) }
+            total = range.total
+            finalUrl = probe.url
+            probe.connection.inputStream.use { it.readBytes() }
+        } finally {
+            probe.connection.disconnect()
+        }
+        if (total < PARALLEL_MIN_BYTES) return null.also { clearParallelState(partial, stateFile) }
+        check(total <= MAX_IMPORT_BYTES) { "LAZ file exceeds the 10 GB import limit" }
+
+        val segments = parallelConnections.coerceIn(2, 16)
+        val starts = LongArray(segments) { total * it / segments }
+        val ends = LongArray(segments) { total * (it + 1) / segments }
+        val done = LongArray(segments)
+        val resumed = readSegmentState(stateFile, total, segments)
+        if (resumed != null && partial.isFile && partial.length() == total) {
+            resumed.copyInto(done)
+        } else {
+            // A sequential .part (or stale state) cannot be mixed with segment offsets.
+            partial.delete()
+            java.io.RandomAccessFile(partial, "rw").use { it.setLength(total) }
+        }
+        val downloaded = java.util.concurrent.atomic.AtomicLong(done.sum())
+        val stateLock = Any()
+        fun persist() = synchronized(stateLock) {
+            stateFile.writeText("$total $segments " + done.joinToString(" "))
+        }
+        persist()
+        progress?.invoke(downloaded.get(), total)
+
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(segments) { task ->
+            Thread(task, "laz-download").apply { isDaemon = true }
+        }
+        try {
+            val futures = (0 until segments).map { index ->
+                pool.submit(java.util.concurrent.Callable {
+                    downloadSegment(finalUrl, partial, index, starts[index], ends[index], done, downloaded, total, stateLock, ::persist, progress, shouldContinue)
+                })
+            }
+            var failure: Throwable? = null
+            for (future in futures) {
+                try {
+                    future.get()
+                } catch (error: java.util.concurrent.ExecutionException) {
+                    if (failure == null) failure = error.cause ?: error
+                }
+            }
+            persist()
+            if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
+            failure?.let { cause ->
+                if (cause is CancellationException) throw cause
+                throw IOException(
+                    (cause.localizedMessage ?: "LAZ download failed") +
+                        " (${downloaded.get()} bytes saved; tap again to resume)",
+                    cause,
+                )
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        validatePointCloudSignature(partial)
+        promote(partial, target)
+        stateFile.delete()
+        progress?.invoke(total, total)
+        return target
+    }
+
+    private fun downloadSegment(
+        url: URL,
+        partial: File,
+        index: Int,
+        start: Long,
+        endExclusive: Long,
+        done: LongArray,
+        downloaded: java.util.concurrent.atomic.AtomicLong,
+        total: Long,
+        stateLock: Any,
+        persist: () -> Unit,
+        progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)?,
+        shouldContinue: () -> Boolean,
+    ) {
+        var lastFailure: Throwable? = null
+        repeat(MAX_ATTEMPTS) { attempt ->
+            val offset = start + synchronized(stateLock) { done[index] }
+            if (offset >= endExclusive) return
+            if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
+            var connection: HttpURLConnection? = null
+            try {
+                val opened = openFollowingRedirects(url, offset, rangeEnd = endExclusive - 1)
+                connection = opened.connection
+                if (opened.status == 408 || opened.status == 429 || opened.status in 500..599) {
+                    throw RetryableHttpException(opened.status, "Temporary download server error")
+                }
+                check(opened.status == HttpURLConnection.HTTP_PARTIAL) { "Server returned HTTP ${opened.status} for a range" }
+                val range = parseContentRange(connection.getHeaderField("Content-Range"))
+                    ?: throw IOException("Partial response had no valid Content-Range")
+                check(range.start == offset && range.total == total) { "Server returned an unexpected range" }
+                java.io.RandomAccessFile(partial, "rw").use { file ->
+                    file.seek(offset)
+                    val buffer = ByteArray(BUFFER_BYTES)
+                    var position = offset
+                    var sinceReport = 0L
+                    connection.inputStream.use { input ->
+                        while (position < endExclusive) {
+                            if (!shouldContinue()) throw CancellationException("LAZ download cancelled")
+                            val wanted = minOf(buffer.size.toLong(), endExclusive - position).toInt()
+                            val count = input.read(buffer, 0, wanted)
+                            if (count < 0) break
+                            file.write(buffer, 0, count)
+                            position += count
+                            synchronized(stateLock) { done[index] = position - start }
+                            val now = downloaded.addAndGet(count.toLong())
+                            sinceReport += count
+                            if (sinceReport >= PROGRESS_STEP_BYTES) {
+                                sinceReport = 0L
+                                persist()
+                                progress?.invoke(now, total)
+                            }
+                        }
+                    }
+                    if (position < endExclusive) throw EOFException("Segment $index ended at $position of $endExclusive")
+                }
+                return
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                lastFailure = failure
+                if (attempt >= MAX_ATTEMPTS - 1 || !isRetryable(failure)) throw failure
+                waitForRetry(attempt, shouldContinue)
+            } finally {
+                connection?.disconnect()
+            }
+        }
+        throw lastFailure ?: IOException("Segment $index failed")
+    }
+
+    private fun readSegmentState(stateFile: File, total: Long, segments: Int): LongArray? = runCatching {
+        if (!stateFile.isFile) return null
+        val parts = stateFile.readText().trim().split(' ').map(String::toLong)
+        if (parts.size != segments + 2 || parts[0] != total || parts[1] != segments.toLong()) return null
+        LongArray(segments) { parts[it + 2] }.takeIf { array ->
+            array.withIndex().all { (i, v) -> v >= 0L && v <= total * (i + 1) / segments - total * i / segments }
+        }
+    }.getOrNull()
+
+    private fun clearParallelState(partial: File, stateFile: File) {
+        if (stateFile.isFile) {
+            // A preallocated multipart .part is not a valid sequential prefix.
+            stateFile.delete()
+            partial.delete()
+        }
+    }
+
+    private fun openFollowingRedirects(source: URL, resumeFrom: Long, rangeEnd: Long? = null): OpenedConnection {
         var currentUrl = source
         var redirects = 0
         while (true) {
@@ -217,7 +407,11 @@ class LazDownloadManager {
                 setRequestProperty("User-Agent", "Find-It-Android/1.0")
                 setRequestProperty("Accept", "application/octet-stream,*/*")
                 setRequestProperty("Accept-Encoding", "identity")
-                if (resumeFrom > 0L) setRequestProperty("Range", "bytes=$resumeFrom-")
+                if (rangeEnd != null) {
+                    setRequestProperty("Range", "bytes=$resumeFrom-$rangeEnd")
+                } else if (resumeFrom > 0L) {
+                    setRequestProperty("Range", "bytes=$resumeFrom-")
+                }
             }
             val status = connection.responseCode
             if (status !in 300..399) return OpenedConnection(currentUrl, connection, status)

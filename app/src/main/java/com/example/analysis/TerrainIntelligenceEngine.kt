@@ -1193,7 +1193,8 @@ object TerrainIntelligenceRenderer {
                 // width x height of short-lived FloatArrays through the collector per render.
                 val hsv = floatArrayOf(0f, 0.82f, 0.95f)
                 for (i in values.indices) {
-                    hsv[0] = ((values[i] % 360f) + 360f) % 360f
+                    val degrees = values[i]
+                    hsv[0] = if (degrees.isFinite()) ((degrees % 360f) + 360f) % 360f else 0f
                     pixels[i] = Color.HSVToColor(hsv)
                 }
             }
@@ -1219,6 +1220,10 @@ object TerrainIntelligenceRenderer {
             TerrainDerivedLayer.MODERN_DISTURBANCE_PENALTY ->
                 for (i in values.indices) pixels[i] = heat(normalizedPositive[i])
         }
+        // No-data cells are NaN since layers restore the data mask after kernel fill. They must
+        // render transparent: NaN reached roundToInt() in the colour ramps and crashed the AI tab
+        // ("Cannot round NaN value") on every real LAZ with cells outside the data hull.
+        for (i in values.indices) if (!values[i].isFinite()) pixels[i] = Color.TRANSPARENT
         bitmap.setPixels(pixels, 0, layers.width, 0, 0, layers.width, layers.height)
         return bitmap
     }
@@ -1259,7 +1264,7 @@ object TerrainIntelligenceRenderer {
     }
 
     private fun gradient(amount: Float, start: Int, end: Int): Int {
-        val t = amount.coerceIn(0f, 1f)
+        val t = if (amount.isFinite()) amount.coerceIn(0f, 1f) else 0f
         return Color.rgb(
             (Color.red(start) * (1f - t) + Color.red(end) * t).roundToInt(),
             (Color.green(start) * (1f - t) + Color.green(end) * t).roundToInt(),
@@ -1279,7 +1284,8 @@ object TerrainIntelligenceRenderer {
         val endGreen = Color.green(end)
         val endBlue = Color.blue(end)
         for (i in normalized.indices) {
-            val t = normalized[i].coerceIn(0f, 1f)
+            val value = normalized[i]
+            val t = if (value.isFinite()) value.coerceIn(0f, 1f) else 0f
             val inverse = 1f - t
             pixels[i] = Color.rgb(
                 (startRed * inverse + endRed * t).roundToInt(),

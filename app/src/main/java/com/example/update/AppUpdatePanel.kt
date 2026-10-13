@@ -225,6 +225,11 @@ fun AppUpdateButtons(
     }
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "Installed: " + AppUpdateChecker.installedBuildLabel(),
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag("tool_installed_build"),
+        )
         TextButton(
             onClick = { controller.check(scope) },
             enabled = !controller.busy,
@@ -255,8 +260,8 @@ fun AppUpdateButtons(
             text = {
                 Text(
                     buildString {
-                        append("Installed versionCode ").append(BuildConfig.VERSION_CODE)
-                        append(" → ").append(release.versionCode).append('\n')
+                        append("Current: ").append(AppUpdateChecker.installedBuildLabel()).append('\n')
+                        append("Available: ").append(AppUpdateChecker.buildLabel(release.name, release.versionCode)).append('\n')
                         append(release.notesForUi.ifBlank { "Newer Find It APK from GitHub Releases." })
                     },
                 )

@@ -206,3 +206,12 @@ class AppUpdateCheckerTest {
         assertEquals(listOf("huge.laz", "site.las"), com.example.data.LazDatasetStore(outLidar).pendingReimportNames())
     }
 }
+
+class BuildLabelTest {
+    @org.junit.Test
+    fun labelsShowBuildNumberAndName() {
+        org.junit.Assert.assertEquals("Build 1000685 (1.4.2)", AppUpdateChecker.buildLabel("1.4.2", 1000685))
+        org.junit.Assert.assertEquals("Build 1000685", AppUpdateChecker.buildLabel("", 1000685))
+        org.junit.Assert.assertTrue(AppUpdateChecker.installedBuildLabel().startsWith("Build "))
+    }
+}

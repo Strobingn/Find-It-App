@@ -44,7 +44,7 @@ internal object AiTargetClassifier {
         return AnomalyClassification(
             region = region,
             label = parts[0].trim().ifBlank { "Uncertain" },
-            confidence = parts[1].trim().toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f,
+            confidence = parts[1].trim().toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f,
             description = parts[2].trim().ifBlank { "No description received" },
         )
     }

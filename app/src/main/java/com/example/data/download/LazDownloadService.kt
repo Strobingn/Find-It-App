@@ -71,9 +71,16 @@ class LazDownloadService : Service() {
         if (worker?.isActive == true) return
         worker = scope.launch {
             try {
-                while (true) {
-                    val task = LazDownloadQueue.nextQueued() ?: break
-                    runTask(task)
+                // Two files at once; each file additionally uses parallel ranged connections.
+                kotlinx.coroutines.coroutineScope {
+                    repeat(CONCURRENT_FILE_DOWNLOADS) {
+                        launch {
+                            while (true) {
+                                val task = LazDownloadQueue.claimNextQueued() ?: break
+                                runTask(task)
+                            }
+                        }
+                    }
                 }
             } finally {
                 stopForegroundCompat()
@@ -221,6 +228,8 @@ class LazDownloadService : Service() {
         const val EXTRA_NAME = "name"
 
         /** Queues a tile and makes sure the service is running to service it. */
+        private const val CONCURRENT_FILE_DOWNLOADS = 2
+
         fun enqueue(context: Context, url: String, displayName: String) {
             val intent = Intent(context, LazDownloadService::class.java)
                 .setAction(ACTION_ENQUEUE)
