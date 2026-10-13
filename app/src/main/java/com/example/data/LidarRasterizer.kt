@@ -245,23 +245,7 @@ internal class LidarRasterizer(
         }
         var lowSpikesRejected = 0
         val automaticGround: FloatArray? = if (appliedMode == GroundSurfaceMode.AUTO_LOWEST) {
-            // Robust automatic ground: reject a cell's lowest return when it is isolated (no
-            // corroborating returns within a narrow band) and sits far below the next-lowest
-            // return. Bird/wire strikes and misclassified below-ground noise disappear, while
-            // real ground under canopy — corroborated by several low returns — is preserved.
-            FloatArray(width * height) { index ->
-                val second = allSecondMin[index]
-                val isolatedLow = allCount[index] >= MIN_SAMPLES_FOR_SPIKE_REJECT &&
-                    allLowBandCount[index] == 1 &&
-                    second != Float.MAX_VALUE &&
-                    second - allMin[index] > LOW_SPIKE_DROP_METERS
-                if (isolatedLow) {
-                    lowSpikesRejected++
-                    second
-                } else {
-                    allMin[index]
-                }
-            }
+            automaticGroundSource().also { lowSpikesRejected = it.second }.first
         } else {
             null
         }
@@ -310,6 +294,26 @@ internal class LidarRasterizer(
             multiScaleSmooth(cleaned, width, height, options.smoothingRadius)
         } else {
             cleaned
+        }
+        if (appliedMode != GroundSurfaceMode.SURFACE_MODEL) {
+            // Ground can never sit above the highest return in its own cell. Low-noise median
+            // replacement (and smoothing) could lift a cell to its neighbours' level, e.g. at a
+            // pit or cliff edge, putting "auto lowest" up to ~50 m above the DSM on real LAZ.
+            for (index in bareEarth.indices) {
+                if (allCount[index] > 0 && bareEarth[index] > allMax[index]) bareEarth[index] = allMax[index]
+            }
+        }
+        if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
+            // The DSM and auto-lowest surfaces are gap-filled independently, so a filled DSM cell
+            // could sit below the filled auto-lowest one. Build the auto-lowest surface with the
+            // exact same pipeline and keep the DSM at or above it everywhere.
+            val lowest = finishedGroundSurface(
+                automaticGroundSource().first, allCount, cellSize, pointsBinned,
+            )
+            for (index in bareEarth.indices) {
+                val low = lowest[index]
+                if (low.isFinite() && bareEarth[index].isFinite() && low > bareEarth[index]) bareEarth[index] = low
+            }
         }
         val canopy = FloatArray(surface.size)
         if (appliedMode != GroundSurfaceMode.SURFACE_MODEL) {
@@ -423,6 +427,61 @@ internal class LidarRasterizer(
             wasTruncated = wasTruncated,
             groundReport = groundReport,
         )
+    }
+
+    /**
+     * Robust automatic ground: reject a cell's lowest return when it is isolated (no
+     * corroborating returns within a narrow band) and sits far below the next-lowest
+     * return. Bird/wire strikes and misclassified below-ground noise disappear, while
+     * real ground under canopy — corroborated by several low returns — is preserved.
+     */
+    private fun automaticGroundSource(): Pair<FloatArray, Int> {
+        var rejected = 0
+        val values = FloatArray(width * height) { index ->
+            val second = allSecondMin[index]
+            val isolatedLow = allCount[index] >= MIN_SAMPLES_FOR_SPIKE_REJECT &&
+                allLowBandCount[index] == 1 &&
+                second != Float.MAX_VALUE &&
+                second - allMin[index] > LOW_SPIKE_DROP_METERS
+            if (isolatedLow) {
+                rejected++
+                second
+            } else {
+                allMin[index]
+            }
+        }
+        return values to rejected
+    }
+
+    /** Same fill → low-noise → smoothing → per-cell clamp pipeline that [finish] applies to ground. */
+    private fun finishedGroundSurface(
+        source: FloatArray,
+        counts: IntArray,
+        cellSize: Float,
+        samples: Int,
+    ): FloatArray {
+        val mask = BooleanArray(width * height) { counts[it] > 0 }
+        val surface = FloatArray(width * height) { if (mask[it]) source[it] else Float.NaN }
+        val filled = interpolateBareEarth(
+            measuredElevations = surface,
+            measuredMask = mask,
+            width = width,
+            height = height,
+            cellSizeMeters = cellSize,
+            totalPoints = pointsDecoded,
+            groundPoints = samples,
+            sourceCounts = counts,
+        )
+        val cleaned = suppressIsolatedLowNoise(filled.elevations, width, height)
+        val ground = if (options.smoothingRadius > 0) {
+            multiScaleSmooth(cleaned, width, height, options.smoothingRadius)
+        } else {
+            cleaned
+        }
+        for (index in ground.indices) {
+            if (allCount[index] > 0 && ground[index] > allMax[index]) ground[index] = allMax[index]
+        }
+        return ground
     }
 
     /**

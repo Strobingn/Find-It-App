@@ -124,6 +124,9 @@ internal fun chooseAiRefineResolution(
     else -> 1_024
 }
 
+/** Hillshade shows bare earth by default; the slider can still blend canopy back in. */
+internal const val DEFAULT_VEGETATION_FILTER = 1f
+
 internal fun isEffectivelyWholeTerrain(bounds: NormalizedRasterBounds): Boolean {
     val sanitized = bounds.sanitized()
     val area = (sanitized.right - sanitized.left) * (sanitized.bottom - sanitized.top)
@@ -178,7 +181,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val sunAzimuth = _sunAzimuth.asStateFlow()
     private val _sunAltitude = MutableStateFlow(35f)
     val sunAltitude = _sunAltitude.asStateFlow()
-    private val _vegetationFilter = MutableStateFlow(0.8f)
+    private val _vegetationFilter = MutableStateFlow(DEFAULT_VEGETATION_FILTER)
     val vegetationFilter = _vegetationFilter.asStateFlow()
     private val _paletteType = MutableStateFlow(1)
     val paletteType = _paletteType.asStateFlow()
@@ -2175,7 +2178,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun loadSettings() {
         _sunAzimuth.value = settingsRepo.getFloat(SettingsRepository.Keys.SUN_AZIMUTH, 315f)
         _sunAltitude.value = settingsRepo.getFloat(SettingsRepository.Keys.SUN_ALTITUDE, 35f)
-        _vegetationFilter.value = settingsRepo.getFloat(SettingsRepository.Keys.VEGETATION_FILTER, 0.8f)
+        _vegetationFilter.value = settingsRepo.getFloat(SettingsRepository.Keys.VEGETATION_FILTER, DEFAULT_VEGETATION_FILTER)
         _paletteType.value = settingsRepo.getInt(SettingsRepository.Keys.PALETTE_TYPE, 1)
         _contrast.value = settingsRepo.getFloat(SettingsRepository.Keys.CONTRAST, 1.5f)
         _visualizationMode.value = settingsRepo.getInt(SettingsRepository.Keys.VISUALIZATION_MODE, 0)

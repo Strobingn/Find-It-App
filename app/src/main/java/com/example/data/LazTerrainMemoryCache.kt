@@ -22,6 +22,8 @@ class LazTerrainMemoryCache(
         val rasterResolution: Int,
         val smoothingRadius: Int,
         val focusBounds: NormalizedRasterBounds?,
+        /** Class filter changes the raster; without it a filtered reload returned the unfiltered grid. */
+        val allowedClasses: List<Int>?,
     )
 
     private data class CacheEntry(
@@ -79,6 +81,7 @@ class LazTerrainMemoryCache(
             rasterResolution = sanitized.rasterResolution,
             smoothingRadius = sanitized.smoothingRadius,
             focusBounds = sanitized.focusBounds,
+            allowedClasses = sanitized.allowedClasses?.sorted(),
         )
     }
 

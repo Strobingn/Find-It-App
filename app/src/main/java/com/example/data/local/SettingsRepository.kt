@@ -9,7 +9,12 @@ class SettingsRepository(private val settingDao: SettingDao) {
     object Keys {
         const val SUN_AZIMUTH = "sun_azimuth"
         const val SUN_ALTITUDE = "sun_altitude"
-        const val VEGETATION_FILTER = "vegetation_filter"
+        /**
+         * v2: the default became 1.0 (pure bare earth). The old key defaulted to 0.8, which added
+         * 20% of canopy height to the hillshade and covered forested tiles in tree-crown "pebble"
+         * noise; a new key means existing installs pick up the clean default once.
+         */
+        const val VEGETATION_FILTER = "vegetation_filter_v2"
         const val PALETTE_TYPE = "palette_type"
         const val CONTRAST = "contrast"
         const val VISUALIZATION_MODE = "visualization_mode"

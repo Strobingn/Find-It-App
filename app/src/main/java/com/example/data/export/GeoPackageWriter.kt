@@ -157,7 +157,7 @@ object GeoPackageWriter {
               (table_name, data_type, identifier, description, min_x, min_y, max_x, max_y, srs_id)
             VALUES (?, 'attributes', ?, ?, ?, ?, ?, ?, 4326)
             """.trimIndent(),
-            arrayOf(
+            arrayOf<Any?>(
                 FINDS_TABLE,
                 identifier,
                 description,
