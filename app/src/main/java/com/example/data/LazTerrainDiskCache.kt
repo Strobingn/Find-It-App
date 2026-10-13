@@ -196,6 +196,8 @@ class LazTerrainDiskCache(
             append('|').append(sanitized.rasterResolution)
             append('|').append(sanitized.smoothingRadius)
             append('|').append(sanitized.focusBounds)
+            // Refines cached before the ground-spacing clamp were over-fine (stair-steps).
+            if (sanitized.focusBounds != null) append("|groundSpacingClamp1")
             append('|').append(
                 sanitized.allowedClasses
                     ?.sorted()
