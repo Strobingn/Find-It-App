@@ -46,9 +46,80 @@ internal object LazTerrainReader {
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)? = null,
     ): DemGenerator.LasLoadResult? {
+        val sanitized = options.sanitized()
+        val focus = sanitized.focusBounds
+        val memoKey = groundDensityKey(file, sanitized)
+        val extent = runCatching { headerExtent(file) }.getOrNull()
+        if (focus == null || extent == null) {
+            val result = readUnclamped(file, sanitized, shouldContinue, onProgress)
+            if (result != null && focus == null && extent != null) {
+                // Valid (hull) cells, not the bbox: empty corners would understate density.
+                val g = result.grid
+                val validCells = g.validData.count { it }.toDouble()
+                val cellX = extent.first / (g.width - 1).coerceAtLeast(1)
+                val cellY = extent.second / (g.height - 1).coerceAtLeast(1)
+                GroundDensityMemo.record(memoKey, effectiveGroundPoints(result), validCells * cellX * cellY)
+            }
+            return result
+        }
+        // A refined viewport must not use cells finer than the real ground point spacing: the TIN
+        // then fills most cells from a few points and the hillshade shows facets/stair-steps.
+        val focusX = extent.first * (focus.right - focus.left)
+        val focusY = extent.second * (focus.bottom - focus.top)
+        val known = GroundDensityMemo.pointsPerArea(memoKey)
+        val first = if (known != null) {
+            sanitized.copy(
+                rasterResolution = focusResolutionForPointSpacing(
+                    focusX, focusY, (known * focusX * focusY).toLong(), sanitized.rasterResolution,
+                ),
+            ).sanitized()
+        } else {
+            sanitized
+        }
+        val result = readUnclamped(file, first, shouldContinue, onProgress) ?: return null
+        // Verify against the exact ground count inside the crop; re-bin once if still too fine.
+        val ideal = focusResolutionForPointSpacing(
+            focusX, focusY, effectiveGroundPoints(result), sanitized.rasterResolution,
+        )
+        val off = ideal.toDouble() / first.rasterResolution
+        if ((off in (1.0 / FOCUS_REDECODE_TOLERANCE)..FOCUS_REDECODE_TOLERANCE) || !shouldContinue()) return result
+        return readUnclamped(file, first.copy(rasterResolution = ideal).sanitized(), shouldContinue, onProgress)
+            ?: result
+    }
+
+    /**
+     * Classified ground uses 1.25× its spacing; unclassified modes count every return, so scale
+     * them to keep the overview's 1.75× all-return rule with the same clamp function.
+     */
+    private fun effectiveGroundPoints(result: DemGenerator.LasLoadResult): Long {
+        val n = result.groundPointsUsed.toLong()
+        if (result.appliedGroundMode == GroundSurfaceMode.SOURCE_CLASSIFIED) return n
+        val r = FOCUS_CELL_TO_GROUND_SPACING / DEFAULT_CELL_TO_SPACING
+        return (n * r * r).toLong()
+    }
+
+    /** Source footprint (x, y extent in source units) from the LAS header, or null. */
+    private fun headerExtent(file: File): Pair<Double, Double>? =
+        SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
+            val h = reader.header
+            val x = h.max_x - h.min_x
+            val y = h.max_y - h.min_y
+            if (x > 0.0 && y > 0.0 && x.isFinite() && y.isFinite()) x to y else null
+        }
+
+    private fun groundDensityKey(file: File, options: LidarImportOptions): String =
+        "${runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)}|${file.length()}|" +
+            "${file.lastModified()}|${options.groundMode}|${options.allowedClasses?.sorted()}"
+
+    private fun readUnclamped(
+        file: File,
+        clampedOptions: LidarImportOptions,
+        shouldContinue: () -> Boolean,
+        onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+    ): DemGenerator.LasLoadResult? {
         if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
             val native = runCatching {
-                readNativePacked(file, options, shouldContinue)
+                readNativePacked(file, clampedOptions, shouldContinue)
             }.onFailure { exception ->
                 System.err.println("laz-rs decode failed for ${file.name}: ${exception.message}")
             }.getOrNull()
@@ -56,7 +127,7 @@ internal object LazTerrainReader {
         }
 
         val parallel = runCatching {
-            readParallelChunks(file, options, shouldContinue, onProgress)
+            readParallelChunks(file, clampedOptions, shouldContinue, onProgress)
         }.onFailure { exception ->
             System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
@@ -64,14 +135,14 @@ internal object LazTerrainReader {
 
         val optimized = runCatching {
             SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
-                readOpenedLowLevel(reader, options, shouldContinue, onProgress, indexSource = file)
+                readOpenedLowLevel(reader, clampedOptions, shouldContinue, onProgress, indexSource = file)
             }
         }.onFailure { exception ->
             System.err.println("Seekable selective LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
         if (optimized != null) return optimized
 
-        return readHighLevelFile(file, options, shouldContinue, onProgress)
+        return readHighLevelFile(file, clampedOptions, shouldContinue, onProgress)
     }
 
     /**
@@ -761,4 +832,36 @@ internal fun parallelDecodeWorkers(cores: Int, maxHeapBytes: Long, rasterCells: 
 }
 
 internal const val RASTER_BYTES_PER_CELL = 32L
+
+/**
+ * Largest refine resolution whose cell is at least [cellToSpacing]× the point spacing of
+ * [pointsInFocus] spread over the viewport; never above the requested resolution.
+ */
+internal fun focusResolutionForPointSpacing(
+    rangeX: Double,
+    rangeY: Double,
+    pointsInFocus: Long,
+    requestedResolution: Int,
+    cellToSpacing: Double = FOCUS_CELL_TO_GROUND_SPACING,
+): Int {
+    val cap = recommendedRasterResolution(rangeX, rangeY, pointsInFocus.coerceAtLeast(1L), cellToSpacing)
+        ?: return requestedResolution
+    return min(requestedResolution, cap).coerceAtLeast(LidarImportOptions.MIN_RASTER_RESOLUTION)
+}
+
+/** Refine cell vs measured ground spacing: ~1.25× keeps detail without per-point terracing. */
+internal const val FOCUS_CELL_TO_GROUND_SPACING = 1.25
+/** Re-decode a refine only when its cell is meaningfully (>15%) finer than the clamp. */
+private const val FOCUS_REDECODE_TOLERANCE = 1.15
+
+/** Ground points per source area unit, learned from full-footprint decodes this session. */
+internal object GroundDensityMemo {
+    private val density = java.util.concurrent.ConcurrentHashMap<String, Double>()
+
+    fun record(key: String, groundPoints: Long, area: Double) {
+        if (groundPoints > 0L && area > 0.0 && area.isFinite()) density[key] = groundPoints / area
+    }
+
+    fun pointsPerArea(key: String): Double? = density[key]
+}
 
