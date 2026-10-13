@@ -132,8 +132,11 @@ object MetalDetectingTargetRefiner {
         val rugged = normalizePositive(requireLayer(layers, TerrainDerivedLayer.RUGGEDNESS))
         val linearity = normalizePositive(requireLayer(layers, TerrainDerivedLayer.LINEARITY))
         val hillCompare = normalizePositive(requireLayer(layers, TerrainDerivedLayer.HILLSHADE_COMPARISON))
-        val positiveOpen = requireLayer(layers, TerrainDerivedLayer.POSITIVE_OPENNESS)
-        val negativeOpen = requireLayer(layers, TerrainDerivedLayer.NEGATIVE_OPENNESS)
+        val positiveOpen = finiteOr(requireLayer(layers, TerrainDerivedLayer.POSITIVE_OPENNESS), 0.5f)
+        val negativeOpen = finiteOr(requireLayer(layers, TerrainDerivedLayer.NEGATIVE_OPENNESS), 0.5f)
+        // Cells with measured terrain; no-data cells never host a target.
+        val rawSlope = requireLayer(layers, TerrainDerivedLayer.SLOPE)
+        val hasData = BooleanArray(width * height) { rawSlope[it].isFinite() }
 
         val flat = FloatArray(width * height) { 1f - slope[it] }
         val smooth = FloatArray(width * height) { 1f - rugged[it] }
@@ -308,6 +311,9 @@ object MetalDetectingTargetRefiner {
 
         fun biasFor(type: MetalDetectingTargetType) = calibration[type] ?: 0f
 
+        for (scores in listOf(foundation, road, cellar, trash, wall, homesite)) {
+            for (i in scores.indices) if (!hasData[i] || !scores[i].isFinite()) scores[i] = 0f
+        }
         val output = ArrayList<MetalDetectingTarget>()
         appendTargets(output, MetalDetectingTargetType.FOUNDATION, foundation, width, height, 0.66f, 8f, feedback, ctx, biasFor(MetalDetectingTargetType.FOUNDATION))
         appendTargets(output, MetalDetectingTargetType.ROAD_TRAIL, road, width, height, 0.67f, 7f, feedback, ctx, biasFor(MetalDetectingTargetType.ROAD_TRAIL))
@@ -387,7 +393,7 @@ object MetalDetectingTargetRefiner {
      * texture argues against confidence, so high roughness reads as a disagreeing layer.
      */
     private fun measureLayers(x: Int, y: Int, i: Int, ctx: RefinerContext): List<TargetLayerEvidence> {
-        fun pct(value: Float) = "${(value.coerceIn(0f, 1f) * 100f).roundToInt()}%"
+        fun pct(value: Float) = "${(if (value.isFinite()) value.coerceIn(0f, 1f) * 100f else 0f).roundToInt()}%"
         val measurements = listOf(
             Triple("Hillshade multi-light", ctx.hillCompare[i], false),
             Triple("Slope edge rim", ctx.edgeRect.ringMean(x, y, ctx.edgeInner, ctx.edgeOuter), false),
@@ -411,7 +417,7 @@ object MetalDetectingTargetRefiner {
 
     /** Dynamic, per-candidate evidence with the actual measured percentages, not static text. */
     private fun explainCandidate(type: MetalDetectingTargetType, x: Int, y: Int, i: Int, ctx: RefinerContext): List<String> {
-        fun pct(value: Float) = "${(value * 100f).roundToInt()}%"
+        fun pct(value: Float) = "${(if (value.isFinite()) value * 100f else 0f).roundToInt()}%"
         return when (type) {
             MetalDetectingTargetType.FOUNDATION -> listOf(
                 "Flat interior: ${pct(ctx.flatRect.ringMean(x, y, 0, ctx.innerRadius))}",
@@ -589,6 +595,9 @@ object MetalDetectingTargetRefiner {
         return best.coerceIn(0f, 1f)
     }
 
+    private fun finiteOr(values: FloatArray, fallback: Float): FloatArray =
+        FloatArray(values.size) { if (values[it].isFinite()) values[it] else fallback }
+
     private fun normalizePositive(values: FloatArray): FloatArray {
         var count = 0
         val finite = FloatArray(values.size)
@@ -598,7 +607,9 @@ object MetalDetectingTargetRefiner {
         sorted.sort()
         val index = ((count - 1) * 0.96f).roundToInt().coerceIn(0, count - 1)
         val scale = sorted[index].coerceAtLeast(1e-6f)
-        return FloatArray(values.size) { (values[it].coerceAtLeast(0f) / scale).coerceIn(0f, 1f) }
+        // No-data cells are NaN; they must become 0, or the summed-area tables below turn every
+        // ring mean NaN and all targets silently disappear.
+        return FloatArray(values.size) { val v = values[it]; if (v.isFinite()) (v.coerceAtLeast(0f) / scale).coerceIn(0f, 1f) else 0f }
     }
 
     private fun normalizeSigned(values: FloatArray): FloatArray {
@@ -610,7 +621,7 @@ object MetalDetectingTargetRefiner {
         sorted.sort()
         val index = ((count - 1) * 0.96f).roundToInt().coerceIn(0, count - 1)
         val scale = sorted[index].coerceAtLeast(1e-6f)
-        return FloatArray(values.size) { (values[it] / scale).coerceIn(-1f, 1f) }
+        return FloatArray(values.size) { val v = values[it]; if (v.isFinite()) (v / scale).coerceIn(-1f, 1f) else 0f }
     }
 
     private fun triangularPreference(value: Float, center: Float, halfWidth: Float): Float =

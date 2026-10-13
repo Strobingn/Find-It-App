@@ -73,6 +73,14 @@ object LazDownloadQueue {
 
     fun nextQueued(): LazDownloadTask? = _tasks.value.firstOrNull { it.state == LazDownloadState.QUEUED }
 
+    /** Atomically takes the next queued task and marks it running, so concurrent workers never share one. */
+    @Synchronized
+    fun claimNextQueued(): LazDownloadTask? {
+        val next = nextQueued() ?: return null
+        markRunning(next.url)
+        return next
+    }
+
     fun markRunning(url: String) = update(url) { it.copy(state = LazDownloadState.RUNNING) }
 
     fun markProgress(url: String, downloaded: Long, total: Long) = update(url) {

@@ -75,9 +75,12 @@ object HomesiteProbabilityMap {
     fun compute(layers: TerrainDerivedLayers): HomesiteProbabilityGrid {
         val width = layers.width
         val height = layers.height
-        require(width >= 3 && height >= 3) { "Grid too small for homesite mapping" }
+        // Tiny grids have no neighbourhood to score; return an empty map instead of throwing
+        // (MainScreen calls this directly from the homesite overlay).
+        if (width < 3 || height < 3) return HomesiteProbabilityGrid(width, height, FloatArray(width * height))
 
-        val slope = normalizePositive(requireLayer(layers, TerrainDerivedLayer.SLOPE))
+        val rawSlope = requireLayer(layers, TerrainDerivedLayer.SLOPE)
+        val slope = normalizePositive(rawSlope)
         val curvature = normalizeSigned(requireLayer(layers, TerrainDerivedLayer.CURVATURE))
         val relief = normalizeSigned(requireLayer(layers, TerrainDerivedLayer.LOCAL_RELIEF))
         val depression = normalizePositive(requireLayer(layers, TerrainDerivedLayer.DEPRESSION_DEPTH))
@@ -135,7 +138,8 @@ object HomesiteProbabilityMap {
                     WEIGHT_ROAD * roadCtx +
                     WEIGHT_WALL * wallCtx +
                     WEIGHT_CLUSTER * cluster
-                out[i] = (score * (1f - WET_VETO_STRENGTH * wet)).coerceIn(0f, 1f)
+                // No-data cells (NaN slope) would otherwise read as perfectly flat benches.
+                out[i] = if (rawSlope[i].isFinite()) (score * (1f - WET_VETO_STRENGTH * wet)).coerceIn(0f, 1f) else 0f
             }
         }
         return HomesiteProbabilityGrid(width, height, out)
@@ -156,7 +160,9 @@ object HomesiteProbabilityMap {
         sorted.sort()
         val index = ((count - 1) * 0.96f).roundToInt().coerceIn(0, count - 1)
         val scale = sorted[index].coerceAtLeast(1e-6f)
-        return FloatArray(values.size) { (values[it].coerceAtLeast(0f) / scale).coerceIn(0f, 1f) }
+        // No-data cells are NaN; they must become 0, or the summed-area tables below turn every
+        // ring mean NaN and all targets silently disappear.
+        return FloatArray(values.size) { val v = values[it]; if (v.isFinite()) (v.coerceAtLeast(0f) / scale).coerceIn(0f, 1f) else 0f }
     }
 
     private fun normalizeSigned(values: FloatArray): FloatArray {
@@ -168,6 +174,6 @@ object HomesiteProbabilityMap {
         sorted.sort()
         val index = ((count - 1) * 0.96f).roundToInt().coerceIn(0, count - 1)
         val scale = sorted[index].coerceAtLeast(1e-6f)
-        return FloatArray(values.size) { (values[it] / scale).coerceIn(-1f, 1f) }
+        return FloatArray(values.size) { val v = values[it]; if (v.isFinite()) (v / scale).coerceIn(-1f, 1f) else 0f }
     }
 }
