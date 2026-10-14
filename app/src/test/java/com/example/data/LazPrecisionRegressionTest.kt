@@ -73,6 +73,35 @@ class LazPrecisionRegressionTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun streamedLasReadsProjectionVlrsBeforeRasterizing() {
+        val root = Files.createTempDirectory("stream-units").toFile()
+        try {
+            val original = LasFixture.writeLattice(File(root, "base.las"), 5, 5).readBytes()
+            val keys = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
+                .putShort(1).putShort(1).putShort(0).putShort(2)
+                .putShort(3076).putShort(0).putShort(1).putShort(9003)
+                .putShort(4099).putShort(0).putShort(1).putShort(9002).array()
+            val wkt = """COMPD_CS["survey",PROJCS["feet XY",UNIT["Foot_US",0.3048006096012192]],VERT_CS["height",UNIT["foot",0.3048]]]""".toByteArray()
+            for ((id, data) in listOf(34735 to keys, 2112 to wkt)) {
+                val vlr = ByteBuffer.allocate(54 + data.size).order(ByteOrder.LITTLE_ENDIAN)
+                "LASF_Projection".toByteArray().copyInto(vlr.array(), 2)
+                vlr.putShort(18, id.toShort()).putShort(20, data.size.toShort())
+                data.copyInto(vlr.array(), 54)
+                val bytes = original.copyOfRange(0, 227) + vlr.array() + original.copyOfRange(227, original.size)
+                ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putInt(96, 227 + vlr.capacity()).putInt(100, 1)
+                val file = File(root, "units-$id.las").apply { writeBytes(bytes) }
+                val options = LidarImportOptions(rasterResolution = 128)
+                val streamed = DemGenerator.parseLasStreamDetailed(bytes.inputStream(), options)!!.grid
+                val backed = DemGenerator.parseLasFileMapped(file, options)!!.grid
+                assertEquals((8.0 * 0.3048006096012192 / 127).toFloat(), streamed.cellSizeXMeters, 0.000001f)
+                assertArrayEquals(backed.bareEarth, streamed.bareEarth, 0f)
+                assertArrayEquals(backed.validData, streamed.validData)
+                assertEquals(backed.cellSizeYMeters, streamed.cellSizeYMeters, 0f)
+                assertEquals(12.192f, streamed.bareEarth[(streamed.height - 1) * streamed.width], 0.00001f)
+            }
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun rawLasWithheldFlagsWorkInLegacyAndExtendedFormats() {
         for (format in listOf(0, 6)) {
             val headerSize = if (format == 0) 227 else 375

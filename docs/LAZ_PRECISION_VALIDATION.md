@@ -22,10 +22,17 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
 - Horn derivatives divide X and Y differences by their respective physical
   spacing. Curvature uses separate squared axis spacings. Aspect is the **downslope**
   bearing clockwise from north, with raster rows increasing south.
-- TIN vertices come exclusively from measured cells. Filled cells from earlier
-  tiles never become TIN/IDW source measurements for later tiles. Triangles and
-  inverse-distance weights use physical X/Y distances. IDW commits a whole pass
-  after sampling a fixed mask; it does not propagate along traversal order.
+- The current main-branch ground-mean, nearest-node and harmonic-void-fill changes
+  are retained. Classified-cell sums use doubles before producing float raster values.
+  Harmonic relaxation weights each axis by inverse physical spacing squared; measured
+  cells remain fixed. Interpolated cells retain their provenance.
+- Round hull closing uses an exact weighted Euclidean distance transform. It respects
+  physical axis spacing and takes linear time in grid size, replacing radius-dependent
+  repeated whole-grid dilation passes. It does not add tile seams or promote interpolated
+  cells into source measurements.
+- Metadata-bearing raw LAS streams are spooled once so WKT/GeoKey VLRs and trailing
+  EVLRs supply the same independent unit factors as file-backed LAS. Plain streams
+  without metadata retain the metre assumption. Cancellation cleans up the spool.
 - Persistent caches store both axis spacings and the measured/interpolated mask.
   Old algorithm entries are invalidated. All permitted 2048x2048 refine grids fit
   the cache reader's dimension limit.
@@ -42,9 +49,6 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
   for every source chunk. With 50,000-point chunks, packed Java worker payload is
   approximately `22 * 50,000 * 2 * workers` bytes (17.6 MB at eight workers), plus
   readers, raster and interpolation memory. Ordering preserves sequential results.
-- TIN vertex collection stops after the triangulation cap is exceeded, avoiding
-  thousands of unused vertex objects per dense tile. IDW updates use growable
-  primitive arrays rather than boxed collections.
 - Header extent queries do not initialize a compressed reader. Full imports record
   conservative per-chunk XY bounds and eligible-return density in the same ordered
   binner, persisting a checksummed `.fichunks` sidecar. Focused reads seek only to
@@ -78,8 +82,8 @@ short records, packed-buffer bounds, 2048x2048 cache provenance/axis round trips
 and bit-identical sequential/parallel output across ring wraps.
 
 `TerrainMathPrecisionTest` checks compass aspect, mixed XY/Z units, vertical WKT,
-affine plane reproduction across TIN tile seams, physical-distance IDW weights,
-and spacing through LOD. `ElevationGridTest` checks matching hillshade pixels for
+affine-plane measured-sample preservation, physical-axis harmonic weights, an exact
+Euclidean dilation comparison against brute force, and spacing through LOD. `ElevationGridTest` checks matching hillshade pixels for
 an identical physical slope sampled with different Y spacing.
 
 `LazViewportRefinementTest` verifies a coherent-strip crop decodes exactly 50,000
@@ -108,7 +112,8 @@ keystore/fallback policy as main. Main alone publishes stable GitHub releases.
 A DEM is a rasterized estimate, not the original point cloud or a survey-grade
 measurement. Cell minima are associated with their bins; feature localization
 remains limited by source point spacing, grid spacing, classification quality and
-LAS coordinate quantization. Interpolated cells are explicitly marked. No vertical
+LAS coordinate quantization. Classified bins use the current main-branch mean;
+individual returns sharing a bin cannot be localized independently. Interpolated cells are explicitly marked. No vertical
 or horizontal datum transformation is introduced by converting linear units.
 
 Missing linear-unit metadata retains the prior metre assumption; unknown vertical

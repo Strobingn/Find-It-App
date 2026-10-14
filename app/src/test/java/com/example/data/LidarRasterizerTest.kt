@@ -1,5 +1,7 @@
 package com.example.data
 
+import kotlin.math.roundToInt
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -248,8 +250,8 @@ class LidarRasterizerTest {
         }
 
         val result = requireNotNull(rasterizer.finish(6, "sampled coverage"))
-        val targetX = (0.9 * (result.grid.width - 1)).toInt()
-        val targetY = ((1.0 - 0.9) * (result.grid.height - 1)).toInt()
+        val targetX = (0.9 * (result.grid.width - 1)).roundToInt()
+        val targetY = ((1.0 - 0.9) * (result.grid.height - 1)).roundToInt()
         val targetIndex = targetY * result.grid.width + targetX
 
         assertEquals(20L, rasterizer.pointsDecoded)
@@ -323,8 +325,8 @@ class LidarRasterizerTest {
         repeat(6) { rasterizer.addPoint(1.0, 1.0, 20f, classification = 1) }
 
         val result = requireNotNull(rasterizer.finish(3, "spike test"))
-        val gx = (0.5 * (result.grid.width - 1)).toInt()
-        val gy = ((1.0 - 0.5) * (result.grid.height - 1)).toInt()
+        val gx = (0.5 * (result.grid.width - 1)).roundToInt()
+        val gy = ((1.0 - 0.5) * (result.grid.height - 1)).roundToInt()
         val value = result.grid.bareEarth[gy * result.grid.width + gx]
 
         assertEquals(GroundSurfaceMode.AUTO_LOWEST, result.appliedGroundMode)
@@ -356,8 +358,8 @@ class LidarRasterizerTest {
         repeat(6) { rasterizer.addPoint(1.0, 1.0, 20f, classification = 1) }
 
         val result = requireNotNull(rasterizer.finish(3, "canopy test"))
-        val gx = (0.5 * (result.grid.width - 1)).toInt()
-        val gy = ((1.0 - 0.5) * (result.grid.height - 1)).toInt()
+        val gx = (0.5 * (result.grid.width - 1)).roundToInt()
+        val gy = ((1.0 - 0.5) * (result.grid.height - 1)).roundToInt()
         val value = result.grid.bareEarth[gy * result.grid.width + gx]
 
         assertTrue("corroborated ground must survive, got $value", value in 9.5f..10.5f)

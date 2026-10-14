@@ -311,8 +311,8 @@ object DemGenerator {
         inputStream: java.io.InputStream,
         options: LidarImportOptions,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
-        horizontalUnitToMeters: Double = 1.0,
-        verticalUnitToMeters: Double = 1.0,
+        horizontalUnitToMeters: Double? = null,
+        verticalUnitToMeters: Double? = null,
     ): LasLoadResult? {
         return try {
             val buffered = if (inputStream is java.io.BufferedInputStream) {
@@ -336,6 +336,25 @@ object DemGenerator {
             val pointRecordLength = readShortLE(header, 105).toInt() and 0xFFFF
             if (rawPointFormat and 0xC0 != 0) {
                 return LazTerrainReader.read(buffered, options, shouldContinue = shouldContinue)
+            }
+            // A stream cannot seek to VLR/EVLR metadata after the point payload. Spool only
+            // metadata-bearing stream imports; file-backed callers already supply both units.
+            val hasMetadata = readIntLE(header, 100) != 0 ||
+                (versionMajor == 1 && versionMinor >= 4 && headerBytes >= 247 && readIntLE(header, 243) != 0)
+            if (hasMetadata && (horizontalUnitToMeters == null || verticalUnitToMeters == null)) {
+                val temp = java.io.File.createTempFile("find-it-las-units-", ".las")
+                try {
+                    temp.outputStream().buffered(256 * 1024).use { output ->
+                        val copyBuffer = ByteArray(256 * 1024)
+                        while (shouldContinue()) {
+                            val n = buffered.read(copyBuffer)
+                            if (n < 0) break
+                            if (n > 0) output.write(copyBuffer, 0, n)
+                        }
+                    }
+                    if (!shouldContinue()) return null
+                    return parseLasFileMapped(temp, options, shouldContinue)
+                } finally { temp.delete() }
             }
             val minimumRecordLengths = intArrayOf(20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67)
             if (pointFormat !in minimumRecordLengths.indices || offsetToPoints < 227 ||
@@ -377,8 +396,8 @@ object DemGenerator {
                 lasVersionMajor = versionMajor,
                 lasVersionMinor = versionMinor,
                 pointFormat = pointFormat,
-                horizontalUnitToMeters = horizontalUnitToMeters,
-                verticalUnitToMeters = verticalUnitToMeters,
+                horizontalUnitToMeters = horizontalUnitToMeters ?: 1.0,
+                verticalUnitToMeters = verticalUnitToMeters ?: 1.0,
             )
             val classOffset = if (pointFormat >= 6) 16 else 15
             val classMask = if (pointFormat >= 6) 0xFF else 0x1F

@@ -144,105 +144,23 @@ internal fun interpolateBareEarth(
     val interpolated = BooleanArray(width * height)
     val valid = BooleanArray(width * height) { measuredMask[it] && elevations[it].isFinite() }
 
-    require(cellSizeXMeters.isFinite() && cellSizeXMeters > 0f && cellSizeYMeters.isFinite() && cellSizeYMeters > 0f)
+    require(cellSizeXMeters.isFinite() && cellSizeXMeters > 0 && cellSizeYMeters.isFinite() && cellSizeYMeters > 0)
     val scaleX = cellSizeXMeters.toDouble() / cellSizeMeters
     val scaleY = cellSizeYMeters.toDouble() / cellSizeMeters
     val area = (width - 1).coerceAtLeast(1).toDouble() * (height - 1).coerceAtLeast(1) * cellSizeXMeters * cellSizeYMeters
     val spacing = meanSpacingMeters(area, groundPoints.coerceAtLeast(valid.count { it }).toLong())
     val recommendedCell = recommendedCellSizeMeters(area, groundPoints.coerceAtLeast(1).toLong())
         ?: (spacing * DEFAULT_CELL_TO_SPACING.toFloat())
-    val maxEdgeMeters = maxEdgeMeters(cellSizeMeters, spacing)
-    val maxEdgeCells = (maxEdgeMeters / cellSizeMeters.coerceAtLeast(0.001f)).coerceIn(2f, 48f)
-    val hull = buildDataHull(valid, width, height, maxEdgeCells)
-
-    var tilesTriangulated = 0
-    var trianglesKept = 0
-    var trianglesKilled = 0
-    var tilesIdw = 0
-
-    val tileSize = TIN_TILE_CELLS
-    val bufferCells = ceil((TIN_BUFFER_METERS / cellSizeMeters.coerceAtLeast(0.25f)).toDouble())
-        .toInt()
-        .coerceIn(4, 24)
-    val tilesX = (width + tileSize - 1) / tileSize
-    val tilesY = (height + tileSize - 1) / tileSize
-    for (tileY in 0 until tilesY) {
-        for (tileX in 0 until tilesX) {
-            val x0 = tileX * tileSize
-            val y0 = tileY * tileSize
-            val x1 = min(width, x0 + tileSize)
-            val y1 = min(height, y0 + tileSize)
-            var emptyInterior = 0
-            for (y in y0 until y1) {
-                for (x in x0 until x1) {
-                    val index = y * width + x
-                    if (!valid[index] && hull[index]) emptyInterior++
-                }
-            }
-            if (emptyInterior == 0) continue
-
-            val bx0 = (x0 - bufferCells).coerceAtLeast(0)
-            val by0 = (y0 - bufferCells).coerceAtLeast(0)
-            val bx1 = (x1 + bufferCells).coerceAtMost(width)
-            val by1 = (y1 + bufferCells).coerceAtMost(height)
-            val vertices = ArrayList<TinVertex>(64)
-            collectVertices@ for (y in by0 until by1) {
-                for (x in bx0 until bx1) {
-                    val index = y * width + x
-                    // Interpolated cells from earlier tiles are not source measurements.
-                    if (!measuredMask[index] || !measuredElevations[index].isFinite()) continue
-                    vertices += TinVertex(x * scaleX, y * scaleY, measuredElevations[index], index)
-                    // Above this cap we use IDW. Do not allocate thousands of unused objects.
-                    if (vertices.size > MAX_TIN_VERTICES_PER_TILE) break@collectVertices
-                }
-            }
-            val useTin = vertices.size in 3..MAX_TIN_VERTICES_PER_TILE && emptyInterior >= 8
-            if (useTin) {
-                val mesh = delaunay(vertices)
-                if (mesh != null) {
-                    tilesTriangulated++
-                    val rasterized = rasterizeTin(
-                        triangles = mesh,
-                        vertices = vertices,
-                        elevations = elevations,
-                        valid = valid,
-                        interpolated = interpolated,
-                        hull = hull,
-                        width = width,
-                        x0 = x0,
-                        y0 = y0,
-                        x1 = x1,
-                        y1 = y1,
-                        maxEdgeCells = maxEdgeCells.toDouble(),
-                        scaleX = scaleX,
-                        scaleY = scaleY,
-                    )
-                    trianglesKept += rasterized.first
-                    trianglesKilled += rasterized.second
-                } else {
-                    tilesIdw++
-                    fillBoundedIdw(
-                        elevations, valid, interpolated, hull, width, height,
-                        x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask, scaleX = scaleX, scaleY = scaleY,
-                    )
-                }
-            } else if (vertices.size >= 3) {
-                tilesIdw++
-                fillBoundedIdw(
-                    elevations, valid, interpolated, hull, width, height,
-                    x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask, scaleX = scaleX, scaleY = scaleY,
-                )
-            }
-        }
-    }
-
-    // Pinholes the TIN/IDW window left behind, still inside the hull (gdal_fillnodata -md ~5–10).
-    fillBoundedIdw(
-        elevations, valid, interpolated, hull, width, height,
-        0, 0, width, height,
-        min(HOLE_FILL_RADIUS_CELLS, maxEdgeCells.roundToInt().coerceAtLeast(2)),
-        passes = 2, scaleX = scaleX, scaleY = scaleY,
-    )
+    // Voids (water, buildings, dropouts) are filled like las2dem/blast2dem: anything a TIN with
+    // edges up to VOID_MAX_EDGE would cover is interpolated, wider true voids stay NaN. The data
+    // hull is a morphological closing, so nothing is extruded outside the real footprint.
+    val maxEdgeCells = voidMaxEdgeCells(cellSizeMeters)
+    val hull = buildDataHull(valid, width, height, maxEdgeCells, scaleX, scaleY)
+    val tilesTriangulated = 0
+    val trianglesKept = 0
+    val trianglesKilled = 0
+    val tilesIdw = 0
+    fillVoidsSmooth(elevations, valid, interpolated, hull, width, height, scaleX, scaleY)
 
     var interpolatedCells = 0
     var emptyTotal = 0
@@ -302,14 +220,8 @@ internal fun emptyShareInsideHull(grid: ElevationGrid): Float {
     val measured = BooleanArray(grid.width * grid.height) { index ->
         grid.validData[index] && grid.bareEarth[index].isFinite()
     }
-    val spacing = meanSpacingMeters(
-        grid.width.toDouble() * grid.height.toDouble() *
-            grid.cellSizeMeters.toDouble() * grid.cellSizeMeters.toDouble(),
-        measured.count { it }.toLong(),
-    )
-    val maxEdgeCells = (maxEdgeMeters(grid.cellSizeMeters, spacing) /
-        grid.cellSizeMeters.coerceAtLeast(0.001f)).coerceIn(2f, 48f)
-    val hull = buildDataHull(measured, grid.width, grid.height, maxEdgeCells)
+    val hull = buildDataHull(measured, grid.width, grid.height, voidMaxEdgeCells(grid.cellSizeMeters),
+        grid.cellSizeXMeters.toDouble() / grid.cellSizeMeters, grid.cellSizeYMeters.toDouble() / grid.cellSizeMeters)
     return emptyShareInsideHull(grid.validData, hull)
 }
 
@@ -399,303 +311,196 @@ internal fun maxEdgeMeters(cellSizeMeters: Float, meanSpacingMeters: Float): Flo
     return max(fromSpacing, fromCell).coerceAtMost(MAX_TRIANGLE_EDGE_METERS.toFloat())
 }
 
+/** blast2dem's default `-kill 100`: voids narrower than this (source units) are interpolated. */
+internal const val VOID_MAX_EDGE = 100.0
+private const val MAX_VOID_EDGE_CELLS = 256f
+
+internal fun voidMaxEdgeCells(cellSize: Float): Float =
+    (VOID_MAX_EDGE / cellSize.coerceAtLeast(0.001f)).toFloat().coerceIn(2f, MAX_VOID_EDGE_CELLS)
+
 /**
- * Dilated occupancy of measured cells — a concave-ish data hull that does not fill flight-line
- * bays the way a convex hull would.
+ * Data hull = morphological closing of the measured cells with a window of [radiusCells]: every
+ * void narrower than the window is inside the hull, but the hull never grows past the outer
+ * footprint (a plain dilation smeared data into empty flight margins).
  */
 internal fun buildDataHull(
     measured: BooleanArray,
     width: Int,
     height: Int,
     radiusCells: Float,
-): BooleanArray {
-    val radius = ceil(radiusCells.toDouble()).toInt().coerceIn(1, 24)
-    return dilateMask(measured, width, height, radius)
-}
-
-private fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: Int): BooleanArray {
-    if (radius <= 0) return source.copyOf()
-    val distance = IntArray(source.size) { Int.MAX_VALUE }
-    val queue = IntArray(source.size)
-    var head = 0
-    var tail = 0
-    for (index in source.indices) {
-        if (!source[index]) continue
-        distance[index] = 0
-        queue[tail++] = index
-    }
-    if (tail == 0) return BooleanArray(source.size)
-    while (head < tail) {
-        val index = queue[head++]
-        val next = distance[index] + 1
-        if (next > radius) continue
-        val x = index % width
-        val y = index / width
-        for (dy in -1..1) {
-            for (dx in -1..1) {
-                if (dx == 0 && dy == 0) continue
-                val nx = x + dx
-                val ny = y + dy
-                if (nx !in 0 until width || ny !in 0 until height) continue
-                val neighbor = ny * width + nx
-                if (next >= distance[neighbor]) continue
-                distance[neighbor] = next
-                queue[tail++] = neighbor
-            }
-        }
-    }
-    return BooleanArray(source.size) { distance[it] <= radius }
-}
-
-private data class TinVertex(val x: Double, val y: Double, val z: Float, val cellIndex: Int)
-
-private data class TinTriangle(val a: Int, val b: Int, val c: Int)
-
-private fun delaunay(vertices: List<TinVertex>): List<TinTriangle>? {
-    if (vertices.size < 3) return null
-    var minX = Double.POSITIVE_INFINITY
-    var minY = Double.POSITIVE_INFINITY
-    var maxX = Double.NEGATIVE_INFINITY
-    var maxY = Double.NEGATIVE_INFINITY
-    for (vertex in vertices) {
-        if (vertex.x < minX) minX = vertex.x
-        if (vertex.y < minY) minY = vertex.y
-        if (vertex.x > maxX) maxX = vertex.x
-        if (vertex.y > maxY) maxY = vertex.y
-    }
-    val dx = (maxX - minX).coerceAtLeast(1.0)
-    val dy = (maxY - minY).coerceAtLeast(1.0)
-    val d = max(dx, dy)
-    val cx = (minX + maxX) * 0.5
-    val cy = (minY + maxY) * 0.5
-    val superA = TinVertex(cx, cy + 20.0 * d, 0f, -1)
-    val superB = TinVertex(cx - 20.0 * d, cy - 10.0 * d, 0f, -1)
-    val superC = TinVertex(cx + 20.0 * d, cy - 10.0 * d, 0f, -1)
-    val points = ArrayList<TinVertex>(vertices.size + 3)
-    points.addAll(vertices)
-    val ia = points.size
-    points += superA
-    val ib = points.size
-    points += superB
-    val ic = points.size
-    points += superC
-
-    val triangles = ArrayList<TinTriangle>(vertices.size * 2)
-    triangles += TinTriangle(ia, ib, ic)
-
-    for (p in vertices.indices) {
-        val bad = ArrayList<TinTriangle>()
-        val px = points[p].x
-        val py = points[p].y
-        for (triangle in triangles) {
-            if (circumcircleContains(points, triangle, px, py)) bad += triangle
-        }
-        if (bad.isEmpty()) continue
-        val edges = LinkedHashMap<Long, Int>()
-        fun edgeKey(a: Int, b: Int): Long {
-            val lo = min(a, b)
-            val hi = max(a, b)
-            return (lo.toLong() shl 32) or (hi.toLong() and 0xFFFFFFFFL)
-        }
-        for (triangle in bad) {
-            val e = intArrayOf(triangle.a, triangle.b, triangle.b, triangle.c, triangle.c, triangle.a)
-            var i = 0
-            while (i < e.size) {
-                val key = edgeKey(e[i], e[i + 1])
-                edges[key] = (edges[key] ?: 0) + 1
-                i += 2
-            }
-        }
-        triangles.removeAll(bad.toSet())
-        for ((key, count) in edges) {
-            if (count != 1) continue
-            val a = (key ushr 32).toInt()
-            val b = (key and 0xFFFFFFFFL).toInt()
-            triangles += TinTriangle(a, b, p)
-        }
-    }
-
-    val kept = triangles.filter { triangle ->
-        triangle.a < vertices.size && triangle.b < vertices.size && triangle.c < vertices.size
-    }
-    return kept.takeIf { it.isNotEmpty() }
-}
-
-private fun circumcircleContains(
-    points: List<TinVertex>,
-    triangle: TinTriangle,
-    px: Double,
-    py: Double,
-): Boolean {
-    val ax = points[triangle.a].x
-    val ay = points[triangle.a].y
-    val bx = points[triangle.b].x
-    val by = points[triangle.b].y
-    val cx = points[triangle.c].x
-    val cy = points[triangle.c].y
-    val d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if (abs(d) < 1e-12) return false
-    val a2 = ax * ax + ay * ay
-    val b2 = bx * bx + by * by
-    val c2 = cx * cx + cy * cy
-    val ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
-    val uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
-    val r2 = (ax - ux) * (ax - ux) + (ay - uy) * (ay - uy)
-    val p2 = (px - ux) * (px - ux) + (py - uy) * (py - uy)
-    return p2 <= r2 + 1e-8
-}
-
-private fun rasterizeTin(
-    triangles: List<TinTriangle>,
-    vertices: List<TinVertex>,
-    elevations: FloatArray,
-    valid: BooleanArray,
-    interpolated: BooleanArray,
-    hull: BooleanArray,
-    width: Int,
-    x0: Int,
-    y0: Int,
-    x1: Int,
-    y1: Int,
-    maxEdgeCells: Double,
     scaleX: Double = 1.0,
     scaleY: Double = 1.0,
-): Pair<Int, Int> {
-    var kept = 0
-    var killed = 0
-    for (triangle in triangles) {
-        val a = vertices[triangle.a]
-        val b = vertices[triangle.b]
-        val c = vertices[triangle.c]
-        val ab = hypot(a.x - b.x, a.y - b.y)
-        val bc = hypot(b.x - c.x, b.y - c.y)
-        val ca = hypot(c.x - a.x, c.y - a.y)
-        if (max(ab, max(bc, ca)) > maxEdgeCells) {
-            killed++
-            continue
-        }
-        kept++
-        val minX = floorToInt(min(a.x, min(b.x, c.x)) / scaleX).coerceAtLeast(x0)
-        val maxX = ceilToInt(max(a.x, max(b.x, c.x)) / scaleX).coerceAtMost(x1 - 1)
-        val minY = floorToInt(min(a.y, min(b.y, c.y)) / scaleY).coerceAtLeast(y0)
-        val maxY = ceilToInt(max(a.y, max(b.y, c.y)) / scaleY).coerceAtMost(y1 - 1)
-        for (y in minY..maxY) {
-            for (x in minX..maxX) {
-                val index = y * width + x
-                if (valid[index] || !hull[index]) continue
-                val bary = barycentric(x * scaleX, y * scaleY, a.x, a.y, b.x, b.y, c.x, c.y)
-                    ?: continue
-                val z = (bary[0] * a.z + bary[1] * b.z + bary[2] * c.z).toFloat()
-                if (!z.isFinite()) continue
-                elevations[index] = z
-                valid[index] = true
-                interpolated[index] = true
-            }
-        }
+): BooleanArray {
+    val radius = ceil(radiusCells / 2.0).toInt().coerceIn(1, (MAX_VOID_EDGE_CELLS / 2).toInt())
+    val dilated = dilateMask(measured, width, height, radius, scaleX, scaleY)
+    val outside = BooleanArray(dilated.size) { !dilated[it] }
+    if (outside.none { it }) {
+        // No footprint edge in view. Dense data: the whole raster is inside. A handful of
+        // isolated samples is not a surface, so nothing is extrapolated around them.
+        return if (measured.count { it } >= 16) dilated else measured.copyOf()
     }
-    return kept to killed
+    val grown = dilateMask(outside, width, height, radius, scaleX, scaleY)
+    return BooleanArray(dilated.size) { measured[it] || !grown[it] }
 }
 
-private fun barycentric(
-    px: Double,
-    py: Double,
-    ax: Double,
-    ay: Double,
-    bx: Double,
-    by: Double,
-    cx: Double,
-    cy: Double,
-): DoubleArray? {
-    val v0x = bx - ax
-    val v0y = by - ay
-    val v1x = cx - ax
-    val v1y = cy - ay
-    val v2x = px - ax
-    val v2y = py - ay
-    val den = v0x * v1y - v1x * v0y
-    if (abs(den) < 1e-12) return null
-    val v = (v2x * v1y - v1x * v2y) / den
-    val w = (v0x * v2y - v2x * v0y) / den
-    val u = 1.0 - v - w
-    if (u < -1e-7 || v < -1e-7 || w < -1e-7) return null
-    return doubleArrayOf(u, v, w)
-}
-
-internal fun fillBoundedIdw(
+/**
+ * Smooth (harmonic) fill of hull voids: coarse-to-fine pyramid with bilinear prolongation and
+ * Gauss–Seidel relaxation, measured cells fixed. Result is continuous with the surrounding ground
+ * — no blocks, steps or IDW bull's-eyes — and flat water stays flat.
+ */
+internal fun fillVoidsSmooth(
     elevations: FloatArray,
     valid: BooleanArray,
     interpolated: BooleanArray,
     hull: BooleanArray,
     width: Int,
     height: Int,
-    x0: Int,
-    y0: Int,
-    x1: Int,
-    y1: Int,
-    radiusCells: Int,
-    passes: Int = 1,
-    sampleMask: BooleanArray? = null,
     scaleX: Double = 1.0,
     scaleY: Double = 1.0,
 ) {
-    val radius = radiusCells.coerceIn(1, 16)
-    val radiusSq = radius.toDouble() * radius
-    val radiusX = ceil(radius / scaleX).toInt().coerceIn(1, 48)
-    val radiusY = ceil(radius / scaleY).toInt().coerceIn(1, 48)
-    repeat(passes) {
-        // Jacobi pass: only the snapshot is sampled; commit updates after all cells are visited.
-        // Tile passes explicitly supply measuredMask, so traversal cannot grow artificial ridges.
-        val eligible = sampleMask ?: valid.copyOf()
-        var updates = IntArray(256)
-        var values = FloatArray(256)
-        var updateCount = 0
-        for (y in y0 until y1) {
-            for (x in x0 until x1) {
-                val index = y * width + x
-                if (valid[index] || !hull[index]) continue
-                var weightSum = 0.0
-                var valueSum = 0.0
-                var samples = 0
-                val yy0 = (y - radiusY).coerceAtLeast(0)
-                val yy1 = (y + radiusY).coerceAtMost(height - 1)
-                val xx0 = (x - radiusX).coerceAtLeast(0)
-                val xx1 = (x + radiusX).coerceAtMost(width - 1)
-                for (ny in yy0..yy1) {
-                    for (nx in xx0..xx1) {
-                        val dx = nx - x
-                        val dy = ny - y
-                        val distSq = dx * dx * scaleX * scaleX + dy * dy * scaleY * scaleY
-                        if (distSq == 0.0 || distSq > radiusSq) continue
-                        val neighbor = ny * width + nx
-                        if (!eligible[neighbor]) continue
-                        val z = elevations[neighbor]
-                        if (!z.isFinite()) continue
-                        val weight = 1.0 / distSq
-                        weightSum += weight
-                        valueSum += weight * z
-                        samples++
-                    }
-                }
-                if (samples >= 3 && weightSum > 0.0) {
-                    if (updateCount == updates.size) {
-                        updates = updates.copyOf(updates.size * 2)
-                        values = values.copyOf(values.size * 2)
-                    }
-                    updates[updateCount] = index
-                    values[updateCount] = (valueSum / weightSum).toFloat()
-                    updateCount++
-                }
-            }
-        }
-        for (i in 0 until updateCount) {
-            val index = updates[i]
-            elevations[index] = values[i]
-            valid[index] = true
-            interpolated[index] = true
-        }
+    val free = BooleanArray(width * height) { hull[it] && !valid[it] }
+    if (free.none { it } || valid.none { it }) return
+    val solved = harmonicLevel(
+        FloatArray(width * height) { if (valid[it]) elevations[it] else 0f },
+        FloatArray(width * height) { if (valid[it]) 1f else 0f },
+        width, height, free, scaleX, scaleY,
+    )
+    for (i in free.indices) {
+        if (!free[i]) continue
+        val z = solved[i]
+        if (!z.isFinite()) continue
+        elevations[i] = z
+        valid[i] = true
+        interpolated[i] = true
     }
 }
 
-private fun floorToInt(value: Double): Int = kotlin.math.floor(value).toInt()
+/** [weight] > 0 marks known values; [free] (level 0 only) restricts which unknowns are solved. */
+private fun harmonicLevel(
+    values: FloatArray,
+    weight: FloatArray,
+    width: Int,
+    height: Int,
+    free: BooleanArray?,
+    scaleX: Double,
+    scaleY: Double,
+): FloatArray {
+    val out = FloatArray(width * height) { if (weight[it] > 0f) values[it] else Float.NaN }
+    val unknown = BooleanArray(width * height) { weight[it] <= 0f && (free == null || free[it]) }
+    if (unknown.none { it }) return out
+    if (width <= 2 && height <= 2) {
+        var sum = 0.0
+        var n = 0.0
+        for (i in values.indices) if (weight[i] > 0f) { sum += values[i] * weight[i]; n += weight[i] }
+        val mean = if (n > 0) (sum / n).toFloat() else Float.NaN
+        for (i in out.indices) if (unknown[i]) out[i] = mean
+        return out
+    }
+    val cw = (width + 1) / 2
+    val ch = (height + 1) / 2
+    val cv = FloatArray(cw * ch)
+    val cwt = FloatArray(cw * ch)
+    for (y in 0 until height) for (x in 0 until width) {
+        val i = y * width + x
+        val wgt = weight[i]
+        if (wgt <= 0f) continue
+        val c = (y / 2) * cw + x / 2
+        cv[c] += values[i] * wgt
+        cwt[c] += wgt
+    }
+    for (c in cv.indices) if (cwt[c] > 0f) cv[c] /= cwt[c]
+    val coarse = harmonicLevel(cv, cwt, cw, ch, null, scaleX, scaleY)
+    // Bilinear prolongation of the coarse solution onto this level's unknowns.
+    for (y in 0 until height) for (x in 0 until width) {
+        val i = y * width + x
+        if (!unknown[i]) continue
+        val fx = ((x + 0.5) / 2.0 - 0.5).coerceIn(0.0, (cw - 1).toDouble())
+        val fy = ((y + 0.5) / 2.0 - 0.5).coerceIn(0.0, (ch - 1).toDouble())
+        val x0 = fx.toInt()
+        val y0 = fy.toInt()
+        val x1 = min(x0 + 1, cw - 1)
+        val y1 = min(y0 + 1, ch - 1)
+        val tx = (fx - x0).toFloat()
+        val ty = (fy - y0).toFloat()
+        val a = coarse[y0 * cw + x0]
+        val b = coarse[y0 * cw + x1]
+        val c = coarse[y1 * cw + x0]
+        val d = coarse[y1 * cw + x1]
+        val top = if (b.isFinite()) a + (b - a) * tx else a
+        val bottom = if (d.isFinite()) c + (d - c) * tx else c
+        out[i] = if (bottom.isFinite()) top + (bottom - top) * ty else top
+    }
+    // Discrete Laplace equation on rectangular physical cells: weights are 1 / spacing².
+    val inverseX = 1.0 / (scaleX * scaleX)
+    val inverseY = 1.0 / (scaleY * scaleY)
+    val normalization = max(inverseX, inverseY)
+    val wx = (inverseX / normalization).toFloat()
+    val wy = (inverseY / normalization).toFloat()
+    repeat(RELAX_ITERATIONS) {
+        for (y in 0 until height) for (x in 0 until width) {
+            val i = y * width + x
+            if (!unknown[i]) continue
+            var sum = 0f
+            var n = 0f
+            if (x > 0) out[i - 1].let { if (it.isFinite()) { sum += it * wx; n += wx } }
+            if (x < width - 1) out[i + 1].let { if (it.isFinite()) { sum += it * wx; n += wx } }
+            if (y > 0) out[i - width].let { if (it.isFinite()) { sum += it * wy; n += wy } }
+            if (y < height - 1) out[i + width].let { if (it.isFinite()) { sum += it * wy; n += wy } }
+            if (n > 0) out[i] = sum / n
+        }
+    }
+    return out
+}
 
-private fun ceilToInt(value: Double): Int = ceil(value).toInt()
+private const val RELAX_ITERATIONS = 12
+
+/** Exact Euclidean dilation in physical cell coordinates, O(width * height), independent of radius.
+ * Two weighted 1D squared-distance transforms replace up to 128 full-grid growth passes.
+ */
+internal fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: Int,
+                        scaleX: Double = 1.0, scaleY: Double = 1.0): BooleanArray {
+    require(source.size == width * height && scaleX > 0 && scaleY > 0)
+    if (radius <= 0) return source.copyOf()
+    val distance = DoubleArray(source.size) { if (source[it]) 0.0 else Double.POSITIVE_INFINITY }
+    val length = max(width, height)
+    val f = DoubleArray(length)
+    val out = DoubleArray(length)
+    val vertices = IntArray(length)
+    val crossings = DoubleArray(length + 1)
+    fun transform(n: Int, axisWeight: Double) {
+        val first = (0 until n).firstOrNull { f[it].isFinite() }
+        if (first == null) { java.util.Arrays.fill(out, 0, n, Double.POSITIVE_INFINITY); return }
+        var k = 0
+        vertices[0] = first
+        crossings[0] = Double.NEGATIVE_INFINITY
+        crossings[1] = Double.POSITIVE_INFINITY
+        for (q in first + 1 until n) {
+            if (!f[q].isFinite()) continue
+            fun crossing(v: Int) = ((f[q] - f[v]) / axisWeight + q.toDouble() * q - v.toDouble() * v) / (2.0 * (q - v))
+            var s = crossing(vertices[k])
+            while (k > 0 && s <= crossings[k]) { k--; s = crossing(vertices[k]) }
+            k++
+            vertices[k] = q
+            crossings[k] = s
+            crossings[k + 1] = Double.POSITIVE_INFINITY
+        }
+        k = 0
+        for (q in 0 until n) {
+            while (crossings[k + 1] < q) k++
+            val delta = q - vertices[k]
+            out[q] = f[vertices[k]] + axisWeight * delta.toDouble() * delta
+        }
+    }
+    for (y in 0 until height) {
+        for (x in 0 until width) f[x] = distance[y * width + x]
+        transform(width, scaleX * scaleX)
+        for (x in 0 until width) distance[y * width + x] = out[x]
+    }
+    for (x in 0 until width) {
+        for (y in 0 until height) f[y] = distance[y * width + x]
+        transform(height, scaleY * scaleY)
+        for (y in 0 until height) distance[y * width + x] = out[y]
+    }
+    val radiusSq = radius.toDouble() * radius
+    return BooleanArray(source.size) { distance[it] <= radiusSq }
+}

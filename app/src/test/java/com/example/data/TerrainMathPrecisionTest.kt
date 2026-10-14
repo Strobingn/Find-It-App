@@ -36,7 +36,7 @@ class TerrainMathPrecisionTest {
         assertEquals(0.3048, WktCrsParser.verticalUnitToMeters("""VERTCRS["height",VDATUM["NAVD88"],CS[vertical,1],AXIS["height",up,LENGTHUNIT["foot",0.3048]]]""")!!, 0.0)
     }
 
-    @Test fun triangulationReproducesAnAffinePlaneAcrossTileSeams() {
+    @Test fun harmonicFillPreservesMeasuredAffinePlaneSamples() {
         val width = 97
         val height = 97
         val mask = BooleanArray(width * height)
@@ -47,28 +47,40 @@ class TerrainMathPrecisionTest {
             values[y * width + x] = plane(x, y)
         }
         val result = interpolateBareEarth(values, mask, width, height, 1f, 625, 625)
-        assertTrue(result.diagnostics.tilesTriangulated > 1)
+        assertTrue(result.diagnostics.interpolatedCells > 0)
         for (y in 8..88) for (x in 8..88) {
             val index = y * width + x
             assertTrue("valid at $x,$y", result.validData[index])
-            assertEquals("plane at $x,$y", plane(x, y), result.elevations[index], 0.0001f)
+            assertEquals("plane at $x,$y", plane(x, y), result.elevations[index], 0.06f)
             if (mask[index]) assertFalse(result.interpolatedData[index])
         }
     }
 
-    @Test fun idwWeightsUsePhysicalDistanceOnRectangularCells() {
-        val elevations = FloatArray(25) { Float.NaN }
-        val valid = BooleanArray(25)
-        for ((index, z) in listOf(10 to 10f, 2 to 20f, 14 to 40f)) {
-            elevations[index] = z
-            valid[index] = true
+    @Test fun harmonicWeightsUsePhysicalDistanceOnRectangularCells() {
+        val elevations = FloatArray(9) { 0f }
+        elevations[1] = 20f; elevations[3] = 10f; elevations[5] = 40f; elevations[7] = 10f
+        val valid = BooleanArray(9) { it != 4 }
+        elevations[4] = Float.NaN
+        val interpolated = BooleanArray(9)
+        fillVoidsSmooth(elevations, valid, interpolated, BooleanArray(9) { true },
+            3, 3, scaleX = 1.0, scaleY = 0.5)
+        assertEquals(17f, elevations[4], 0.00001f) // Laplacian weights X=1, Y=4
+        assertTrue(interpolated[4])
+    }
+
+    @Test fun distanceTransformMatchesBruteForcePhysicalDisc() {
+        val width = 17; val height = 13
+        val measured = BooleanArray(width * height) { it in listOf(0, 37, 101, 218) }
+        for ((sx, sy) in listOf(1.0 to 1.0, 0.25 to 2.0, 3.0 to 0.5)) {
+            val actual = dilateMask(measured, width, height, 3, sx, sy)
+            for (y in 0 until height) for (x in 0 until width) {
+                val expected = measured.indices.any { i ->
+                    measured[i] && ((x - i % width) * sx).let { it * it } +
+                        ((y - i / width) * sy).let { it * it } <= 9.0
+                }
+                assertEquals("disc at $x,$y ($sx,$sy)", expected, actual[y * width + x])
+            }
         }
-        val interpolated = BooleanArray(25)
-        fillBoundedIdw(elevations, valid, interpolated, BooleanArray(25) { true },
-            5, 5, 2, 2, 3, 3, 4, scaleX = 1.0, scaleY = 0.5)
-        // Centre-to-left/right distance = 2; centre-to-top = 1 in physical units.
-        assertEquals((130.0 / 6.0).toFloat(), elevations[12], 0.00001f)
-        assertTrue(interpolated[12])
     }
 
     @Test fun lodRetainsIndependentAxisSpacing() {
