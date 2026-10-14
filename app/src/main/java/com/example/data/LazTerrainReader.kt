@@ -12,10 +12,8 @@ import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_Z
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
-import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 
 /** Pure-Java LAZ decoding backed by laszip4j; all rasterization remains memory bounded. */
@@ -103,13 +101,13 @@ internal object LazTerrainReader {
     }
 
     /** Source footprint (x, y extent in source units) from the LAS header, or null. */
-    private fun headerExtent(file: File): Pair<Double, Double>? =
-        SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
-            val h = reader.header
-            val x = h.max_x - h.min_x
-            val y = h.max_y - h.min_y
-            if (x > 0.0 && y > 0.0 && x.isFinite() && y.isFinite()) x to y else null
-        }
+    private fun headerExtent(file: File): Pair<Double, Double>? {
+        // Bounds are ordinary LAS header fields; do not initialize a compressed reader here.
+        val info = com.example.gps.crs.LasCrsReader.read(file) ?: return null
+        val x = info.maxX - info.minX
+        val y = info.maxY - info.minY
+        return if (x > 0.0 && y > 0.0 && x.isFinite() && y.isFinite()) x to y else null
+    }
 
     private fun groundDensityKey(file: File, options: LidarImportOptions): String =
         "${runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)}|${file.length()}|" +
@@ -196,6 +194,7 @@ internal object LazTerrainReader {
                     versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
                     pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
                     pointCount = pointCount,
+                    units = LasTerrainUnits.fromHeader(sourceHeader),
                     scaleX = sourceHeader.x_scale_factor,
                     scaleY = sourceHeader.y_scale_factor,
                     scaleZ = sourceHeader.z_scale_factor,
@@ -230,6 +229,8 @@ internal object LazTerrainReader {
                     options = previewOptions,
                     // Declared budget ≈ samples we will feed so internal stride stays ~1.
                     declaredPointCount = PREVIEW_TARGET_POINTS.toLong(),
+                    horizontalUnitToMeters = header.units.horizontal,
+                    verticalUnitToMeters = header.units.vertical,
                 )
                 val targetSamples = chunksToSample.toLong() * pointsPerChunk.toLong()
                 var sampled = 0L
@@ -319,6 +320,7 @@ internal object LazTerrainReader {
             versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
             pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
             pointCount = pointCount,
+            units = LasTerrainUnits.fromHeader(sourceHeader),
             scaleX = sourceHeader.x_scale_factor,
             scaleY = sourceHeader.y_scale_factor,
             scaleZ = sourceHeader.z_scale_factor,
@@ -342,6 +344,8 @@ internal object LazTerrainReader {
             lasVersionMajor = header.versionMajor,
             lasVersionMinor = header.versionMinor,
             pointFormat = header.pointFormat,
+            horizontalUnitToMeters = header.units.horizontal,
+            verticalUnitToMeters = header.units.vertical,
         )
         var decoded = 0L
         var pointsInBatch = 0
@@ -393,19 +397,30 @@ internal object LazTerrainReader {
         // laszip4j's non-seekable stream reader stops at the first chunk boundary of chunked LAZ
         // (it read 50,000 of 10.6M points on autzen), so spool to a temp file and use the seekable
         // file path. The stream decoder remains the fallback when spooling is not possible.
-        val spooled = runCatching {
-            File.createTempFile("laz-stream-", ".laz").also { temp ->
-                temp.outputStream().buffered(FILE_BUFFER_BYTES).use { out -> inputStream.copyTo(out, FILE_BUFFER_BYTES) }
+        val temporary = runCatching { File.createTempFile("laz-stream-", ".laz") }.getOrNull()
+            ?: return readStreamDirect(inputStream, options, shouldContinue, onProgress)
+        return try {
+            temporary.outputStream().buffered(FILE_BUFFER_BYTES).use { output ->
+                val buffer = ByteArray(FILE_BUFFER_BYTES)
+                while (true) {
+                    if (!shouldContinue()) return null
+                    val count = inputStream.read(buffer)
+                    if (count < 0) break
+                    if (count == 0) {
+                        val single = inputStream.read()
+                        if (single < 0) break
+                        output.write(single)
+                    } else output.write(buffer, 0, count)
+                }
             }
-        }.getOrNull()
-        if (spooled != null) {
-            try {
-                return read(spooled, options, shouldContinue, onProgress)
-            } finally {
-                spooled.delete()
-            }
+            read(temporary, options, shouldContinue, onProgress)
+        } catch (failure: java.io.IOException) {
+            // The source may already have advanced: never decode its remaining suffix as LAS.
+            System.err.println("Could not spool LAZ input: ${failure.message}")
+            null
+        } finally {
+            temporary.delete()
         }
-        return readStreamDirect(inputStream, options, shouldContinue, onProgress)
     }
 
     private fun readStreamDirect(
@@ -440,6 +455,7 @@ internal object LazTerrainReader {
             versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
             pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
             pointCount = pointCount,
+            units = LasTerrainUnits.fromHeader(sourceHeader),
             scaleX = sourceHeader.x_scale_factor,
             scaleY = sourceHeader.y_scale_factor,
             scaleZ = sourceHeader.z_scale_factor,
@@ -645,6 +661,7 @@ internal object LazTerrainReader {
                 versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
                 pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
                 pointCount = pointCount,
+                units = LasTerrainUnits.fromHeader(sourceHeader),
                 scaleX = sourceHeader.x_scale_factor,
                 scaleY = sourceHeader.y_scale_factor,
                 scaleZ = sourceHeader.z_scale_factor,
@@ -667,8 +684,8 @@ internal object LazTerrainReader {
         if (workers == 1) return null
 
         // One shared raster; workers only decode. Each claims the next compressed chunk, decodes
-        // it into a compact buffer (~17 B/point), and a single binner adds chunks strictly in
-        // file order. Memory is bounded by the in-flight window (2 chunks per worker, ~14 MB at
+        // it into a compact buffer (~22 B/point), and a single binner adds chunks strictly in
+        // file order. Memory is bounded by the in-flight window (2 chunks per worker, ~18 MB at
         // 8 workers) instead of a full private raster per worker (75 MB each at 1536²), so all
         // cores can be used, and the result is identical to the sequential decoder.
         val rasterizer = newRasterizer(header.withUnits(file), limited, pointCount)
@@ -836,6 +853,7 @@ internal object LazTerrainReader {
                 versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
                 pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
                 pointCount = pointCount,
+                units = LasTerrainUnits.fromHeader(sourceHeader),
                 scaleX = sourceHeader.x_scale_factor,
                 scaleY = sourceHeader.y_scale_factor,
                 scaleZ = sourceHeader.z_scale_factor,

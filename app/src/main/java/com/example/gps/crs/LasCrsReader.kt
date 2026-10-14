@@ -15,6 +15,7 @@ data class LasCrsInfo(
     /** Why [crs] is null, for UI diagnostics. */
     val problem: String? = null,
     val verticalUnitToMeters: Double? = null,
+    val horizontalUnitToMeters: Double? = crs?.unitToMeters,
 )
 
 object LasCrsReader {
@@ -77,17 +78,18 @@ object LasCrsReader {
                 else -> "No CRS stored in this file"
             }
             LasCrsInfo(crs, minX, maxX, minY, maxY, problem,
-                wkt?.let(WktCrsParser::verticalUnitToMeters) ?: geoKeys?.let(::verticalUnitFromGeoKeys))
+                wkt?.let(WktCrsParser::verticalUnitToMeters) ?: geoKeys?.let { linearUnitFromGeoKeys(it, 4099) },
+                wkt?.let(WktCrsParser::horizontalUnitToMeters) ?: geoKeys?.let { linearUnitFromGeoKeys(it, 3076) } ?: crs?.unitToMeters)
         }
     }.getOrNull()
 
-    private fun verticalUnitFromGeoKeys(data: ByteArray): Double? {
+    internal fun linearUnitFromGeoKeys(data: ByteArray, key: Int): Double? {
         if (data.size < 8) return null
         val b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val keys = b.getShort(6).toInt() and 0xFFFF
         for (k in 0 until minOf(keys, (data.size - 8) / 8)) {
             val base = 8 + k * 8
-            if ((b.getShort(base).toInt() and 0xFFFF) != 4099 || b.getShort(base + 2).toInt() != 0) continue
+            if ((b.getShort(base).toInt() and 0xFFFF) != key || b.getShort(base + 2).toInt() != 0) continue
             return when (b.getShort(base + 6).toInt() and 0xFFFF) {
                 9001 -> 1.0
                 9002 -> ProjectedCrs.INTERNATIONAL_FOOT

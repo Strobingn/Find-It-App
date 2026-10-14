@@ -30,6 +30,7 @@ class TerrainMathPrecisionTest {
 
     @Test fun verticalWktUnitIsSeparateFromProjectedUnit() {
         val compound = """COMPD_CS["survey",PROJCS["feet XY",UNIT["Foot_US",0.3048006096012192]],VERT_CS["NAVD88",VERT_DATUM["NAVD88",2005],UNIT["metre",1.0],AXIS["Up",UP]]]"""
+        assertEquals(0.3048006096012192, WktCrsParser.horizontalUnitToMeters(compound)!!, 0.0)
         assertEquals(1.0, WktCrsParser.verticalUnitToMeters(compound)!!, 0.0)
         assertNull(WktCrsParser.verticalUnitToMeters("""PROJCS["feet XY",UNIT["Foot_US",0.3048006096012192]]"""))
         assertEquals(0.3048, WktCrsParser.verticalUnitToMeters("""VERTCRS["height",VDATUM["NAVD88"],CS[vertical,1],AXIS["height",up,LENGTHUNIT["foot",0.3048]]]""")!!, 0.0)
@@ -53,6 +54,21 @@ class TerrainMathPrecisionTest {
             assertEquals("plane at $x,$y", plane(x, y), result.elevations[index], 0.0001f)
             if (mask[index]) assertFalse(result.interpolatedData[index])
         }
+    }
+
+    @Test fun idwWeightsUsePhysicalDistanceOnRectangularCells() {
+        val elevations = FloatArray(25) { Float.NaN }
+        val valid = BooleanArray(25)
+        for ((index, z) in listOf(10 to 10f, 2 to 20f, 14 to 40f)) {
+            elevations[index] = z
+            valid[index] = true
+        }
+        val interpolated = BooleanArray(25)
+        fillBoundedIdw(elevations, valid, interpolated, BooleanArray(25) { true },
+            5, 5, 2, 2, 3, 3, 4, scaleX = 1.0, scaleY = 0.5)
+        // Centre-to-left/right distance = 2; centre-to-top = 1 in physical units.
+        assertEquals((130.0 / 6.0).toFloat(), elevations[12], 0.00001f)
+        assertTrue(interpolated[12])
     }
 
     @Test fun lodRetainsIndependentAxisSpacing() {

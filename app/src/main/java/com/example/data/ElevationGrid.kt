@@ -158,7 +158,7 @@ class ElevationGrid(
             null
         }
         val curvatureArr = if (visualizationMode == 4 || visualizationMode == 5) {
-            cachedCurvature ?: curvature(elevations, cellDistance).also { arr ->
+            cachedCurvature ?: curvature(elevations).also { arr ->
                 cachedCurvature = arr
                 cachedCurvatureScale = robustMagnitudeScale(arr)
             }
@@ -488,7 +488,7 @@ class ElevationGrid(
         return LocalStatistics(residual, roughness)
     }
 
-    private fun curvature(elevations: FloatArray, cellDistance: Float): FloatArray {
+    private fun curvature(elevations: FloatArray): FloatArray {
         // Laplacian; a missing (NaN/invalid) neighbour takes the centre value, invalid centres
         // yield 0 (they are rendered transparent anyway).
         val output = FloatArray(elevations.size)

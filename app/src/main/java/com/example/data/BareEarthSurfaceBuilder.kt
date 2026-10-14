@@ -135,6 +135,8 @@ internal fun interpolateBareEarth(
     totalPoints: Long,
     groundPoints: Int,
     sourceCounts: IntArray? = null,
+    cellSizeXMeters: Float = cellSizeMeters,
+    cellSizeYMeters: Float = cellSizeMeters,
 ): BareEarthInterpolationResult {
     require(measuredElevations.size == width * height)
     require(measuredMask.size == width * height)
@@ -142,7 +144,10 @@ internal fun interpolateBareEarth(
     val interpolated = BooleanArray(width * height)
     val valid = BooleanArray(width * height) { measuredMask[it] && elevations[it].isFinite() }
 
-    val area = width.toDouble() * height.toDouble() * cellSizeMeters.toDouble() * cellSizeMeters.toDouble()
+    require(cellSizeXMeters.isFinite() && cellSizeXMeters > 0f && cellSizeYMeters.isFinite() && cellSizeYMeters > 0f)
+    val scaleX = cellSizeXMeters.toDouble() / cellSizeMeters
+    val scaleY = cellSizeYMeters.toDouble() / cellSizeMeters
+    val area = (width - 1).coerceAtLeast(1).toDouble() * (height - 1).coerceAtLeast(1) * cellSizeXMeters * cellSizeYMeters
     val spacing = meanSpacingMeters(area, groundPoints.coerceAtLeast(valid.count { it }).toLong())
     val recommendedCell = recommendedCellSizeMeters(area, groundPoints.coerceAtLeast(1).toLong())
         ?: (spacing * DEFAULT_CELL_TO_SPACING.toFloat())
@@ -186,7 +191,7 @@ internal fun interpolateBareEarth(
                     val index = y * width + x
                     // Interpolated cells from earlier tiles are not source measurements.
                     if (!measuredMask[index] || !measuredElevations[index].isFinite()) continue
-                    vertices += TinVertex(x.toDouble(), y.toDouble(), measuredElevations[index], index)
+                    vertices += TinVertex(x * scaleX, y * scaleY, measuredElevations[index], index)
                     // Above this cap we use IDW. Do not allocate thousands of unused objects.
                     if (vertices.size > MAX_TIN_VERTICES_PER_TILE) break@collectVertices
                 }
@@ -209,6 +214,8 @@ internal fun interpolateBareEarth(
                         x1 = x1,
                         y1 = y1,
                         maxEdgeCells = maxEdgeCells.toDouble(),
+                        scaleX = scaleX,
+                        scaleY = scaleY,
                     )
                     trianglesKept += rasterized.first
                     trianglesKilled += rasterized.second
@@ -216,14 +223,14 @@ internal fun interpolateBareEarth(
                     tilesIdw++
                     fillBoundedIdw(
                         elevations, valid, interpolated, hull, width, height,
-                        x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask,
+                        x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask, scaleX = scaleX, scaleY = scaleY,
                     )
                 }
             } else if (vertices.size >= 3) {
                 tilesIdw++
                 fillBoundedIdw(
                     elevations, valid, interpolated, hull, width, height,
-                    x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask,
+                    x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask, scaleX = scaleX, scaleY = scaleY,
                 )
             }
         }
@@ -234,7 +241,7 @@ internal fun interpolateBareEarth(
         elevations, valid, interpolated, hull, width, height,
         0, 0, width, height,
         min(HOLE_FILL_RADIUS_CELLS, maxEdgeCells.roundToInt().coerceAtLeast(2)),
-        passes = 2,
+        passes = 2, scaleX = scaleX, scaleY = scaleY,
     )
 
     var interpolatedCells = 0
@@ -325,6 +332,8 @@ internal fun ElevationGrid.ensureBareEarthCoverage(): ElevationGrid {
         cellSizeMeters = cellSizeMeters,
         totalPoints = measured.count { it }.toLong(),
         groundPoints = measured.count { it },
+        cellSizeXMeters = cellSizeXMeters,
+        cellSizeYMeters = cellSizeYMeters,
     )
     return ElevationGrid(
         width = width,
@@ -549,6 +558,8 @@ private fun rasterizeTin(
     x1: Int,
     y1: Int,
     maxEdgeCells: Double,
+    scaleX: Double = 1.0,
+    scaleY: Double = 1.0,
 ): Pair<Int, Int> {
     var kept = 0
     var killed = 0
@@ -564,15 +575,15 @@ private fun rasterizeTin(
             continue
         }
         kept++
-        val minX = floorToInt(min(a.x, min(b.x, c.x))).coerceAtLeast(x0)
-        val maxX = ceilToInt(max(a.x, max(b.x, c.x))).coerceAtMost(x1 - 1)
-        val minY = floorToInt(min(a.y, min(b.y, c.y))).coerceAtLeast(y0)
-        val maxY = ceilToInt(max(a.y, max(b.y, c.y))).coerceAtMost(y1 - 1)
+        val minX = floorToInt(min(a.x, min(b.x, c.x)) / scaleX).coerceAtLeast(x0)
+        val maxX = ceilToInt(max(a.x, max(b.x, c.x)) / scaleX).coerceAtMost(x1 - 1)
+        val minY = floorToInt(min(a.y, min(b.y, c.y)) / scaleY).coerceAtLeast(y0)
+        val maxY = ceilToInt(max(a.y, max(b.y, c.y)) / scaleY).coerceAtMost(y1 - 1)
         for (y in minY..maxY) {
             for (x in minX..maxX) {
                 val index = y * width + x
                 if (valid[index] || !hull[index]) continue
-                val bary = barycentric(x.toDouble(), y.toDouble(), a.x, a.y, b.x, b.y, c.x, c.y)
+                val bary = barycentric(x * scaleX, y * scaleY, a.x, a.y, b.x, b.y, c.x, c.y)
                     ?: continue
                 val z = (bary[0] * a.z + bary[1] * b.z + bary[2] * c.z).toFloat()
                 if (!z.isFinite()) continue
@@ -610,7 +621,7 @@ private fun barycentric(
     return doubleArrayOf(u, v, w)
 }
 
-private fun fillBoundedIdw(
+internal fun fillBoundedIdw(
     elevations: FloatArray,
     valid: BooleanArray,
     interpolated: BooleanArray,
@@ -624,9 +635,13 @@ private fun fillBoundedIdw(
     radiusCells: Int,
     passes: Int = 1,
     sampleMask: BooleanArray? = null,
+    scaleX: Double = 1.0,
+    scaleY: Double = 1.0,
 ) {
     val radius = radiusCells.coerceIn(1, 16)
-    val radiusSq = radius * radius
+    val radiusSq = radius.toDouble() * radius
+    val radiusX = ceil(radius / scaleX).toInt().coerceIn(1, 48)
+    val radiusY = ceil(radius / scaleY).toInt().coerceIn(1, 48)
     repeat(passes) {
         // Jacobi pass: only the snapshot is sampled; commit updates after all cells are visited.
         // Tile passes explicitly supply measuredMask, so traversal cannot grow artificial ridges.
@@ -641,16 +656,16 @@ private fun fillBoundedIdw(
                 var weightSum = 0.0
                 var valueSum = 0.0
                 var samples = 0
-                val yy0 = (y - radius).coerceAtLeast(0)
-                val yy1 = (y + radius).coerceAtMost(height - 1)
-                val xx0 = (x - radius).coerceAtLeast(0)
-                val xx1 = (x + radius).coerceAtMost(width - 1)
+                val yy0 = (y - radiusY).coerceAtLeast(0)
+                val yy1 = (y + radiusY).coerceAtMost(height - 1)
+                val xx0 = (x - radiusX).coerceAtLeast(0)
+                val xx1 = (x + radiusX).coerceAtMost(width - 1)
                 for (ny in yy0..yy1) {
                     for (nx in xx0..xx1) {
                         val dx = nx - x
                         val dy = ny - y
-                        val distSq = dx * dx + dy * dy
-                        if (distSq == 0 || distSq > radiusSq) continue
+                        val distSq = dx * dx * scaleX * scaleX + dy * dy * scaleY * scaleY
+                        if (distSq == 0.0 || distSq > radiusSq) continue
                         val neighbor = ny * width + nx
                         if (!eligible[neighbor]) continue
                         val z = elevations[neighbor]

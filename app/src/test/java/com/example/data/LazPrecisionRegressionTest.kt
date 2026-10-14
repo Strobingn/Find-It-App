@@ -1,8 +1,7 @@
 package com.example.data
 
-import com.github.mreutegg.laszip4j.LASReader
-import com.github.mreutegg.laszip4j.LASWriter
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
@@ -125,14 +124,24 @@ class LazPrecisionRegressionTest {
             val file = LasFixture.write(File(root, "points.las"), 450_123)
             val options = LidarImportOptions(rasterResolution = 128)
             AppMemoryBudget.lowMemoryOverride = true // 2 workers, a four-slot ring wraps twice.
+            RandomAccessFile(file, "rw").use { raw ->
+                // Invalid returns at a chunk boundary and the short final chunk.
+                for ((point, classification) in listOf(49_999 to 7, 50_000 to 0x82, 450_122 to 18)) {
+                    raw.seek(227L + point * 20L + 15)
+                    raw.writeByte(classification)
+                }
+            }
             val compressed = File(root, "points.laz")
-            LASWriter(LASReader(file)).write(compressed)
+            requireNotNull(javaClass.getResourceAsStream("/laz/precision-chunks.laz")).use { input ->
+                compressed.outputStream().use { output -> input.copyTo(output) }
+            }
             for (source in listOf(file, compressed)) {
                 LazTerrainReader.parallelDecodeEnabled = false
                 val sequential = LazTerrainReader.read(source, options)!!
                 LazTerrainReader.parallelDecodeEnabled = true
                 val parallel = LazTerrainReader.read(source, options)!!
                 assertEquals(450_123, parallel.totalPointsRead)
+                assertEquals(450_120, parallel.sampledPoints)
                 if (Runtime.getRuntime().availableProcessors() > 1) assertTrue(parallel.note.contains("parallel chunk decode"))
                 assertEquals(sequential.totalPointsRead, parallel.totalPointsRead)
                 assertArrayEquals(sequential.grid.bareEarth, parallel.grid.bareEarth, 0f)

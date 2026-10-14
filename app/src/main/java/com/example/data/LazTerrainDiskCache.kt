@@ -226,7 +226,7 @@ class LazTerrainDiskCache(
     }
 
     companion object {
-        // V2: validData mask from full raster. V3: same + optional georeference metadata.
+        // V5: filtered terrain, both physical axis spacings, provenance masks and geo metadata.
         private const val MAGIC_V4 = "FINDIT_DEM_CACHE_V5"
         private const val CACHE_EXTENSION = "fitdem"
         private const val BUFFER_BYTES = 256 * 1024

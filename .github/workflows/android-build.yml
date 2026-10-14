@@ -84,16 +84,30 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
         env:
           VERSION_NAME: 2.0.${{ github.run_number }}-laz
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           export VERSION_CODE=$((1000000 + ${{ github.run_number }}))
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/findit-release.jks"
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/findit-release.jks"
+          else
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/ci/findit-debug.keystore"
+            export STORE_PASSWORD=android KEY_ALIAS=androiddebugkey KEY_PASSWORD=android
+          fi
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          sha256sum app/build/outputs/apk/release/*.apk > app/build/outputs/apk/release/SHA256SUMS.txt
 
       - name: Upload branch APK
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
         uses: actions/upload-artifact@v7
         with:
           name: Find-It-LAZ-${{ github.run_number }}
-          path: app/build/outputs/apk/release/*.apk
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
 

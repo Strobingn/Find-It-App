@@ -289,6 +289,8 @@ internal class LidarRasterizer(
             totalPoints = pointsDecoded,
             groundPoints = groundSamples,
             sourceCounts = sourceCounts,
+            cellSizeXMeters = cellX,
+            cellSizeYMeters = cellY,
         )
 
         val cleaned = if (appliedMode != GroundSurfaceMode.AUTO_LOWEST) {
@@ -372,7 +374,7 @@ internal class LidarRasterizer(
 
         val wasTruncated = truncatedByReader
         val earlyOutNote = if (wasTruncated) " · truncated" else ""
-        val samplingNote = "every return used · $pointsDecoded points decoded$earlyOutNote"
+        val samplingNote = "every eligible return used · $pointsDecoded points decoded$earlyOutNote"
         val modeNote = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED ->
                 "ASPRS ground classes: $groundPointsBinned / $pointsBinned sampled returns"
@@ -479,6 +481,8 @@ internal class LidarRasterizer(
             totalPoints = pointsDecoded,
             groundPoints = samples,
             sourceCounts = counts,
+            cellSizeXMeters = (rangeX * horizontalUnitToMeters / (width - 1)).toFloat(),
+            cellSizeYMeters = (rangeY * horizontalUnitToMeters / (height - 1)).toFloat(),
         )
         val cleaned = suppressIsolatedLowNoise(filled.elevations, width, height)
         val ground = if (options.smoothingRadius > 0) {
