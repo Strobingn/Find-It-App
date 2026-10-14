@@ -107,20 +107,8 @@ fun LayerComparisonWorkspace(
     var leftLayer by rememberSaveable { mutableStateOf(TerrainDerivedLayer.LOCAL_RELIEF) }
     var rightLayer by rememberSaveable { mutableStateOf(TerrainDerivedLayer.SLOPE) }
 
-    var leftBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var rightBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(result, leftLayer) {
-        leftBitmap = null
-        leftBitmap = withContext(Dispatchers.Default) {
-            result?.let { TerrainIntelligenceRenderer.renderLayer(it, leftLayer) }
-        }
-    }
-    LaunchedEffect(result, rightLayer) {
-        rightBitmap = null
-        rightBitmap = withContext(Dispatchers.Default) {
-            result?.let { TerrainIntelligenceRenderer.renderLayer(it, rightLayer) }
-        }
-    }
+    val leftBitmap = remember(result, leftLayer) { result?.let { TerrainIntelligenceRenderer.renderLayer(it, leftLayer) } }
+    val rightBitmap = remember(result, rightLayer) { result?.let { TerrainIntelligenceRenderer.renderLayer(it, rightLayer) } }
 
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
