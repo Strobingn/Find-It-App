@@ -15,6 +15,7 @@ class GitHubReleaseClient(
     private val repo: String = "Strobingn/Find-It-App",
     private val token: String = "",
     private val http: OkHttpClient = defaultHttpClient(),
+    private val downloadHttp: OkHttpClient = downloadHttpClient(http),
 ) {
     fun latestFinditRelease(): UpdateCheckResult {
         val tokenPresent = token.isNotBlank()
@@ -56,48 +57,96 @@ class GitHubReleaseClient(
         return UpdateCheckResult.Available(newest)
     }
 
-    fun downloadRelease(release: FinditRelease, destination: File) {
+    /**
+     * Streams the APK to [destination] (via a `.part` file) with progress. Blocking: call off the
+     * main thread. [isActive] is polled between chunks so the caller can cancel; a cancelled or
+     * failed download never leaves a partial APK behind.
+     */
+    fun downloadRelease(
+        release: FinditRelease,
+        destination: File,
+        onProgress: (downloaded: Long, total: Long) -> Unit = { _, _ -> },
+        isActive: () -> Boolean = { true },
+    ) {
         val url = if (token.isNotBlank()) {
             release.apkApiUrl
         } else {
             release.browserDownloadUrl.ifBlank { release.apkApiUrl }
         }
-        downloadAsset(url, destination)
+        downloadAsset(url, destination, onProgress, isActive)
     }
 
-    fun downloadAsset(apiUrl: String, destination: File) {
+    fun downloadAsset(
+        apiUrl: String,
+        destination: File,
+        onProgress: (downloaded: Long, total: Long) -> Unit = { _, _ -> },
+        isActive: () -> Boolean = { true },
+    ) {
         destination.parentFile?.mkdirs()
+        val part = File(destination.path + ".part")
+        part.delete()
         val request = Request.Builder()
             .url(apiUrl)
             .header("Accept", "application/octet-stream")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .apply { if (token.isNotBlank()) header("Authorization", "Bearer $token") }
             .build()
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                val err = response.body?.string().orEmpty()
-                if (AppUpdateParse.isRateLimit(
-                        response.code,
-                        err,
-                        response.header("X-RateLimit-Remaining"),
-                    )
-                ) {
-                    throw IOException(AppUpdateParse.RATE_LIMIT_MESSAGE)
+        val call = downloadHttp.newCall(request)
+        try {
+            call.execute().use { response ->
+                if (!response.isSuccessful) {
+                    val err = response.body?.string().orEmpty()
+                    if (AppUpdateParse.isRateLimit(
+                            response.code,
+                            err,
+                            response.header("X-RateLimit-Remaining"),
+                        )
+                    ) {
+                        throw IOException(AppUpdateParse.RATE_LIMIT_MESSAGE)
+                    }
+                    if (token.isNotBlank() && (response.code == 401 || response.code == 403)) {
+                        throw IOException("Update token expired or invalid")
+                    }
+                    throw IOException("APK download HTTP ${response.code}")
                 }
-                if (token.isNotBlank() && (response.code == 401 || response.code == 403)) {
-                    throw IOException("Update token expired or invalid")
+                val body = response.body ?: throw IOException("Empty APK download")
+                val total = body.contentLength()
+                var downloaded = 0L
+                onProgress(0L, total)
+                part.outputStream().use { output ->
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            if (!isActive()) {
+                                call.cancel()
+                                throw DownloadCancelledException()
+                            }
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+                            onProgress(downloaded, total)
+                        }
+                    }
                 }
-                throw IOException("APK download HTTP ${response.code}")
+                if (downloaded <= 0L) throw IOException("Empty APK download")
+                if (total > 0 && downloaded != total) {
+                    throw IOException("APK download incomplete ($downloaded of $total bytes)")
+                }
+                destination.delete()
+                if (!part.renameTo(destination)) {
+                    part.copyTo(destination, overwrite = true)
+                }
+                if (!destination.isFile || destination.length() <= 0L) {
+                    throw IOException("Empty APK download")
+                }
             }
-            val body = response.body ?: throw IOException("Empty APK download")
-            destination.outputStream().use { output ->
-                body.byteStream().copyTo(output)
-            }
-            if (!destination.isFile || destination.length() <= 0L) {
-                throw IOException("Empty APK download")
-            }
+        } finally {
+            part.delete()
         }
     }
+
+    class DownloadCancelledException : IOException("Download cancelled")
 
     companion object {
         /** Release list pages are small; keep the whole check well under the 15 s UI budget. */
@@ -109,6 +158,20 @@ class GitHubReleaseClient(
             .writeTimeout(8, TimeUnit.SECONDS)
             .callTimeout(12, TimeUnit.SECONDS)
             .build()
+
+        /**
+         * APK downloads (~25 MB) must not share the 12 s whole-call budget of the release check,
+         * which killed downloads on normal mobile links. A stalled socket still fails via the
+         * read timeout; total time is bounded by the user's Cancel.
+         */
+        fun downloadHttpClient(base: OkHttpClient = defaultHttpClient()): OkHttpClient =
+            base.newBuilder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(DOWNLOAD_STALL_TIMEOUT_S, TimeUnit.SECONDS)
+                .callTimeout(0, TimeUnit.SECONDS)
+                .build()
+
+        const val DOWNLOAD_STALL_TIMEOUT_S = 20L
 
         fun parseRelease(json: String): FinditRelease? {
             val obj = org.json.JSONObject(json)
