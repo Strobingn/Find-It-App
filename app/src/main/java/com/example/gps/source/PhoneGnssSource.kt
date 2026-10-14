@@ -55,27 +55,43 @@ class PhoneGnssSource(context: Context) {
     fun hasFinePermission(): Boolean =
         ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
+    fun hasAnyLocationPermission(): Boolean =
+        hasFinePermission() ||
+            ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
     @SuppressLint("MissingPermission")
     fun fixes(): Flow<GnssFix> = callbackFlow {
-        if (!hasFinePermission() || !LocationManagerCompat.isLocationEnabled(locationManager)) {
+        if (!hasAnyLocationPermission() || !LocationManagerCompat.isLocationEnabled(locationManager)) {
             close(); return@callbackFlow
         }
         val handler = Handler(Looper.getMainLooper())
         val executor = Executor { handler.post(it) }
         val listener = LocationListenerCompat { location -> trySend(location.toFix()) }
-        val request = LocationRequestCompat.Builder(0L)
-            .setQuality(LocationRequestCompat.QUALITY_HIGH_ACCURACY)
-            .setMinUpdateIntervalMillis(0L)
+        val fine = hasFinePermission()
+        val request = LocationRequestCompat.Builder(1_000L)
+            .setQuality(
+                if (fine) LocationRequestCompat.QUALITY_HIGH_ACCURACY
+                else LocationRequestCompat.QUALITY_BALANCED_POWER_ACCURACY,
+            )
+            .setMinUpdateIntervalMillis(500L)
             .setMinUpdateDistanceMeters(0f)
             .build()
-        val provider = if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            LocationManager.GPS_PROVIDER
-        } else {
-            LocationManager.FUSED_PROVIDER.takeIf { Build.VERSION.SDK_INT >= 31 } ?: LocationManager.NETWORK_PROVIDER
+        val providers = buildList {
+            if (fine && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) add(LocationManager.GPS_PROVIDER)
+            if (Build.VERSION.SDK_INT >= 31 && locationManager.isProviderEnabled(LocationManager.FUSED_PROVIDER)) {
+                add(LocationManager.FUSED_PROVIDER)
+            }
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) add(LocationManager.NETWORK_PROVIDER)
         }
-        val started = runCatching {
-            LocationManagerCompat.requestLocationUpdates(locationManager, provider, request, executor, listener)
-        }.isSuccess
+        var started = false
+        for (provider in providers) {
+            val ok = runCatching {
+                LocationManagerCompat.requestLocationUpdates(locationManager, provider, request, executor, listener)
+            }.isSuccess
+            if (!ok) continue
+            started = true
+            runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()?.let { trySend(it.toFix()) }
+        }
         if (!started) { close(); return@callbackFlow }
 
         val statusCallback = object : GnssStatus.Callback() {

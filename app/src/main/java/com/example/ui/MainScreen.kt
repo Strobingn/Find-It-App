@@ -981,8 +981,12 @@ private fun TerrainTab(
             }
         }
 
+        LaunchedEffect(navigationTarget) {
+            viewModel.setCompassNavigationActive(navigationTarget != null)
+        }
         LaunchedEffect(showArGuidance, navigationTarget) {
             if (showArGuidance && navigationTarget == null) showArGuidance = false
+            if (showArGuidance) viewModel.ensureGpsTracking()
         }
         if (showArGuidance) {
             navigationTarget?.let { target ->
@@ -1002,6 +1006,8 @@ private fun TerrainTab(
                     } else {
                         null
                     },
+                    onEnsureGps = viewModel::ensureGpsTracking,
+                    onLocationPermissionResult = viewModel::onLocationPermissionResult,
                     onDismiss = { showArGuidance = false },
                 )
             }
@@ -1243,10 +1249,13 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         deviceAccuracyMeters = deviceAccuracyMeters,
         compassHeadingDegrees = compassHeadingDegrees,
         onEnableGps = {
-            viewModel.toggleGpsTracking(true)
+            viewModel.ensureGpsTracking()
             val granted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         },

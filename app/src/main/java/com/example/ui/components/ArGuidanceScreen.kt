@@ -1,7 +1,10 @@
 package com.example.ui.components
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.provider.Settings
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +58,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.field.ArGuidance
 import com.example.data.field.FieldNavigation
@@ -80,6 +84,8 @@ fun ArGuidanceDialog(
     headingDegrees: Float?,
     playlistLabel: String? = null,
     onNextStop: (() -> Unit)? = null,
+    onEnsureGps: () -> Unit = {},
+    onLocationPermissionResult: (Boolean) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     Dialog(
@@ -98,6 +104,8 @@ fun ArGuidanceDialog(
             headingDegrees = headingDegrees,
             playlistLabel = playlistLabel,
             onNextStop = onNextStop,
+            onEnsureGps = onEnsureGps,
+            onLocationPermissionResult = onLocationPermissionResult,
             onClose = onDismiss,
             modifier = Modifier
                 .fillMaxSize()
@@ -115,6 +123,8 @@ fun ArGuidanceScreen(
     headingDegrees: Float?,
     playlistLabel: String? = null,
     onNextStop: (() -> Unit)? = null,
+    onEnsureGps: () -> Unit = {},
+    onLocationPermissionResult: (Boolean) -> Unit = {},
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -133,8 +143,29 @@ fun ArGuidanceScreen(
         cameraGranted = granted
         if (!granted) forceFallback = true
     }
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        onLocationPermissionResult(granted)
+        if (granted) onEnsureGps()
+        if (!cameraGranted && !forceFallback) cameraLauncher.launch(Manifest.permission.CAMERA)
+    }
+    fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+    fun locationServicesOn(): Boolean {
+        val manager = context.getSystemService(LocationManager::class.java) ?: return false
+        return LocationManagerCompat.isLocationEnabled(manager)
+    }
     LaunchedEffect(Unit) {
-        if (!cameraGranted && !forceFallback) {
+        onEnsureGps()
+        if (!hasLocationPermission()) {
+            locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        } else if (!cameraGranted && !forceFallback) {
             cameraLauncher.launch(Manifest.permission.CAMERA)
         }
     }
@@ -303,6 +334,30 @@ fun ArGuidanceScreen(
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier.testTag("ar_distance_line"),
                     )
+                    if (solution == null) {
+                        Button(
+                            onClick = {
+                                if (!hasLocationPermission()) {
+                                    locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                                } else if (!locationServicesOn()) {
+                                    context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                                } else {
+                                    onEnsureGps()
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ar_enable_gps"),
+                        ) {
+                            Text(
+                                when {
+                                    !hasLocationPermission() -> "Allow location"
+                                    !locationServicesOn() -> "Turn on location"
+                                    else -> "Use phone GPS"
+                                },
+                            )
+                        }
+                    }
                     Text(
                         worldAnchor?.instruction ?: overlay.instruction,
                         style = MaterialTheme.typography.bodySmall,

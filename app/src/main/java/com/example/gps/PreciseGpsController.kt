@@ -69,12 +69,17 @@ class PreciseGpsController(context: Context, private val scope: CoroutineScope) 
         if (sourceJob?.isActive == true) return
         val settings = settingsStore.load()
         _state.value = _state.value.copy(externalReceiver = settings.useExternalReceiver, error = null)
-        sourceJob = if (settings.useExternalReceiver && settings.receiverAddress.isNotBlank()) {
-            startExternal(settings)
-        } else {
-            scope.launch {
-                launch { phone.status.collect { s -> _state.value = _state.value.copy(status = s) } }
-                phone.fixes().catch { e -> _state.value = _state.value.copy(error = e.message) }.collect(::onFix)
+        sourceJob = scope.launch {
+            // Phone GPS always runs. An external receiver is extra, not a replacement,
+            // so AR still gets a position when the receiver is off or not paired.
+            launch { phone.status.collect { s -> _state.value = _state.value.copy(status = s) } }
+            launch {
+                phone.fixes().catch { e ->
+                    _state.value = _state.value.copy(error = e.message ?: "Phone GPS stopped")
+                }.collect(::onFix)
+            }
+            if (settings.useExternalReceiver && settings.receiverAddress.isNotBlank()) {
+                launch(Dispatchers.IO) { runExternal(settings) }
             }
         }
     }
@@ -88,7 +93,7 @@ class PreciseGpsController(context: Context, private val scope: CoroutineScope) 
 
     fun restart() { stop(); start() }
 
-    private fun startExternal(settings: GpsSettings): Job = scope.launch(Dispatchers.IO) {
+    private suspend fun runExternal(settings: GpsSettings) {
         val preset = NtripPresets.byId(settings.presetId)
         val correctedFrame = if (preset.correctedFrameIsNad83) GeodeticFrame.NAD83_2011 else GeodeticFrame.ITRF
         if (settings.ntripEnabled && settings.ntripConfig().isComplete) startNtrip(settings)
@@ -108,7 +113,7 @@ class PreciseGpsController(context: Context, private val scope: CoroutineScope) 
                 )
             } catch (e: SecurityException) {
                 _state.value = _state.value.copy(error = "Bluetooth permission needed for the external receiver")
-                return@launch
+                return
             } catch (e: Exception) {
                 _state.value = _state.value.copy(receiverConnected = false, error = "Receiver: ${e.message}")
             }

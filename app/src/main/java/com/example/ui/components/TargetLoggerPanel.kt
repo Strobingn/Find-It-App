@@ -600,6 +600,7 @@ fun TargetLoggerPanel(
                         } else {
                             null
                         },
+                        onEnsureGps = onEnableGps,
                         onDismiss = { showArForFind = false },
                     )
                 } else {

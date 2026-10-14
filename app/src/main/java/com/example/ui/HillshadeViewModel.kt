@@ -469,6 +469,21 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** Turns phone GPS on for AR / navigation. Restarts a session that never produced a fix. */
+    fun ensureGpsTracking() {
+        if (!_gpsEnabled.value) {
+            _gpsEnabled.value = true
+            viewModelScope.launch { settingsRepo.saveBoolean(SettingsRepository.Keys.GPS_ENABLED, true) }
+        }
+        _hasLocationPermission.value = locationTracker.hasLocationPermission()
+        if (!_hasLocationPermission.value) return
+        if (locationJob?.isActive == true && _deviceLatitude.value != null) return
+        locationJob?.cancel()
+        locationJob = null
+        preciseGps.stop()
+        startLocationUpdates()
+    }
+
     /** Starts the compass only while the saved-target field-navigation card is open. */
     fun setCompassNavigationActive(active: Boolean) {
         if (active) {
