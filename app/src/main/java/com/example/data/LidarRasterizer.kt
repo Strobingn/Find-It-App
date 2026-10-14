@@ -75,10 +75,6 @@ internal class LidarRasterizer(
     private val longSide = this.options.rasterResolution
     val width: Int
     val height: Int
-    /** Focused refines bin a [pad]-cell margin of real neighbours so TIN/edges match; cropped in finish. */
-    private val pad: Int
-    private val gw: Int
-    private val gh: Int
     /** Precomputed cell scales: multiplies replace two divisions on every return (hot path). */
     private val xToGrid: Double
     private val yToGrid: Double
@@ -118,17 +114,14 @@ internal class LidarRasterizer(
         }
         xToGrid = (width - 1).toDouble() / rangeX
         yToGrid = (height - 1).toDouble() / rangeY
-        pad = if (focus != null) FOCUS_PAD_CELLS else 0
-        gw = width + 2 * pad
-        gh = height + 2 * pad
-        groundMin = FloatArray(gw * gh) { Float.MAX_VALUE }
-        groundCount = IntArray(gw * gh)
-        allMin = FloatArray(gw * gh) { Float.MAX_VALUE }
-        allSecondMin = FloatArray(gw * gh) { Float.MAX_VALUE }
-        allLowBandCount = IntArray(gw * gh)
-        allMax = FloatArray(gw * gh) { -Float.MAX_VALUE }
-        allCount = IntArray(gw * gh)
-        coverageCount = IntArray(gw * gh)
+        groundMin = FloatArray(width * height) { Float.MAX_VALUE }
+        groundCount = IntArray(width * height)
+        allMin = FloatArray(width * height) { Float.MAX_VALUE }
+        allSecondMin = FloatArray(width * height) { Float.MAX_VALUE }
+        allLowBandCount = IntArray(width * height)
+        allMax = FloatArray(width * height) { -Float.MAX_VALUE }
+        allCount = IntArray(width * height)
+        coverageCount = IntArray(width * height)
         this.lasVersionMajor = lasVersionMajor
         this.lasVersionMinor = lasVersionMinor
         this.pointFormat = pointFormat
@@ -159,22 +152,9 @@ internal class LidarRasterizer(
      * Adds a complete elevation sample. Every finite in-bounds return is binned; the grid itself
      * is the memory bound, so there is no sample stride.
      */
-    fun addPoint(
-        x: Double,
-        y: Double,
-        z: Float,
-        classification: Int,
-        isKeyPoint: Boolean = false,
-        withheld: Boolean = false,
-    ): Boolean {
+    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
         advance()
         if (!z.isFinite()) return true
-        // Withheld returns and ASPRS noise (7 low, 18 high) are never terrain or surface: they
-        // made isolated pits/spikes and straight streaks where a noisy scan line crossed a cell.
-        if (withheld || classification == 7 || classification == 18) {
-            if (tracksSourceClasses) classHistogram[classification.coerceIn(0, 255)]++
-            return true
-        }
         val normalizedClass = classification.coerceIn(0, 255)
         // Explicit class filter: skip elevation/coverage for non-matching returns entirely.
         if (allowedClasses != null && normalizedClass !in allowedClasses) {
@@ -238,23 +218,12 @@ internal class LidarRasterizer(
 
     private fun cellIndex(x: Double, y: Double): Int? {
         if (!x.isFinite() || !y.isFinite()) return null
-        if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) {
-            if (pad == 0) return null
-            // Margin return: bin into the pad ring (never into an inner cell, so the inner
-            // binning stays exactly what an unpadded crop produced).
-            val fx = kotlin.math.floor((x - cropMinX) * xToGrid).toInt()
-            val fy = kotlin.math.floor((cropMaxY - y) * yToGrid).toInt()
-            var gx = if (x < cropMinX) min(fx, -1) else if (x > cropMaxX) max(fx, width) else fx.coerceIn(0, width - 1)
-            var gy = if (y > cropMaxY) min(fy, -1) else if (y < cropMinY) max(fy, height) else fy.coerceIn(0, height - 1)
-            gx += pad; gy += pad
-            if (gx !in 0 until gw || gy !in 0 until gh) return null
-            return gy * gw + gx
-        }
+        if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return null
         // Multiplication by precomputed scales matches the prior division mapping and is
         // substantially cheaper on every return of large LAZ tiles.
-        val gx = ((x - cropMinX) * xToGrid).toInt().coerceIn(0, width - 1) + pad
-        val gy = ((cropMaxY - y) * yToGrid).toInt().coerceIn(0, height - 1) + pad
-        return gy * gw + gx
+        val gx = ((x - cropMinX) * xToGrid).toInt().coerceIn(0, width - 1)
+        val gy = ((cropMaxY - y) * yToGrid).toInt().coerceIn(0, height - 1)
+        return gy * width + gx
     }
 
     fun finish(pointFormat: Int, sourceLabel: String): DemGenerator.LasLoadResult? {
@@ -290,8 +259,8 @@ internal class LidarRasterizer(
             else -> allCount
         }
 
-        val measuredMask = BooleanArray(gw * gh) { sourceCounts[it] > 0 }
-        val surface = FloatArray(gw * gh)
+        val measuredMask = BooleanArray(width * height) { sourceCounts[it] > 0 }
+        val surface = FloatArray(width * height)
         for (index in surface.indices) {
             surface[index] = if (measuredMask[index]) source[index] else Float.NaN
         }
@@ -308,8 +277,8 @@ internal class LidarRasterizer(
         val filled = interpolateBareEarth(
             measuredElevations = surface,
             measuredMask = measuredMask,
-            width = gw,
-            height = gh,
+            width = width,
+            height = height,
             cellSizeMeters = cellSize,
             totalPoints = pointsDecoded,
             groundPoints = groundSamples,
@@ -319,10 +288,10 @@ internal class LidarRasterizer(
         val cleaned = if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
             filled.elevations
         } else {
-            suppressIsolatedLowNoise(filled.elevations, gw, gh)
+            suppressIsolatedLowNoise(filled.elevations, width, height)
         }
         val bareEarth = if (options.smoothingRadius > 0) {
-            multiScaleSmooth(cleaned, gw, gh, options.smoothingRadius)
+            multiScaleSmooth(cleaned, width, height, options.smoothingRadius)
         } else {
             cleaned
         }
@@ -355,7 +324,7 @@ internal class LidarRasterizer(
             }
         }
 
-        val totalCells = gw * gh
+        val totalCells = width * height
         val validData = filled.validData
         val interpolatedData = filled.interpolatedData
         val groundSamplesPerCell = if (populatedCells > 0) {
@@ -437,11 +406,11 @@ internal class LidarRasterizer(
             grid = ElevationGrid(
                 width = width,
                 height = height,
-                bareEarth = cropPad(bareEarth),
-                canopySpikes = cropPad(canopy),
+                bareEarth = bareEarth,
+                canopySpikes = canopy,
                 cellSizeMeters = cellSize,
-                validData = cropPad(validData),
-                interpolatedData = cropPad(interpolatedData),
+                validData = validData,
+                interpolatedData = interpolatedData,
             ),
             totalPointsRead = pointsDecoded.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             groundPointsUsed = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
@@ -460,24 +429,6 @@ internal class LidarRasterizer(
         )
     }
 
-    private fun cropPad(a: FloatArray): FloatArray {
-        if (pad == 0) return a
-        val out = FloatArray(width * height)
-        for (y in 0 until height) System.arraycopy(a, (y + pad) * gw + pad, out, y * width, width)
-        return out
-    }
-
-    private fun cropPad(a: BooleanArray): BooleanArray {
-        if (pad == 0) return a
-        val out = BooleanArray(width * height)
-        for (y in 0 until height) System.arraycopy(a, (y + pad) * gw + pad, out, y * width, width)
-        return out
-    }
-
-    /** Readers can widen their source rectangle by this much so the pad ring gets real returns. */
-    fun padSourceUnitsX(): Double = if (pad == 0) 0.0 else (pad + 1) / xToGrid
-    fun padSourceUnitsY(): Double = if (pad == 0) 0.0 else (pad + 1) / yToGrid
-
     /**
      * Robust automatic ground: reject a cell's lowest return when it is isolated (no
      * corroborating returns within a narrow band) and sits far below the next-lowest
@@ -486,7 +437,7 @@ internal class LidarRasterizer(
      */
     private fun automaticGroundSource(): Pair<FloatArray, Int> {
         var rejected = 0
-        val values = FloatArray(gw * gh) { index ->
+        val values = FloatArray(width * height) { index ->
             val second = allSecondMin[index]
             val isolatedLow = allCount[index] >= MIN_SAMPLES_FOR_SPIKE_REJECT &&
                 allLowBandCount[index] == 1 &&
@@ -509,21 +460,21 @@ internal class LidarRasterizer(
         cellSize: Float,
         samples: Int,
     ): FloatArray {
-        val mask = BooleanArray(gw * gh) { counts[it] > 0 }
-        val surface = FloatArray(gw * gh) { if (mask[it]) source[it] else Float.NaN }
+        val mask = BooleanArray(width * height) { counts[it] > 0 }
+        val surface = FloatArray(width * height) { if (mask[it]) source[it] else Float.NaN }
         val filled = interpolateBareEarth(
             measuredElevations = surface,
             measuredMask = mask,
-            width = gw,
-            height = gh,
+            width = width,
+            height = height,
             cellSizeMeters = cellSize,
             totalPoints = pointsDecoded,
             groundPoints = samples,
             sourceCounts = counts,
         )
-        val cleaned = suppressIsolatedLowNoise(filled.elevations, gw, gh)
+        val cleaned = suppressIsolatedLowNoise(filled.elevations, width, height)
         val ground = if (options.smoothingRadius > 0) {
-            multiScaleSmooth(cleaned, gw, gh, options.smoothingRadius)
+            multiScaleSmooth(cleaned, width, height, options.smoothingRadius)
         } else {
             cleaned
         }
@@ -545,7 +496,7 @@ internal class LidarRasterizer(
         pointsBinned += other.pointsBinned
         groundPointsBinned += other.groundPointsBinned
         truncatedByReader = truncatedByReader || other.truncatedByReader
-        for (index in 0 until gw * gh) {
+        for (index in 0 until width * height) {
             if (other.coverageCount[index] > 0) coverageCount[index] += other.coverageCount[index]
             if (other.allCount[index] > 0) {
                 val previousMin = allMin[index]
@@ -572,8 +523,6 @@ internal class LidarRasterizer(
 
     companion object {
         private const val MIN_SHORT_SIDE = 48
-        /** Margin binned around a focused refine (≥2 per the seam spec; 6 gives the TIN real rims). */
-        const val FOCUS_PAD_CELLS = 6
         private const val MIN_CLASSIFIED_POINTS = 100
         private const val MIN_CLASSIFIED_CELLS = 12
         /** Retained so existing constructor call sites keep compiling. Unused for thinning. */

@@ -103,7 +103,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -128,12 +127,8 @@ internal fun chooseAiRefineResolution(
 /** Hillshade shows bare earth by default; the slider can still blend canopy back in. */
 /** How long a finished precise fix stays the device position while the user stays on it. */
 internal const val PRECISE_FIX_HOLD_MS = 120_000L
-private const val FEATHER_CELLS = 6
 
 internal const val DEFAULT_VEGETATION_FILTER = 1f
-
-/** A refined crop is displayed in place of the viewport, so the canvas must reset to zoom 1. */
-internal const val REFINE_RESETS_VIEWPORT = true
 
 internal fun isEffectivelyWholeTerrain(bounds: NormalizedRasterBounds): Boolean {
     val sanitized = bounds.sanitized()
@@ -262,8 +257,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val viewportPanX: StateFlow<Float> = _viewportPanX.asStateFlow()
     private val _viewportPanY = MutableStateFlow(0f)
     val viewportPanY: StateFlow<Float> = _viewportPanY.asStateFlow()
-    /** Last canvas-reported visible crop of the displayed bitmap (full when zoomed out). */
-    private val _visibleViewportBounds = MutableStateFlow(NormalizedRasterBounds.Full)
     // Bumped exactly once, right after loadSettings() finishes reading the persisted viewport,
     // so the terrain canvas can seed itself from the restored zoom/pan a single time rather than
     // fighting with live user interaction on every subsequent update.
@@ -383,8 +376,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val MAX_MARKER_GPS_AGE_MILLIS = 60_000L
 
     init {
-        com.example.data.LazChunkIndex.fallbackDir =
-            File(application.cacheDir, "laz-chunk-index").apply { mkdirs() }
         observeSurveyLayers(_activeTerrainKey.value)
         observeOfflineBasemapRegions(_activeTerrainKey.value)
         observeBreadcrumbTracks(_activeTerrainKey.value)
@@ -1107,8 +1098,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refineTerrain(viewport: NormalizedRasterBounds, rasterResolution: Int = 1_024) {
         val source = terrainSource ?: return
-        refineJob?.cancel()
-        val generation = refineGeneration.incrementAndGet()
+        if (_isRefiningTerrain.value) return
         val requestedViewport = viewport.sanitized()
         if (currentSourceBounds == NormalizedRasterBounds.Full && isEffectivelyWholeTerrain(requestedViewport)) {
             // The overview is already a raster of the entire original point cloud. Reopening a
@@ -1140,9 +1130,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         )
         _terrainDetailMessage.value =
             "Opening ${options.rasterResolution} px source detail for this viewport…"
-        refineJob = viewModelScope.launch(Dispatchers.IO) {
-            if (generation != refineGeneration.get()) return@launch
-            
+        viewModelScope.launch(Dispatchers.IO) {
             var decodedNow = false
             var loadedFromCache = false
             val result = runCatching {
@@ -1231,7 +1219,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }.getOrNull()
             withContext(Dispatchers.Main.immediate) {
-                if (generation != refineGeneration.get()) return@withContext
                 if (result == null) {
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
@@ -1251,16 +1238,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         "${options.rasterResolution} px detailed viewport loaded from the original point cloud."
                     }
-                    val feathered = matchOverviewEdge(result, absoluteBounds)
-                    android.util.Log.i(
-                        "Refine",
-                        "bounds=$absoluteBounds cell ${_elevationGrid.value.cellSizeMeters} -> " +
-                            "${feathered.grid.cellSizeMeters} grid ${feathered.grid.width}x${feathered.grid.height} " +
-                            "cache=$loadedFromCache",
-                    )
-                    // The refined bitmap IS the previously visible crop; keeping the old zoom/pan
-                    // would magnify a sub-area of it (and re-trigger nested auto-refine).
-                    applyCustomTerrain(feathered, resetViewport = REFINE_RESETS_VIEWPORT)
+                    applyCustomTerrain(result, resetViewport = false)
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
                         message = "Refinement complete",
@@ -1276,63 +1254,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    /**
-     * Feather the refined patch into the overview over [FEATHER_CELLS] rim cells and blend the
-     * rim elevations toward the overview's bilinear sample so the height (and hillshade) does
-     * not jump at the patch edge. Interior cells are left untouched.
-     */
-    private fun matchOverviewEdge(
-        refined: DemGenerator.TerrainLoadResult,
-        absoluteBounds: NormalizedRasterBounds,
-        featherCells: Int = FEATHER_CELLS,
-    ): DemGenerator.TerrainLoadResult {
-        val overview = overviewTerrain?.grid ?: return refined
-        val g = refined.grid
-        if (featherCells <= 0 || g.width < featherCells * 2 || g.height < featherCells * 2) return refined
-        val bare = g.bareEarth.copyOf()
-        val canopy = g.canopySpikes.copyOf()
-        val valid = g.validData.copyOf()
-        val rangeX = (absoluteBounds.right - absoluteBounds.left).coerceAtLeast(1e-9)
-        val rangeY = (absoluteBounds.bottom - absoluteBounds.top).coerceAtLeast(1e-9)
-        for (y in 0 until g.height) {
-            for (x in 0 until g.width) {
-                val edge = minOf(x, y, g.width - 1 - x, g.height - 1 - y)
-                if (edge >= featherCells) continue
-                val index = y * g.width + x
-                if (!valid[index]) continue
-                val u = absoluteBounds.left + (x + 0.5) / g.width * rangeX
-                val v = absoluteBounds.top + (y + 0.5) / g.height * rangeY
-                val ox = (u * (overview.width - 1)).toFloat()
-                val oy = (v * (overview.height - 1)).toFloat()
-                val oBare = sampleBilinear(overview.bareEarth, overview.width, overview.height, ox, oy) ?: continue
-                val oCanopy = sampleBilinear(overview.canopySpikes, overview.width, overview.height, ox, oy) ?: 0f
-                val t = (edge + 1).toFloat() / (featherCells + 1).toFloat()
-                bare[index] = oBare * (1f - t) + bare[index] * t
-                canopy[index] = oCanopy * (1f - t) + canopy[index] * t
-            }
-        }
-        return refined.copy(
-            grid = ElevationGrid(g.width, g.height, bare, canopy, g.cellSizeMeters, valid, g.interpolatedData),
-        )
-    }
-
-    private fun sampleBilinear(src: FloatArray, w: Int, h: Int, x: Float, y: Float): Float? {
-        if (w < 2 || h < 2) return null
-        val x0 = x.toInt().coerceIn(0, w - 2)
-        val y0 = y.toInt().coerceIn(0, h - 2)
-        val fx = (x - x0).coerceIn(0f, 1f)
-        val fy = (y - y0).coerceIn(0f, 1f)
-        val i00 = y0 * w + x0
-        val z00 = src[i00]; val z10 = src[i00 + 1]; val z01 = src[i00 + w]; val z11 = src[i00 + w + 1]
-        if (!z00.isFinite() || !z10.isFinite() || !z01.isFinite() || !z11.isFinite()) return null
-        val z0 = z00 * (1 - fx) + z10 * fx
-        val z1 = z01 * (1 - fx) + z11 * fx
-        return z0 * (1 - fy) + z1 * fy
-    }
-
     fun showWholeTerrain() {
-        refineJob?.cancel()
-        refineGeneration.incrementAndGet()
         val overview = overviewTerrain ?: return
         currentSourceBounds = NormalizedRasterBounds.Full
         _isDetailedTerrain.value = false
@@ -1668,8 +1590,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     // Update viewport zoom and pan. Persists (debounced). Hillshade only re-runs when the
-    // zoom-aware preview LOD side changes — pan never invalidates the bitmap. Zoom/pan never
-    // start a refine: refine runs only from the explicit "Refine view" button.
+    // zoom-aware preview LOD side changes — pan never invalidates the bitmap.
     fun updateViewport(zoom: Float, panX: Float, panY: Float) {
         val grid = _elevationGrid.value
         val previousSide = previewMaxSideForZoom(_viewportZoom.value, maxOf(grid.width, grid.height))
@@ -1681,14 +1602,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (nextSide != previousSide) {
             scheduleRender(immediate = false)
         }
-    }
-
-    private var refineJob: kotlinx.coroutines.Job? = null
-    private val refineGeneration = java.util.concurrent.atomic.AtomicInteger(0)
-
-    /** Publish the canvas-visible crop (called from the terrain composable on pan/zoom settle). */
-    fun publishVisibleBounds(bounds: NormalizedRasterBounds) {
-        _visibleViewportBounds.value = bounds.sanitized()
     }
 
     private fun updateCoordinates() {
