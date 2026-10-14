@@ -85,7 +85,9 @@ jobs:
           command -v cargo-ndk >/dev/null || cargo install cargo-ndk --version 4.1.2 --locked
           sdkmanager 'ndk;28.2.13676358'
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
-          cargo ndk -p 24 -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release --locked
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
+          cargo ndk --platform 24 -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release --locked
           test -s ../../app/src/main/jniLibs/arm64-v8a/liblazrs_jni.so
 
       - name: Preserve native libraries for main release

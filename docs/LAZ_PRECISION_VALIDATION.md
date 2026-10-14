@@ -64,10 +64,25 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
   Existing vendor `.lax` remains a compatibility fallback, without a blocking LAX build.
 - One-worker devices still seek to selected chunks. Worker count also respects chunk
   buffer size and device headroom.
-- Optional native whole-cloud packed allocation is limited to 64 MiB or half the
-  reserved headroom, whichever is smaller. Larger files use the streaming Java
-  path. Packed buffer arithmetic is checked for integer overflow. Native cancellation
-  callbacks are serialized so concurrent callers cannot overwrite one another.
+- Native ABI 2 uses bounded seekable sessions: integer XYZ and classification flags
+  stream through a direct buffer in batches up to 200,000 records and 16 MiB of
+  scratch data. Adjacent selected chunks share a batch; cancellation is checked
+  between batches. The Actions build packages arm64-v8a, armeabi-v7a and x86_64.
+- Refinement reuses canonical 512-node elevation tiles on an anchored source lattice,
+  with 256-node interpolation context. Memory and disk budgets are 24/256 MiB.
+  A bounded Java decoded-chunk cache reuses overlapping compressed ranges.
+  Tile context makes revisiting the same lattice stable. Harmonic interpolation
+  remains an estimate and may differ from a full-footprint solve near large gaps.
+- Android 13+ hardware Canvas shades supported 2D views from a cached raw height
+  bitmap. Lighting and contrast update shader uniforms; CPU snapshots are deferred
+  until controls settle. Older Android and unsupported overlays retain CPU rendering.
+  Display heights use relative 24-bit encoding; authoritative float elevations remain
+  unchanged. Positive/negative openness use eight physical-direction profiles.
+- The active GLES 3 renderer uses an R32F height texture and one reusable 65x65
+  topology, with conservative frustum culling and a shared power-of-two mesh spacing.
+  This avoids per-cell CPU mesh construction; it is not adaptive CDLOD geomorphing.
+- Local COPC refinement traverses hierarchy metadata and seeks intersecting node
+  ranges using the LAS header footprint. Ordinary LAZ is not converted to COPC.
 
 ## Reproducible checks
 
@@ -118,9 +133,10 @@ or horizontal datum transformation is introduced by converting linear units.
 
 Missing linear-unit metadata retains the prior metre assumption; unknown vertical
 units cannot be determined from horizontal units alone. Unsupported CRS projections
-still cannot be placed accurately on a geographic map. The optional native ABI
-uses origin-relative float coordinates and is not proven bit-identical to the
-Java double-XY path. Native-library packaging is unchanged.
+still cannot be placed accurately on a geographic map. Native ABI 2 preserves raw integer XYZ; the common Java binner applies the same
+scale, offset and unit algebra. Regression fixtures require identical Java/native
+DEM values, coverage and interpolation provenance. GPU pixels have a separate
+small rounding tolerance and are checked on the Android emulator.
 
 No phone timing or device-specific peak-memory improvement is asserted from unit
 checks. On a target Android device, compare full import, reopen and focused refine
@@ -129,3 +145,12 @@ on the same file/options using the existing decoder benchmark and
 non-metre metadata, and a deep focused crop; record device, source point count,
 resolution, decode/grid/render durations and memory. Unit goldens establish the
 covered invariants, not the accuracy of every vendor dataset.
+
+## Android pipeline validation
+
+`TerrainPipelineRegressionTest` checks Java/native parity, tile reuse across memory
+and disk reopen, cancelled/corrupt source handling, display encoding bounds, shared
+heightfield preparation, and physical-direction openness on planes and pits.
+`TerrainGpuInstrumentedTest` validates packaged native decode, AGSL/CPU pixel parity
+and R32F GLES shader compilation/drawing on API 35. Actions gates the branch APK on
+these checks. Emulator checks do not establish real-phone frame times or peak memory.
