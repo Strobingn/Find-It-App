@@ -103,11 +103,28 @@ internal object LazTerrainReader {
 
     /** Source footprint (x, y extent in source units) from the LAS header, or null. */
     private fun headerExtent(file: File): Pair<Double, Double>? =
+        sourceBounds(file)?.let { bounds ->
+            val x = bounds.maxX - bounds.minX
+            val y = bounds.maxY - bounds.minY
+            if (x > 0.0 && y > 0.0 && x.isFinite() && y.isFinite()) x to y else null
+        }
+
+    /** Header bounds used by both decoders so a benchmark is not a different map. */
+    internal fun sourceBounds(file: File): SourceBounds? =
         SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
             val h = reader.header
-            val x = h.max_x - h.min_x
-            val y = h.max_y - h.min_y
-            if (x > 0.0 && y > 0.0 && x.isFinite() && y.isFinite()) x to y else null
+            val pointCount = h.extended_number_of_point_records.takeIf { it > 0L }
+                ?: (h.number_of_point_records.toLong() and 0xFFFFFFFFL)
+            SourceBounds(
+                minX = h.min_x,
+                maxX = h.max_x,
+                minY = h.min_y,
+                maxY = h.max_y,
+                pointCount = pointCount,
+                versionMajor = h.version_major.toInt() and 0xFF,
+                versionMinor = h.version_minor.toInt() and 0xFF,
+                pointFormat = h.point_data_format.toInt() and 0x3F,
+            )
         }
 
     private fun groundDensityKey(file: File, options: LidarImportOptions): String =
@@ -926,6 +943,17 @@ internal object LazTerrainReader {
     )
 }
 
+/** LAS/LAZ header rectangle. Both decoders must bin into this, not a stand-in extent. */
+internal data class SourceBounds(
+    val minX: Double,
+    val maxX: Double,
+    val minY: Double,
+    val maxY: Double,
+    val pointCount: Long,
+    val versionMajor: Int,
+    val versionMinor: Int,
+    val pointFormat: Int,
+)
 
 /**
  * Largest refine resolution whose cell is at least [cellToSpacing]× the point spacing of

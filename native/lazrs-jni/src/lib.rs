@@ -106,12 +106,19 @@ fn decode_laz_parallel(
     let origin_z = bounds.min.z;
     write_origins(env, origins, origin_x, origin_y, origin_z);
 
+    // decompress_many only uses extra threads when the buffer holds MORE points
+    // than one laszip chunk. A 50_000-point batch on a 50_000-point chunk is serial.
+    let points_per_chunk = usize::try_from(laz_vlr.chunk_size()).unwrap_or(CHUNK_POINTS).max(1);
+    let batch_points = points_per_chunk
+        .saturating_mul(4)
+        .clamp(points_per_chunk.saturating_add(1), 400_000);
+
     let mut source = File::open(path).map_err(|_| ())?;
     source
         .seek(SeekFrom::Start(u64::from(raw.offset_to_point_data)))
         .map_err(|_| ())?;
     let mut decompressor = ParLasZipDecompressor::new(source, laz_vlr).map_err(|_| ())?;
-    let chunk_bytes = CHUNK_POINTS.saturating_mul(record_len);
+    let chunk_bytes = batch_points.saturating_mul(record_len);
     let mut scratch = vec![0u8; chunk_bytes];
     let mut remaining = point_count;
     let mut written = 0usize;
@@ -119,7 +126,7 @@ fn decode_laz_parallel(
         if is_cancelled(env) {
             break;
         }
-        let n = remaining.min(CHUNK_POINTS);
+        let n = remaining.min(batch_points);
         let bytes = n * record_len;
         decompressor
             .decompress_many(&mut scratch[..bytes])

@@ -17,6 +17,10 @@ data class DecoderBenchmarkResult(
     val meshMs: Double,
     val hillshadeMs: Double?,
     val cdlodMs: Double,
+    val decodeParallelMs: Double? = null,
+    val gridMs: Double? = null,
+    val nativeDecodeMs: Double? = null,
+    val nativeBinMs: Double? = null,
     val memory: TerrainMemorySnapshot,
     val winner: String,
 ) {
@@ -24,8 +28,18 @@ data class DecoderBenchmarkResult(
         appendLine("Decoder benchmark · $fileName")
         appendLine(String.format(Locale.US, "  points              %d", points))
         appendLine(String.format(Locale.US, "  laszip4j            %.2f ms", laszip4jMs))
+        if (decodeParallelMs != null) {
+            appendLine(String.format(Locale.US, "  laszip4j decompress %.2f ms", decodeParallelMs))
+        }
+        if (gridMs != null) {
+            appendLine(String.format(Locale.US, "  laszip4j grid       %.2f ms", gridMs))
+        }
         if (nativeAvailable && nativeMs != null) {
             appendLine(String.format(Locale.US, "  laz-rs native       %.2f ms", nativeMs))
+            if (nativeDecodeMs != null && nativeBinMs != null) {
+                appendLine(String.format(Locale.US, "  laz-rs decompress   %.2f ms", nativeDecodeMs))
+                appendLine(String.format(Locale.US, "  laz-rs bin/grid     %.2f ms", nativeBinMs))
+            }
             appendLine("  winner              $winner")
         } else {
             appendLine("  laz-rs native       not loaded (laszip4j stays default)")
@@ -74,41 +88,59 @@ object TerrainDecoderBenchmark {
             LazDecoderSettings.preferred = previousPreferred
         }
         requireNotNull(javaResult) { "laszip4j produced no terrain for ${file.name}" }
+        val afterJava = TerrainStageProfiler.snapshot()
+        val decodeParallelMs = afterJava.firstOrNull { it.name == "decode_parallel" }?.millis
+        val gridMs = afterJava.firstOrNull { it.name == "grid" }?.millis
 
         var nativeMs: Double? = null
+        var nativeDecodeMs: Double? = null
+        var nativeBinMs: Double? = null
         val nativeAvailable = LazRsNativeDecoder.isAvailable
         if (nativeAvailable) {
-            val headerPoints = javaResult.totalPointsRead.coerceAtLeast(1)
-            nativeMs = runCatching {
-            TerrainStageProfiler.stage("decode_lazrs", file.name) {
-                val packed = PackedPointRasterizer.allocate(headerPoints)
-                val origins = DoubleArray(3)
-                val nanos = measureNanoTime {
-                    val decoded = LazRsNativeDecoder.decodePacked(file, packed, origins)
-                    require(decoded > 0) { "laz-rs decode failed (count=$decoded)" }
-                    val rasterizer = LidarRasterizer(
-                        minX = -1.0e9,
-                        maxX = 1.0e9,
-                        minY = -1.0e9,
-                        maxY = 1.0e9,
-                        options = sanitized,
-                        declaredPointCount = decoded.toLong(),
-                    )
-                    PackedPointRasterizer.addAll(
-                        rasterizer,
-                        packed,
-                        decoded,
-                        originX = origins[0],
-                        originY = origins[1],
-                        originZ = origins[2],
-                    )
-                    requireNotNull(rasterizer.finish(0, "laz-rs benchmark"))
-                }
-                nanos / 1_000_000.0
-            }
-            }.getOrElse { error ->
-                TerrainStageProfiler.emit("laz-rs benchmark failed: ${error.message}")
+            val bounds = LazTerrainReader.sourceBounds(file)
+            nativeMs = if (bounds == null || bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY) {
+                TerrainStageProfiler.emit("laz-rs benchmark skipped: no header bounds")
                 null
+            } else {
+                runCatching {
+                    TerrainStageProfiler.stage("decode_lazrs", file.name) {
+                        val packed = PackedPointRasterizer.allocate(bounds.pointCount.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                        val origins = DoubleArray(3)
+                        var decoded = 0
+                        val decodeNanos = measureNanoTime {
+                            decoded = LazRsNativeDecoder.decodePacked(file, packed, origins)
+                        }
+                        require(decoded > 0) { "laz-rs decode failed (count=$decoded)" }
+                        nativeDecodeMs = decodeNanos / 1_000_000.0
+                        val rasterizer = LidarRasterizer(
+                            minX = bounds.minX,
+                            maxX = bounds.maxX,
+                            minY = bounds.minY,
+                            maxY = bounds.maxY,
+                            options = sanitized,
+                            declaredPointCount = bounds.pointCount.coerceAtLeast(decoded.toLong()),
+                            lasVersionMajor = bounds.versionMajor,
+                            lasVersionMinor = bounds.versionMinor,
+                            pointFormat = bounds.pointFormat,
+                        )
+                        val binNanos = measureNanoTime {
+                            PackedPointRasterizer.addAll(
+                                rasterizer,
+                                packed,
+                                decoded,
+                                originX = origins[0],
+                                originY = origins[1],
+                                originZ = origins[2],
+                            )
+                            requireNotNull(rasterizer.finish(bounds.pointFormat, "laz-rs benchmark"))
+                        }
+                        nativeBinMs = binNanos / 1_000_000.0
+                        (decodeNanos + binNanos) / 1_000_000.0
+                    }
+                }.getOrElse { error ->
+                    TerrainStageProfiler.emit("laz-rs benchmark failed: ${error.message}")
+                    null
+                }
             }
         }
 
@@ -174,6 +206,10 @@ object TerrainDecoderBenchmark {
             meshMs = TerrainStageProfiler.snapshot().firstOrNull { it.name == "mesh_build" }?.millis ?: 0.0,
             hillshadeMs = hillshadeMs,
             cdlodMs = cdlodTimed,
+            decodeParallelMs = decodeParallelMs,
+            gridMs = gridMs,
+            nativeDecodeMs = nativeDecodeMs,
+            nativeBinMs = nativeBinMs,
             memory = TerrainMemoryMonitor.snapshot(),
             winner = winner,
         ).also { TerrainStageProfiler.emit(it.format()) }

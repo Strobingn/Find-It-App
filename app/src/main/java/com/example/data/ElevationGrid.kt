@@ -60,6 +60,10 @@ class ElevationGrid(
     private var cachedLocal: LocalStatistics? = null
     private var cachedFootprint: FloatArray? = null
     private var cachedFootprintScale = 1f
+    private var cachedGradientKey: GradientKey? = null
+    private var cachedGradientX: FloatArray? = null
+    private var cachedGradientY: FloatArray? = null
+    private var cachedMicro: FloatArray? = null
     private var cachedResidualScale = 1f
     private var cachedRoughnessScale = 1f
     private var cachedCurvature: FloatArray? = null
@@ -119,6 +123,10 @@ class ElevationGrid(
             cachedElevations = null
             cachedLocal = null
             cachedFootprint = null
+            cachedGradientKey = null
+            cachedGradientX = null
+            cachedGradientY = null
+            cachedMicro = null
             cachedCurvature = null
         }
         val elevations = cachedElevations ?: run {
@@ -209,6 +217,25 @@ class ElevationGrid(
         val gradientDivisor = 8f * cellDistance
         val lastX = width - 1
         val lastY = height - 1
+        val gradientKey = GradientKey(vegetationFilter, featureScaleMeters, zMultiplier, boundedMode)
+        val reuseGradients = needsGradient &&
+            cachedGradientKey == gradientKey &&
+            cachedGradientX != null &&
+            cachedGradientY != null
+        val gradientXOut = if (!needsGradient) {
+            null
+        } else if (reuseGradients) {
+            cachedGradientX
+        } else {
+            FloatArray(width * height).also {
+                cachedGradientX = it
+                cachedGradientY = FloatArray(width * height)
+                cachedMicro = FloatArray(width * height)
+                cachedGradientKey = gradientKey
+            }
+        }
+        val gradientYOut = cachedGradientY
+        val microOut = cachedMicro
 
         fun renderRow(y: Int) {
             val interiorRow = y > 0 && y < lastY
@@ -225,7 +252,11 @@ class ElevationGrid(
                 // 3×3 residual catches a one-cell wall. The feature-scale residual catches a
                 // cellar or foundation whose middle is flat. Neither one changes the DEM.
                 var microRelief = 0f
-                if (needsGradient) {
+                if (reuseGradients) {
+                    gradientX = gradientXOut!![index]
+                    gradientY = gradientYOut!![index]
+                    microRelief = microOut?.get(index) ?: 0f
+                } else if (needsGradient) {
                     // Horn 3×3: a missing neighbour takes the centre value, never 0.
                     val z00: Float
                     val z01: Float
@@ -268,6 +299,9 @@ class ElevationGrid(
                         val around = (z00 + z01 + z02 + z10 + z12 + z20 + z21 + z22) * 0.125f
                         microRelief = ((centerZ - around) / cellDistance * 0.45f).coerceIn(-0.16f, 0.16f)
                     }
+                    gradientXOut?.set(index, gradientX)
+                    gradientYOut?.set(index, gradientY)
+                    microOut?.set(index, microRelief)
                 }
                 val slopeRadians = if (needsSlope) {
                     atan(sqrt(gradientX * gradientX + gradientY * gradientY))
@@ -748,6 +782,13 @@ class ElevationGrid(
         integral[(y1 + 1) * stride + x0] + integral[y0 * stride + x0]
 
     private fun normalizeDegrees(value: Float): Float = ((value % 360f) + 360f) % 360f
+
+    private data class GradientKey(
+        val vegetation: Float,
+        val featureScale: Float,
+        val zScale: Float,
+        val mode: Int,
+    )
 
     private class LightVector(val lx: Float, val ly: Float, val lz: Float)
     private data class LocalStatistics(val residual: FloatArray, val roughness: FloatArray)

@@ -262,6 +262,10 @@ class LazTerrainCache(
         return Lookup(null, Hit.MISS)
     }
 
+    /** In-session pan inside a decoded tile. Disk entries stay exact-key only. */
+    fun cropCovering(file: File, options: LidarImportOptions): DemGenerator.TerrainLoadResult? =
+        memory.findCovering(file, options)
+
     /** Immediate memory put only — never blocks on disk I/O. */
     fun putMemory(file: File, options: LidarImportOptions, result: DemGenerator.TerrainLoadResult) {
         memory.put(file, options, result)

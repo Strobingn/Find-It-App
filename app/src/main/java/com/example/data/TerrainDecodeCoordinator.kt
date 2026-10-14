@@ -80,6 +80,21 @@ class TerrainDecodeCoordinator(
                     return@withLock outcome
                 }
 
+                val covered = withContext(Dispatchers.IO) { cache.cropCovering(file, sanitized) }
+                if (covered != null) {
+                    onStage("Opening the overlapping decoded tile…")
+                    val scene = TerrainStageProfiler.stageSuspend("mesh", "tile-crop") {
+                        buildGpuScene(covered.grid)
+                    }
+                    val outcome = TerrainDecodeOutcome(
+                        LasGeoreferencing.attach(covered, file, sanitized),
+                        LazTerrainCache.Hit.MEMORY,
+                        scene,
+                    )
+                    onPreview?.invoke(outcome)
+                    return@withLock outcome
+                }
+
                 // First paint is the exact, TIN-filled decode. The sparse chunk preview bins only a
                 // subset of LAZ chunks, and each chunk is one flight-line segment, so it painted as
                 // diagonal "brick" strips with black gaps (and could stay on screen if a caller

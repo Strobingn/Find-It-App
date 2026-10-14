@@ -25,7 +25,8 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs bu
 ## Decode path
 
 1. If the file is LAZ and has a laszip VLR + chunk table, `ParLasZipDecompressor`
-   inflates every chunk in parallel into raw LAS records, then packs xyz/class.
+   inflates several chunks at once (more points than one chunk, which is what
+   `decompress_many` requires before it will use extra threads) and packs xyz/class.
 2. Otherwise (uncompressed LAS, or no chunk table) `las::Reader` walks every return.
 
 The owner compares both backends on-device (Tools → Benchmark a LAS/LAZ file)
