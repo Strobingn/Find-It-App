@@ -171,7 +171,8 @@ fn decode_with_las_reader(
         dest[4..8].copy_from_slice(&((point.y - origin_y) as f32).to_le_bytes());
         dest[8..12].copy_from_slice(&((point.z - origin_z) as f32).to_le_bytes());
         dest[12] = u8::from(point.classification);
-        dest[13] = if point.is_key_point { 1 } else { 0 };
+        dest[13] = (if point.is_key_point { 1 } else { 0 })
+            | (if point.is_withheld { 2 } else { 0 });
         dest[14] = 0;
         dest[15] = 0;
         written += 1;
@@ -219,7 +220,8 @@ fn pack_raw_records(
         dest[4..8].copy_from_slice(&((y - origin_y) as f32).to_le_bytes());
         dest[8..12].copy_from_slice(&((z - origin_z) as f32).to_le_bytes());
         dest[12] = class;
-        dest[13] = if key { 1 } else { 0 };
+        let withheld = if point_format >= 6 { rec[15] & 0x04 != 0 } else { rec[15] & 0x80 != 0 };
+        dest[13] = (if key { 1 } else { 0 }) | (if withheld { 2 } else { 0 });
         dest[14] = 0;
         dest[15] = 0;
         written += 1;

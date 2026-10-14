@@ -152,9 +152,9 @@ internal class LidarRasterizer(
      * Adds a complete elevation sample. Every finite in-bounds return is binned; the grid itself
      * is the memory bound, so there is no sample stride.
      */
-    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
+    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false, isWithheld: Boolean = false): Boolean {
         advance()
-        if (!z.isFinite()) return true
+        if (!z.isFinite() || isWithheld || classification == 7 || classification == 18) return true
         val normalizedClass = classification.coerceIn(0, 255)
         // Explicit class filter: skip elevation/coverage for non-matching returns entirely.
         if (allowedClasses != null && normalizedClass !in allowedClasses) {
@@ -285,7 +285,7 @@ internal class LidarRasterizer(
             sourceCounts = sourceCounts,
         )
 
-        val cleaned = if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
+        val cleaned = if (appliedMode != GroundSurfaceMode.AUTO_LOWEST) {
             filled.elevations
         } else {
             suppressIsolatedLowNoise(filled.elevations, width, height)
@@ -548,7 +548,7 @@ internal fun isSourceGround(
     // The key-point flag is ignored: class 2 is always ground, and LAS 1.4 key-points are a flag
     // on whatever class they already have — they are not a substitute for class 8.
     if (classification == 2) return true
-    val preLas14 = versionMajor < 1 || (versionMajor == 1 && versionMinor < 4) || pointFormat < 6
+    val preLas14 = versionMajor < 1 || (versionMajor == 1 && versionMinor < 4) && pointFormat < 6
     return preLas14 && classification == 8
 }
 

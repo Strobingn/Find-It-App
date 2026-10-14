@@ -55,10 +55,14 @@ internal object LazSpatialIndex {
      */
     fun ensureBuiltAsync(source: File) {
         if (!source.isFile || exists(source)) return
+        val key = source.absolutePath
+        if (!pending.add(key)) return
         indexExecutor.execute {
-            runCatching { build(source) }.onFailure { failure ->
-                System.err.println("Background LAX index for ${source.name} failed: ${failure.message}")
-            }
+            try {
+                runCatching { build(source) }.onFailure { failure ->
+                    System.err.println("Background LAX index for ${source.name} failed: ${failure.message}")
+                }
+            } finally { pending.remove(key) }
         }
     }
 
@@ -77,6 +81,7 @@ internal object LazSpatialIndex {
      * Failure is never fatal: reads simply fall back to scanning the whole file, so a read-only
      * directory or an unusual LAZ variant costs speed rather than function.
      */
+    @Synchronized
     fun build(
         source: File,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
@@ -112,6 +117,7 @@ internal object LazSpatialIndex {
         val total = header.extended_number_of_point_records.takeIf { it > 0L }
             ?: (header.number_of_point_records.toLong() and 0xFFFFFFFFL)
 
+        if (total <= 0L || total > Int.MAX_VALUE || !shouldContinue()) return false
         val quadtree = LASquadtree()
         if (!quadtree.setup(minX, maxX, minY, maxY, QUADTREE_CELL_SIZE)) return false
 
@@ -127,7 +133,7 @@ internal object LazSpatialIndex {
                 onProgress(counted, total)
             }
         }
-        if (counted == 0L) return false
+        if (counted != total || !shouldContinue()) return false
 
         // LasIndexWriter.complete also turns off complete()'s hardcoded verbose stderr dump.
         LasIndexWriter.complete(index, MINIMUM_POINTS, MAXIMUM_INTERVALS)
@@ -153,6 +159,8 @@ internal object LazSpatialIndex {
     }
 
     private const val PROGRESS_INTERVAL = 1_000_000L
+
+    private val pending = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val indexExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "laz-spatial-index").apply { isDaemon = true }

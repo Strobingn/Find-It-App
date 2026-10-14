@@ -23,7 +23,7 @@ object LasCrsReader {
 
     fun read(file: File): LasCrsInfo? = runCatching {
         RandomAccessFile(file, "r").use { raf ->
-            val head = ByteArray(375.coerceAtMost(raf.length().toInt()))
+            val head = ByteArray(minOf(375L, raf.length()).toInt())
             raf.readFully(head)
             if (String(head, 0, 4, Charsets.US_ASCII) != "LASF") return null
             val b = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN)

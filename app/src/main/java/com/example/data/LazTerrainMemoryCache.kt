@@ -95,6 +95,6 @@ class LazTerrainMemoryCache(
     private fun estimateBytes(grid: ElevationGrid): Long {
         val cells = grid.width.toLong() * grid.height.toLong()
         // bareEarth float + canopy float + valid-data boolean, plus a small object/array allowance.
-        return cells * 9L + 16L * 1024L
+        return cells * 10L + 16L * 1024L
     }
 }

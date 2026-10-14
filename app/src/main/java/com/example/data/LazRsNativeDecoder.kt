@@ -30,6 +30,7 @@ object LazRsNativeDecoder {
      * Writes the reconstruction origin into [origins] (`x, y, z`).
      * Returns the point count, or -1 if the native library is missing or the file could not be read.
      */
+    @Synchronized
     fun decodePacked(
         file: File,
         destination: ByteBuffer,

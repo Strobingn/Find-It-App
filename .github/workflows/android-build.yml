@@ -1,10 +1,9 @@
 name: Find-it-appAPK
 
-# APK + GitHub Release only on pushes/merges to main (saves private-repo minutes).
-# Pull requests still run unit tests. Do not add extra release branches.
+# Main publishes stable releases. The LAZ fix branch builds an installable APK artifact.
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/laz-precision-performance-20261014']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -81,12 +80,31 @@ jobs:
           set -o pipefail
           ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
 
+      - name: Build branch APK
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        env:
+          VERSION_CODE: ${{ 1000000 + github.run_number }}
+          VERSION_NAME: 2.0.${{ github.run_number }}-laz
+        run: ./gradlew assembleRelease --stacktrace --no-configuration-cache
+
+      - name: Upload branch APK
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        uses: actions/upload-artifact@v7
+        with:
+          name: Find-It-LAZ-${{ github.run_number }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload test diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: unit-test-log-${{ github.run_number }}
-          path: unit-test.log
+          path: |
+            unit-test.log
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: warn
           retention-days: 14
 

@@ -38,7 +38,7 @@ class LazTerrainDiskCache(
         return runCatching {
             DataInputStream(BufferedInputStream(FileInputStream(cacheFile), BUFFER_BYTES)).use { input ->
                 val magic = input.readUTF()
-                require(magic == MAGIC_V3 || magic == MAGIC_V2) { "Unsupported terrain cache entry" }
+                require(magic == MAGIC_V4) { "Unsupported terrain cache entry" }
                 val width = input.readInt()
                 val height = input.readInt()
                 val cells = width.toLong() * height.toLong()
@@ -49,10 +49,10 @@ class LazTerrainDiskCache(
                 val bare = FloatArray(cells.toInt()) { input.readFloat() }
                 val canopy = FloatArray(cells.toInt()) { input.readFloat() }
                 val valid = BooleanArray(cells.toInt()) { input.readBoolean() }
-                val geoMetadata = if (magic == MAGIC_V3) readGeoMetadata(input, width, height, cellSize) else null
+                val interpolated = BooleanArray(cells.toInt()) { input.readBoolean() }
+                val geoMetadata = readGeoMetadata(input, width, height, cellSize)
                 DemGenerator.TerrainLoadResult(
-                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid)
-                        .ensureBareEarthCoverage(),
+                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid, interpolated),
                     summary = summary,
                     isBareEarth = isBareEarth,
                     geoMetadata = geoMetadata,
@@ -74,7 +74,7 @@ class LazTerrainDiskCache(
         partial.delete()
         runCatching {
             DataOutputStream(BufferedOutputStream(FileOutputStream(partial), BUFFER_BYTES)).use { output ->
-                output.writeUTF(MAGIC_V3)
+                output.writeUTF(MAGIC_V4)
                 output.writeInt(result.grid.width)
                 output.writeInt(result.grid.height)
                 output.writeFloat(result.grid.cellSizeMeters)
@@ -83,6 +83,7 @@ class LazTerrainDiskCache(
                 result.grid.bareEarth.forEach(output::writeFloat)
                 result.grid.canopySpikes.forEach(output::writeFloat)
                 result.grid.validData.forEach(output::writeBoolean)
+                result.grid.interpolatedData.forEach(output::writeBoolean)
                 writeGeoMetadata(output, result.geoMetadata)
                 output.flush()
             }
@@ -190,6 +191,7 @@ class LazTerrainDiskCache(
         val sanitized = options.sanitized()
         val key = buildString {
             append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
+            append("|terrainPrecision4")
             append('|').append(file.length())
             append('|').append(file.lastModified())
             append('|').append(sanitized.groundMode.name)
@@ -221,11 +223,10 @@ class LazTerrainDiskCache(
 
     companion object {
         // V2: validData mask from full raster. V3: same + optional georeference metadata.
-        private const val MAGIC_V2 = "FINDIT_DEM_CACHE_V2"
-        private const val MAGIC_V3 = "FINDIT_DEM_CACHE_V3"
+        private const val MAGIC_V4 = "FINDIT_DEM_CACHE_V4"
         private const val CACHE_EXTENSION = "fitdem"
         private const val BUFFER_BYTES = 256 * 1024
-        private const val MAX_CELLS = 2_000_000L
+        private const val MAX_CELLS = 2_048L * 2_048L
         private const val MAX_SUMMARY_CHARS = 16_000
     }
 }
