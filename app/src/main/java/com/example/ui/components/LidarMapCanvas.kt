@@ -73,6 +73,7 @@ import com.example.data.computeDigPriorityHeatmap
 import com.example.data.survey.SurveyFeature
 import com.example.data.survey.SurveyGeometryType
 import com.example.geospatial.GeoSpatialLibrary
+import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
@@ -233,7 +234,7 @@ fun LidarMapCanvas(
     // doesn't fight with live user interaction or with the reset-on-tab-switch behavior above.
     LaunchedEffect(viewportRestoreToken) {
         if (viewportRestoreToken > 0) {
-            zoom = initialZoom.coerceIn(1f, 32f)
+            zoom = initialZoom.coerceIn(0.25f, 32f)
             pan = Offset(initialPanX, initialPanY)
         }
     }
@@ -268,7 +269,7 @@ fun LidarMapCanvas(
 
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         if (mode == LidarCanvasMode.EXPLORE) {
-            val nextZoom = (zoom * zoomChange).coerceIn(1f, 32f)
+            val nextZoom = (zoom * zoomChange).coerceIn(0.25f, 32f)
             val viewportWidth = viewportSize.width.toFloat().coerceAtLeast(1f)
             val viewportHeight = viewportSize.height.toFloat().coerceAtLeast(1f)
             val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
@@ -797,12 +798,13 @@ private data class CanvasSurveyGeometry(
     val points: List<Pair<Float, Float>>,
 )
 
+/** Scale that fills the screen. Pinch out (zoom below 1) to see a wide tile whole. */
 private fun containScale(
     viewportWidth: Float,
     viewportHeight: Float,
     imageWidth: Float,
     imageHeight: Float,
-): Float = min(
+): Float = max(
     viewportWidth / imageWidth.coerceAtLeast(1f),
     viewportHeight / imageHeight.coerceAtLeast(1f),
 )

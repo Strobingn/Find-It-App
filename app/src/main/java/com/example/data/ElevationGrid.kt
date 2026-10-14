@@ -165,17 +165,6 @@ class ElevationGrid(
         } else {
             null
         }
-        // Mean elevation at the feature scale (default 6 m). A cellar or foundation wider than
-        // one cell is flat in the middle, so the 3×3 tint misses it. This is display-only.
-        val footprint = if (visualizationMode == 0) {
-            cachedFootprint ?: localMeanResidual(elevations, analysisRadius).also {
-                cachedFootprint = it
-                cachedFootprintScale = robustMagnitudeScale(it)
-            }
-        } else {
-            null
-        }
-        val footprintScale = cachedFootprintScale
         val curvatureArr = if (visualizationMode == 4 || visualizationMode == 5) {
             cachedCurvature ?: curvature(elevations, cellDistance).also { arr ->
                 cachedCurvature = arr
@@ -209,9 +198,9 @@ class ElevationGrid(
         val leftLight = lightVector(azimuth + 270f, altitude)
 
         // Each mode consumes at most one of these, yet all three were computed unconditionally.
-        val needsCrossLight = boundedMode == 0
+        val needsCrossLight = false
         val needsMultiShade = boundedMode == 1 || boundedMode in 3..6 || boundedMode == 8
-        val needsPrimaryShade = needsMultiShade || needsCrossLight
+        val needsPrimaryShade = needsMultiShade || boundedMode == 0
         val needsSlope = boundedMode == 2 || boundedMode == 6
         val needsGradient = needsPrimaryShade || needsSlope
         val gradientDivisor = 8f * cellDistance
@@ -326,26 +315,6 @@ class ElevationGrid(
                 } else {
                     0f
                 }
-                // A wall parallel to one sun is invisible in a single hillshade (the usual
-                // archaeological miss). Keep most of the chosen light so the sun slider still
-                // turns the ground, and add a little light from the other three sides.
-                val crossShade = if (needsCrossLight) {
-                    val footprintTint = if (footprint != null) {
-                        (footprint[index] / footprintScale).coerceIn(-1f, 1f) * 0.16f
-                    } else {
-                        0f
-                    }
-                    val reliefTint = (microRelief + footprintTint).coerceIn(-0.22f, 0.22f)
-                    (
-                        primaryShade * 0.70f +
-                            illumination(normalX, normalY, normalZ, rightLight) * 0.10f +
-                            illumination(normalX, normalY, normalZ, oppositeLight) * 0.10f +
-                            illumination(normalX, normalY, normalZ, leftLight) * 0.10f +
-                            reliefTint
-                        ).coerceIn(0f, 1f)
-                } else {
-                    0f
-                }
                 val multiShade = if (needsMultiShade) {
                     (
                         primaryShade * 0.45f +
@@ -381,7 +350,7 @@ class ElevationGrid(
                     6 -> aspectColor(gradientX, gradientY, slopeRadians, multiShade)
                     7 -> getPaletteColor(palette, elevationPercent)
                     8 -> canopyHeightColor(canopySpikes[index], canopyScale, multiShade)
-                    else -> shadePalette(getPaletteColor(palette, elevationPercent), crossShade, contrastValue)
+                    else -> shadePalette(getPaletteColor(palette, elevationPercent), primaryShade, contrastValue)
                 }
 
                 if (overlayType > 0 && overlayOpacity > 0f) {

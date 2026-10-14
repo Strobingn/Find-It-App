@@ -114,9 +114,9 @@ class ElevationGridTest {
         val wall = FloatArray(81) { 10f }
         for (x in 0 until 9) wall[4 * 9 + x] = 10.35f
         val flatBmp = ElevationGrid(9, 9, flat, FloatArray(81), cellSizeMeters = 1f)
-            .renderHillshade(90f, 35f, 1f, palette = 0, contrast = 1f)
+            .renderHillshade(90f, 35f, 1f, palette = 0, contrast = 1f, visualizationMode = 3, featureScaleMeters = 3f)
         val wallBmp = ElevationGrid(9, 9, wall, FloatArray(81), cellSizeMeters = 1f)
-            .renderHillshade(90f, 35f, 1f, palette = 0, contrast = 1f)
+            .renderHillshade(90f, 35f, 1f, palette = 0, contrast = 1f, visualizationMode = 3, featureScaleMeters = 3f)
 
         assertTrue(
             Color.red(wallBmp.getPixel(4, 4)) > Color.red(flatBmp.getPixel(4, 4)),
@@ -135,7 +135,7 @@ class ElevationGridTest {
             for (x in 12..16) elevations[y * side + x] += 0.25f
         }
         val bitmap = ElevationGrid(side, side, elevations, FloatArray(elevations.size), cellSizeMeters = 1f)
-            .renderHillshade(90f, 40f, 1f, palette = 0, contrast = 1f, featureScaleMeters = 8f)
+            .renderHillshade(90f, 40f, 1f, palette = 0, contrast = 1f, visualizationMode = 3, featureScaleMeters = 8f)
 
         assertTrue(Color.red(bitmap.getPixel(14, 14)) > Color.red(bitmap.getPixel(19, 1)))
     }
