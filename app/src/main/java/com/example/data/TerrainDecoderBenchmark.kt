@@ -28,7 +28,7 @@ data class DecoderBenchmarkResult(
             appendLine(String.format(Locale.US, "  laz-rs native       %.2f ms", nativeMs))
             appendLine("  winner              $winner")
         } else {
-            appendLine("  laz-rs native       not loaded (laszip4j stays default)")
+            appendLine("  laz-rs native       not loaded (laszip4j fallback in use)")
         }
         appendLine(String.format(Locale.US, "  rasterize/grid      %.2f ms", rasterizeMs))
         appendLine(String.format(Locale.US, "  GPU mesh            %.2f ms", meshMs))
@@ -39,7 +39,7 @@ data class DecoderBenchmarkResult(
         appendLine(String.format(Locale.US, "  cache write         %.2f ms", cacheWriteMs))
         appendLine(String.format(Locale.US, "  cache reopen        %.2f ms", cacheReadMs))
         appendLine("  ${memory.format()}")
-        append("Default backend stays laszip4j until native wins on this device.")
+        append("Default backend: laz-rs native (identical output); Tools toggle switches back to laszip4j.")
     }
 }
 
@@ -78,33 +78,19 @@ object TerrainDecoderBenchmark {
         var nativeMs: Double? = null
         val nativeAvailable = LazRsNativeDecoder.isAvailable
         if (nativeAvailable) {
-            val headerPoints = javaResult.totalPointsRead.coerceAtLeast(1)
             nativeMs = runCatching {
-            TerrainStageProfiler.stage("decode_lazrs", file.name) {
-                val packed = PackedPointRasterizer.allocate(headerPoints)
-                val origins = DoubleArray(3)
-                val nanos = measureNanoTime {
-                    val decoded = LazRsNativeDecoder.decodePacked(file, packed, origins)
-                    require(decoded > 0) { "laz-rs decode failed (count=$decoded)" }
-                    val rasterizer = LidarRasterizer(
-                        minX = -1.0e9,
-                        maxX = 1.0e9,
-                        minY = -1.0e9,
-                        maxY = 1.0e9,
-                        options = sanitized,
-                        declaredPointCount = decoded.toLong(),
-                    )
-                    PackedPointRasterizer.addAll(
-                        rasterizer,
-                        packed,
-                        decoded,
-                        originX = origins[0],
-                        originY = origins[1],
-                        originZ = origins[2],
-                    )
-                    requireNotNull(rasterizer.finish(0, "laz-rs benchmark"))
+            TerrainStageProfiler.stage("decode_lazrs_total", file.name) {
+                val previous = LazDecoderSettings.preferred
+                LazDecoderSettings.preferred = LazDecoderBackend.NATIVE_LAZ_RS
+                try {
+                    var result: DemGenerator.LasLoadResult? = null
+                    val nanos = measureNanoTime { result = LazTerrainReader.read(file, sanitized, shouldContinue) }
+                    // The reader silently falls back to laszip4j; only count a real laz-rs decode.
+                    require(result?.note?.contains("laz-rs") == true) { "laz-rs decode did not run" }
+                    nanos / 1_000_000.0
+                } finally {
+                    LazDecoderSettings.preferred = previous
                 }
-                nanos / 1_000_000.0
             }
             }.getOrElse { error ->
                 TerrainStageProfiler.emit("laz-rs benchmark failed: ${error.message}")

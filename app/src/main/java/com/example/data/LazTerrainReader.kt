@@ -164,15 +164,6 @@ internal object LazTerrainReader {
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
     ): DemGenerator.LasLoadResult? {
-        if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
-            val native = runCatching {
-                readNativePacked(file, clampedOptions, shouldContinue)
-            }.onFailure { exception ->
-                System.err.println("laz-rs decode failed for ${file.name}: ${exception.message}")
-            }.getOrNull()
-            if (native != null) return native
-        }
-
         val parallel = runCatching {
             readParallelChunks(file, clampedOptions, shouldContinue, onProgress)
         }.onFailure { exception ->
@@ -671,15 +662,13 @@ internal object LazTerrainReader {
         val focus = limited.focusBounds
         if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
         val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
-        if (workers == 1) return null
+        val useNative = LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS
+        if (workers == 1 && !useNative) return null
 
         val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
         val existingIndex = LazChunkIndex.load(file, pointCount, chunkSize)
-        val rasterizer = newRasterizer(
-            header,
-            limited,
-            if (focus != null) estimatedPoints(header.pointCount, focus) else pointCount,
-        )
+        val declaredPoints = if (focus != null) estimatedPoints(header.pointCount, focus) else pointCount
+        var rasterizer = newRasterizer(header, limited, declaredPoints)
         val rect: DoubleArray? = focus?.let {
             val rangeX = header.maxX - header.minX
             val rangeY = header.maxY - header.minY
@@ -697,12 +686,27 @@ internal object LazTerrainReader {
         } else {
             IntArray(totalChunks) { it }
         }
-        val builder = if (existingIndex == null && selected.size == totalChunks) {
+        fun newBuilder() = if (existingIndex == null && selected.size == totalChunks) {
             LazChunkIndex.Builder(pointCount, chunkSize, header.minX, header.maxX, header.minY, header.maxY, totalChunks)
         } else {
             null
         }
         val groundFlags = intArrayOf(header.versionMajor, header.versionMinor, header.pointFormat)
+        if (useNative) {
+            val native = runCatching {
+                readNativeChunks(
+                    file, header, chunkSize, selected, totalChunks, rect, pointStride, rasterizer,
+                    newBuilder(), groundFlags, workers, shouldContinue, onProgress,
+                )
+            }.onFailure { exception ->
+                System.err.println("laz-rs decode failed for ${file.name}, using laszip4j: ${exception.message}")
+            }.getOrNull()
+            if (native != null) return native
+            // The native attempt may have binned part of the file: start laszip4j from a clean grid.
+            rasterizer = newRasterizer(header, limited, declaredPoints)
+            if (workers == 1) return null
+        }
+        val builder = newBuilder()
         val results = Array(selected.size) { java.util.concurrent.CompletableFuture<DecodedChunk>() }
         val window = java.util.concurrent.Semaphore(workers * 2)
         val nextChunk = java.util.concurrent.atomic.AtomicInteger(0)
@@ -784,6 +788,80 @@ internal object LazTerrainReader {
         } finally {
             cancelled.set(true)
             pool.shutdownNow()
+        }
+    }
+
+    /**
+     * Streaming laz-rs path over the same chunk selection as the laszip4j binner. Native workers
+     * decode chunks (seek via chunk table, reusable scratch, same rect/stride rule) into pooled
+     * buffers; this thread bins them strictly in slot order. Returns null on any native failure
+     * so the caller falls back to laszip4j; cancellation returns the truncated grid, exactly
+     * like the laszip4j path.
+     */
+    private fun readNativeChunks(
+        file: File,
+        header: Header,
+        chunkSize: Int,
+        selected: IntArray,
+        totalChunks: Int,
+        rect: DoubleArray?,
+        pointStride: Int,
+        rasterizer: LidarRasterizer,
+        builder: LazChunkIndex.Builder?,
+        groundFlags: IntArray,
+        workers: Int,
+        shouldContinue: () -> Boolean,
+        onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+    ): DemGenerator.LasLoadResult? {
+        val pointCount = header.pointCount
+        val session = LazRsNativeDecoder.open(file) ?: return null
+        session.use {
+            // Must agree with the chunk index geometry, or chunk numbers mean different points.
+            if (it.pointCount != pointCount || it.chunkSize != chunkSize.toLong()) return null
+            // The index needs every return of every chunk, so filter on this side when building one.
+            val nativeRect = if (builder == null) rect else null
+            val nativeStride = if (builder == null) pointStride else 1
+            if (!it.start(selected, nativeRect, nativeStride, workers)) return null
+            val selectedPoints = selected.sumOf { c -> min(chunkSize.toLong(), pointCount - c.toLong() * chunkSize) }
+            var complete = true
+            var decoded = 0L
+            onProgress?.invoke(0L, selectedPoints)
+            val ok = TerrainStageProfiler.stage("decode_lazrs", file.name) {
+                for (slot in selected.indices) {
+                    val buffer = try {
+                        it.next(slot, shouldContinue)
+                    } catch (_: LazRsNativeDecoder.CancellationSignal) {
+                        it.cancel()
+                        rasterizer.markTruncated()
+                        complete = false
+                        break
+                    } ?: return@stage false
+                    val chunk = selected[slot]
+                    val first = chunk.toLong() * chunkSize
+                    if (builder != null) {
+                        PackedPointRasterizer.addAll(
+                            rasterizer, buffer, it.lastKept, first, rect, pointStride, builder.Chunk(chunk), groundFlags,
+                        )
+                    } else {
+                        PackedPointRasterizer.addAll(rasterizer, buffer, it.lastKept)
+                    }
+                    val raw = it.lastRaw
+                    it.release(slot)
+                    decoded += raw
+                    onProgress?.invoke(decoded, selectedPoints)
+                    if (raw < min(chunkSize.toLong(), pointCount - first)) return@stage false
+                }
+                true
+            }
+            if (!ok) return null
+            if (complete && builder != null) builder.build()?.let { b -> runCatching { LazChunkIndex.store(file, b) } }
+            val label = if (rect != null) {
+                "laz-rs chunk-index refine (${selected.size}/$totalChunks chunks, $workers cores" +
+                    (if (pointStride > 1) ", 1/$pointStride point budget" else "") + ")"
+            } else {
+                "laz-rs streaming parallel chunk decode ($workers cores)"
+            }
+            return finish(rasterizer, header, label)
         }
     }
 
@@ -897,60 +975,6 @@ internal object LazTerrainReader {
             pointFormat = header.pointFormat,
             sourceLabel = "LAZ ${header.versionMajor}.${header.versionMinor} format ${header.pointFormat} $decoderLabel",
         )
-    }
-
-    /**
-     * laz-rs JNI path: one packed buffer, then the same [LidarRasterizer] hot path.
-     * Falls back to laszip4j when the .so is missing or the decode returns no points.
-     */
-    private fun readNativePacked(
-        file: File,
-        options: LidarImportOptions,
-        shouldContinue: () -> Boolean,
-    ): DemGenerator.LasLoadResult? {
-        if (!LazRsNativeDecoder.isAvailable) return null
-        val probe = SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) ?: return null
-        val header: Header
-        val pointCount: Long
-        probe.use { reader ->
-            val sourceHeader = reader.header
-            pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
-                ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL)
-            header = Header(
-                versionMajor = sourceHeader.version_major.toInt() and 0xFF,
-                versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
-                pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
-                pointCount = pointCount,
-                scaleX = sourceHeader.x_scale_factor,
-                scaleY = sourceHeader.y_scale_factor,
-                scaleZ = sourceHeader.z_scale_factor,
-                offsetX = sourceHeader.x_offset,
-                offsetY = sourceHeader.y_offset,
-                offsetZ = sourceHeader.z_offset,
-                maxX = sourceHeader.max_x,
-                minX = sourceHeader.min_x,
-                maxY = sourceHeader.max_y,
-                minY = sourceHeader.min_y,
-            )
-        }
-        if (pointCount <= 0L || pointCount > Int.MAX_VALUE.toLong()) return null
-        val packed = PackedPointRasterizer.allocate(pointCount.toInt())
-        val origins = DoubleArray(3)
-        val decoded = TerrainStageProfiler.stage("decode_lazrs", file.name) {
-            LazRsNativeDecoder.decodePacked(file, packed, origins, shouldContinue)
-        }
-        if (decoded <= 0) return null
-        val rasterizer = newRasterizer(header, options, pointCount)
-        PackedPointRasterizer.addAll(
-            rasterizer,
-            packed,
-            decoded,
-            shouldContinue,
-            originX = origins[0],
-            originY = origins[1],
-            originZ = origins[2],
-        )
-        return finish(rasterizer, header, "laz-rs packed JNI")
     }
 
     private fun applyFocus(

@@ -4,44 +4,50 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Bins packed xyz/class records into [LidarRasterizer] without allocating a per-return object.
- * Packed XY/Z are origin-relative f32; add [originX]/[originY]/[originZ] back as doubles.
+ * Bins one native chunk of packed records ([LazRsNativeDecoder.RECORD_BYTES]) into
+ * [LidarRasterizer] without allocating a per-return object. Calls are made once per chunk,
+ * in file order, so the grid matches the laszip4j chunk binner exactly.
  */
 internal object PackedPointRasterizer {
+    /**
+     * Adds [pointCount] records. Pass [rect]/[stride] only when the buffer holds the whole
+     * unfiltered chunk (native filtered nothing); they are then applied here with the laszip4j
+     * rule: every return feeds [indexChunk] first, then half-open rect, then global stride.
+     */
     fun addAll(
         rasterizer: LidarRasterizer,
         packed: ByteBuffer,
         pointCount: Int,
-        shouldContinue: () -> Boolean = { true },
-        originX: Double = 0.0,
-        originY: Double = 0.0,
-        originZ: Double = 0.0,
-    ): Boolean {
-        val buffer = packed.duplicate().order(ByteOrder.LITTLE_ENDIAN)
-        buffer.clear()
-        repeat(pointCount) { index ->
-            if (index and 32_767 == 32_767 && !shouldContinue()) {
-                rasterizer.markTruncated()
-                return false
+        firstPoint: Long = 0L,
+        rect: DoubleArray? = null,
+        stride: Int = 1,
+        indexChunk: LazChunkIndex.Builder.Chunk? = null,
+        groundFlags: IntArray? = null,
+    ) {
+        val b = packed.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        b.clear()
+        for (i in 0 until pointCount) {
+            val base = i * LazRsNativeDecoder.RECORD_BYTES
+            val x = b.getDouble(base)
+            val y = b.getDouble(base + 8)
+            val cls = b.get(base + 20).toInt() and 0xFF
+            val flags = b.get(base + 21).toInt()
+            val key = flags and 0x01 != 0
+            if (indexChunk != null) {
+                val g = groundFlags ?: intArrayOf(1, 2, 0)
+                indexChunk.add(x, y, isSourceGround(cls, key, g[0], g[1], g[2]))
             }
-            val x = buffer.float.toDouble() + originX
-            val y = buffer.float.toDouble() + originY
-            val z = (buffer.float.toDouble() + originZ).toFloat()
-            val classification = buffer.get().toInt() and 0xFF
-            val flags = buffer.get().toInt() and 0xFF
-            buffer.short
+            if (rect != null && (x < rect[0] || x >= rect[2] || y < rect[1] || y >= rect[3])) continue
+            if (stride > 1 && (firstPoint + i) % stride != 0L) continue
             rasterizer.addPoint(
                 x = x,
                 y = y,
-                z = z,
-                classification = classification,
-                isKeyPoint = flags and 0x01 != 0,
+                z = b.getFloat(base + 16),
+                classification = cls,
+                isKeyPoint = key,
+                withheld = flags and 0x02 != 0,
             )
         }
-        return true
+        indexChunk?.commit()
     }
-
-    fun allocate(pointCount: Int): ByteBuffer =
-        ByteBuffer.allocateDirect(pointCount.coerceAtLeast(0) * LazRsNativeDecoder.RECORD_BYTES)
-            .order(ByteOrder.LITTLE_ENDIAN)
 }

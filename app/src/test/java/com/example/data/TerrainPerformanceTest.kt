@@ -23,6 +23,17 @@ class TerrainPerformanceTest {
         assertTrue(TerrainStageProfiler.formatReport().contains("decode"))
     }
 
+    private fun packedRecords(vararg pts: DoubleArray): java.nio.ByteBuffer {
+        val buf = java.nio.ByteBuffer.allocateDirect(pts.size * LazRsNativeDecoder.RECORD_BYTES)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        for (p in pts) {
+            buf.putDouble(p[0]).putDouble(p[1]).putFloat(p[2].toFloat())
+            buf.put(p[3].toInt().toByte()).put(p.getOrElse(4) { 0.0 }.toInt().toByte()).putShort(0)
+        }
+        buf.flip()
+        return buf
+    }
+
     @Test
     fun packedSinkBinsWithoutPerPointObjects() {
         val rasterizer = LidarRasterizer(
@@ -30,24 +41,15 @@ class TerrainPerformanceTest {
             options = LidarImportOptions(rasterResolution = 32, groundMode = GroundSurfaceMode.AUTO_LOWEST),
             declaredPointCount = 4,
         )
-        val packed = PackedPointRasterizer.allocate(4)
-        repeat(4) { i ->
-            packed.putFloat(i * 2f)
-            packed.putFloat(i * 2f)
-            packed.putFloat(10f + i)
-            packed.put(2)
-            packed.put(0)
-            packed.putShort(0)
-        }
-        packed.flip()
-        assertTrue(PackedPointRasterizer.addAll(rasterizer, packed, 4))
+        val packed = packedRecords(*Array(4) { i -> doubleArrayOf(i * 2.0, i * 2.0, 10.0 + i, 2.0) })
+        PackedPointRasterizer.addAll(rasterizer, packed, 4)
         val result = requireNotNull(rasterizer.finish(0, "packed"))
         assertEquals(4L, rasterizer.pointsDecoded)
         assertTrue(result.grid.validData.any { it })
     }
 
     @Test
-    fun packedRelativeCoordinatesRestoreProjectedPrecision() {
+    fun packedRecordsKeepProjectedDoublePrecisionAndFilterLikeLaszip4j() {
         val originX = 5_000_000.25
         val originY = 4_250_000.75
         val rasterizer = LidarRasterizer(
@@ -56,33 +58,18 @@ class TerrainPerformanceTest {
             minY = originY,
             maxY = originY + 20.0,
             options = LidarImportOptions(rasterResolution = 32, groundMode = GroundSurfaceMode.AUTO_LOWEST),
-            declaredPointCount = 2,
+            declaredPointCount = 4,
         )
-        val packed = PackedPointRasterizer.allocate(2)
-        packed.putFloat(0.11f)
-        packed.putFloat(0.22f)
-        packed.putFloat(12f)
-        packed.put(2)
-        packed.put(0)
-        packed.putShort(0)
-        packed.putFloat(1.5f)
-        packed.putFloat(1.5f)
-        packed.putFloat(13f)
-        packed.put(2)
-        packed.put(0)
-        packed.putShort(0)
-        packed.flip()
-        assertTrue(
-            PackedPointRasterizer.addAll(
-                rasterizer,
-                packed,
-                2,
-                originX = originX,
-                originY = originY,
-                originZ = 0.0,
-            ),
+        val packed = packedRecords(
+            doubleArrayOf(originX + 0.11, originY + 0.22, 12.0, 2.0),
+            doubleArrayOf(originX + 1.5, originY + 1.5, 13.0, 2.0),
+            // On the half-open max edge: excluded, like laslib inside_rectangle.
+            doubleArrayOf(originX + 10.0, originY + 1.0, 14.0, 2.0),
+            doubleArrayOf(originX + 2.0, originY + 2.0, 15.0, 2.0),
         )
-        assertEquals(2L, rasterizer.pointsDecoded)
+        val rect = doubleArrayOf(originX, originY, originX + 10.0, originY + 10.0)
+        PackedPointRasterizer.addAll(rasterizer, packed, 4, firstPoint = 0L, rect = rect, stride = 1)
+        assertEquals(3L, rasterizer.pointsDecoded)
         assertTrue(requireNotNull(rasterizer.finish(0, "relative")).grid.validData.any { it })
     }
 

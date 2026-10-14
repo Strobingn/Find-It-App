@@ -15,7 +15,11 @@ las = { version = "=0.8.8", features = ["laz-parallel"] }
 laz = { version = "=0.9.2", features = ["parallel"] }
 # las 0.8 pulls uuid ^1; latest uuid needs rustc 1.89.
 uuid = "=1.11.0"
+# Direct dep so the streaming decoder owns its worker pool (already in the lock via laz parallel).
+rayon = "1"
 
 [profile.release]
 lto = true
 codegen-units = 1
+panic = "unwind"
+strip = true
