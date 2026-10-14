@@ -23,7 +23,7 @@ class TerrainGpuInstrumentedTest {
         val valid=BooleanArray(w*h){true}.apply { this[40*w+40]=false }
         val grid=ElevationGrid(w,h,FloatArray(w*h){100f+(it%w)*.2f+(it/w)*.3f},FloatArray(w*h),3f,valid,
             cellSizeXMeters=2f,cellSizeYMeters=3f)
-        val data=GpuHeightData.build(grid,1f){true}
+        val data=GpuHeightData.build(grid,1f,shouldContinue={true})
         for(mode in listOf(0,1,2,6,7)) for(palette in 0..2) {
             val cpu=grid.renderHillshade(315f,35f,1f,palette,contrast=1.3f,visualizationMode=mode)
             val reader=ImageReader.newInstance(w,h,PixelFormat.RGBA_8888,2)
