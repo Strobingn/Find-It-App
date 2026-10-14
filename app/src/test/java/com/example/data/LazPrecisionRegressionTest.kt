@@ -39,8 +39,9 @@ class LazPrecisionRegressionTest {
         assertEquals(30f, result.grid.bareEarth[63 * 128 + 64], 0f)
     }
 
-    @Test fun las14LegacyFormatDoesNotTurnReservedClass8IntoGround() {
-        assertFalse(isSourceGround(8, versionMajor = 1, versionMinor = 4, pointFormat = 0))
+    @Test fun class8FollowsRecordEncodingIncludingLegacyLas14Payloads() {
+        assertTrue(isSourceGround(8, versionMajor = 1, versionMinor = 4, pointFormat = 0))
+        assertFalse(isSourceGround(8, versionMajor = 1, versionMinor = 4, pointFormat = 6))
         assertTrue(isSourceGround(8, versionMajor = 1, versionMinor = 3, pointFormat = 0))
     }
 

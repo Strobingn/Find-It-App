@@ -545,9 +545,9 @@ internal class LidarRasterizer(
 /**
  * ASPRS ground used for [GroundSurfaceMode.SOURCE_CLASSIFIED].
  *
- * Class 2 is always Ground. Class 8 is Model Key-Point only in LAS 1.0–1.3 (point formats 0–5).
- * LAS 1.4 moved key-points to a classification flag and reserved class 8, so class 8 is not
- * treated as ground there. The key-point flag on class 2 is redundant and ignored.
+ * Class 2 is always Ground. Class 8 is Model Key-Point in legacy point formats 0–5,
+ * including legacy payloads inside LAS 1.4. Formats 6–10 reserve class 8 and carry key-points
+ * in a classification flag. The key-point flag on class 2 is redundant and ignored.
  */
 @Suppress("UNUSED_PARAMETER")
 internal fun isSourceGround(
@@ -560,8 +560,7 @@ internal fun isSourceGround(
     // The key-point flag is ignored: class 2 is always ground, and LAS 1.4 key-points are a flag
     // on whatever class they already have — they are not a substitute for class 8.
     if (classification == 2) return true
-    val preLas14 = (versionMajor < 1 || (versionMajor == 1 && versionMinor < 4)) && pointFormat < 6
-    return preLas14 && classification == 8
+    return pointFormat in 0..5 && classification == 8
 }
 
 internal fun fillMissingNearest(grid: FloatArray, width: Int, height: Int) {

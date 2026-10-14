@@ -7,7 +7,9 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
 - Withheld points and ASPRS noise classes 7/18 do not contribute to elevation,
   canopy, coverage, or density. Flags survive sequential, parallel, COPC and
   optional packed native decode paths.
-- Class 8 is ground only for pre-1.4 legacy LAS. A key-point flag does not turn a
+- Class 8 remains a legacy model key-point in formats 0–5, including LAS 1.4
+  legacy payloads (ASPRS LAS 1.4 R15, point-classification tables). In formats 6–10
+  it is reserved. A key-point flag does not turn a
   building or tree into ground. Unsmoothed vendor-classified ground is retained;
   the automatic low-return noise heuristic no longer modifies classified pits.
 - Raw LAS reads exactly its declared number of records. Trailing EVLR/waveform

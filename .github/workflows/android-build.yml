@@ -98,7 +98,7 @@ jobs:
             export STORE_PASSWORD=android KEY_ALIAS=androiddebugkey KEY_PASSWORD=android
           fi
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
-          sha256sum app/build/outputs/apk/release/*.apk > app/build/outputs/apk/release/SHA256SUMS.txt
+          (cd app/build/outputs/apk/release && sha256sum *.apk > SHA256SUMS.txt)
 
       - name: Upload branch APK
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
