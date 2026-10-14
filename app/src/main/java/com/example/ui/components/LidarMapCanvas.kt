@@ -46,7 +46,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
@@ -385,13 +384,10 @@ fun LidarMapCanvas(
                 val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
                 val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
 
-                // Nearest-neighbour keeps cell edges crisp at high zoom; bilinear softens the
-                // hillshade into mushy stair-steps right where refine detail matters.
                 drawImage(
                     image = imageBitmap,
                     dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
                     dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
-                    filterQuality = FilterQuality.None,
                 )
                 if (showBasemap && basemapImageBitmap != null) {
                     drawImage(
