@@ -81,6 +81,8 @@ internal class LidarRasterizer(
 
     private val groundMin: FloatArray
     private val groundCount: IntArray
+    /** Sum of ground Z per cell: the cell value is the ground mean (PDAL writers.gdal mean), not the min. */
+    private val groundSum: FloatArray
     private val allMin: FloatArray
     private val allSecondMin: FloatArray
     private val allLowBandCount: IntArray
@@ -116,6 +118,7 @@ internal class LidarRasterizer(
         yToGrid = (height - 1).toDouble() / rangeY
         groundMin = FloatArray(width * height) { Float.MAX_VALUE }
         groundCount = IntArray(width * height)
+        groundSum = FloatArray(width * height)
         allMin = FloatArray(width * height) { Float.MAX_VALUE }
         allSecondMin = FloatArray(width * height) { Float.MAX_VALUE }
         allLowBandCount = IntArray(width * height)
@@ -199,6 +202,7 @@ internal class LidarRasterizer(
             )
             if (isSourceGround) {
                 if (z < groundMin[index]) groundMin[index] = z
+                groundSum[index] += z
                 groundCount[index]++
                 groundPointsBinned++
             }
@@ -221,8 +225,10 @@ internal class LidarRasterizer(
         if (x < cropMinX || x > cropMaxX || y < cropMinY || y > cropMaxY) return null
         // Multiplication by precomputed scales matches the prior division mapping and is
         // substantially cheaper on every return of large LAZ tiles.
-        val gx = ((x - cropMinX) * xToGrid).toInt().coerceIn(0, width - 1)
-        val gy = ((cropMaxY - y) * yToGrid).toInt().coerceIn(0, height - 1)
+        // Grid value i is the sample at cropMinX + i·cell (see cellSize below), so each return goes
+        // to its nearest node. Truncation put every bin half a cell off its node.
+        val gx = ((x - cropMinX) * xToGrid + 0.5).toInt().coerceIn(0, width - 1)
+        val gy = ((cropMaxY - y) * yToGrid + 0.5).toInt().coerceIn(0, height - 1)
         return gy * width + gx
     }
 
@@ -250,7 +256,9 @@ internal class LidarRasterizer(
             null
         }
         val source = when (appliedMode) {
-            GroundSurfaceMode.SOURCE_CLASSIFIED -> groundMin
+            GroundSurfaceMode.SOURCE_CLASSIFIED -> FloatArray(width * height) { i ->
+                if (groundCount[i] > 0) groundSum[i] / groundCount[i] else groundMin[i]
+            }
             GroundSurfaceMode.AUTO_LOWEST -> automaticGround ?: allMin
             GroundSurfaceMode.SURFACE_MODEL -> allMax
         }
@@ -513,6 +521,7 @@ internal class LidarRasterizer(
             }
             if (other.groundCount[index] > 0) {
                 if (other.groundMin[index] < groundMin[index]) groundMin[index] = other.groundMin[index]
+                groundSum[index] += other.groundSum[index]
                 groundCount[index] += other.groundCount[index]
             }
         }
