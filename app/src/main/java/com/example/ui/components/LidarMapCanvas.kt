@@ -274,13 +274,8 @@ fun LidarMapCanvas(
             val sourceWidth = imageBitmap?.width?.toFloat()?.coerceAtLeast(1f) ?: viewportWidth
             val sourceHeight = imageBitmap?.height?.toFloat()?.coerceAtLeast(1f) ?: viewportHeight
             val fit = containScale(viewportWidth, viewportHeight, sourceWidth, sourceHeight)
-            val maxPanX = ((sourceWidth * fit * nextZoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
-            val maxPanY = ((sourceHeight * fit * nextZoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
             zoom = nextZoom
-            pan = Offset(
-                x = (pan.x + panChange.x).coerceIn(-maxPanX, maxPanX),
-                y = (pan.y + panChange.y).coerceIn(-maxPanY, maxPanY),
-            )
+            pan = clampedPan(pan, panChange, nextZoom, fit, sourceWidth, sourceHeight, viewportWidth, viewportHeight)
         }
     }
 
@@ -824,4 +819,23 @@ private fun homesiteColor(intensity: Float): Color = if (intensity < 0.55f) {
     lerp(Color(0xFFFFE082), Color(0xFFFF8F00), (intensity - 0.22f) / 0.33f)
 } else {
     lerp(Color(0xFFFF8F00), Color(0xFFD84315), (intensity - 0.55f) / 0.45f)
+}
+
+/** Pan after a drag, limited so the zoomed image still covers the viewport (free pan at zoom > 1). */
+internal fun clampedPan(
+    pan: Offset,
+    panChange: Offset,
+    zoom: Float,
+    fit: Float,
+    sourceWidth: Float,
+    sourceHeight: Float,
+    viewportWidth: Float,
+    viewportHeight: Float,
+): Offset {
+    val maxPanX = ((sourceWidth * fit * zoom - viewportWidth) * 0.5f).coerceAtLeast(0f)
+    val maxPanY = ((sourceHeight * fit * zoom - viewportHeight) * 0.5f).coerceAtLeast(0f)
+    return Offset(
+        x = (pan.x + panChange.x).coerceIn(-maxPanX, maxPanX),
+        y = (pan.y + panChange.y).coerceIn(-maxPanY, maxPanY),
+    )
 }
