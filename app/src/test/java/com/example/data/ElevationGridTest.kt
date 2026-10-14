@@ -123,6 +123,23 @@ class ElevationGridTest {
         )
     }
 
+    @Test
+    fun wideFoundationOnASlopeStaysBrighterThanTheSameElevation() {
+        // The middle of a foundation wider than one cell matches the hillside slope,
+        // so a 3×3 shade cannot see it. Same absolute elevation, so the palette matches too.
+        val side = 31
+        val elevations = FloatArray(side * side) { index ->
+            10f + (index % side) * 0.05f
+        }
+        for (y in 12..16) {
+            for (x in 12..16) elevations[y * side + x] += 0.25f
+        }
+        val bitmap = ElevationGrid(side, side, elevations, FloatArray(elevations.size), cellSizeMeters = 1f)
+            .renderHillshade(90f, 40f, 1f, palette = 0, contrast = 1f, featureScaleMeters = 8f)
+
+        assertTrue(Color.red(bitmap.getPixel(14, 14)) > Color.red(bitmap.getPixel(19, 1)))
+    }
+
     private fun nanDem(): ElevationGrid {
         val w = 24
         val h = 24

@@ -625,14 +625,15 @@ private fun sampleCatmull(
     val x1 = floor(gx).toInt()
     val y1 = floor(gy).toInt()
     val tx = gx - x1
-    val rows = FloatArray(4) { offset ->
-        catmullRow(grid, known, width, height, x1, y1 - 1 + offset, tx)
-    }
-    val c1 = rows[1]
-    val c2 = rows[2]
+    val r0 = catmullRow(grid, known, width, height, x1, y1 - 1, tx)
+    val r1 = catmullRow(grid, known, width, height, x1, y1, tx)
+    val r2 = catmullRow(grid, known, width, height, x1, y1 + 1, tx)
+    val r3 = catmullRow(grid, known, width, height, x1, y1 + 2, tx)
+    val c1 = r1
+    val c2 = r2
     // A missing central tap used to return the other tap unchanged. That painted a
     // flat shelf a full bin wide, and the shelf edge was a straight hillshade line.
-    return spanOrShortRamp(rows[0], c1, c2, rows[3], gy - y1)
+    return spanOrShortRamp(r0, c1, c2, r3, gy - y1)
 }
 
 private fun catmullRow(

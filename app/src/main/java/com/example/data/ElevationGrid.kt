@@ -58,6 +58,8 @@ class ElevationGrid(
     private var cachedMinElevation = 0f
     private var cachedMaxElevation = 1f
     private var cachedLocal: LocalStatistics? = null
+    private var cachedFootprint: FloatArray? = null
+    private var cachedFootprintScale = 1f
     private var cachedResidualScale = 1f
     private var cachedRoughnessScale = 1f
     private var cachedCurvature: FloatArray? = null
@@ -116,6 +118,7 @@ class ElevationGrid(
             cachedIntermediateKey = intermediateKey
             cachedElevations = null
             cachedLocal = null
+            cachedFootprint = null
             cachedCurvature = null
         }
         val elevations = cachedElevations ?: run {
@@ -154,6 +157,17 @@ class ElevationGrid(
         } else {
             null
         }
+        // Mean elevation at the feature scale (default 6 m). A cellar or foundation wider than
+        // one cell is flat in the middle, so the 3×3 tint misses it. This is display-only.
+        val footprint = if (visualizationMode == 0) {
+            cachedFootprint ?: localMeanResidual(elevations, analysisRadius).also {
+                cachedFootprint = it
+                cachedFootprintScale = robustMagnitudeScale(it)
+            }
+        } else {
+            null
+        }
+        val footprintScale = cachedFootprintScale
         val curvatureArr = if (visualizationMode == 4 || visualizationMode == 5) {
             cachedCurvature ?: curvature(elevations, cellDistance).also { arr ->
                 cachedCurvature = arr
@@ -208,9 +222,8 @@ class ElevationGrid(
                 val centerZ = elevations[index]
                 var gradientX = 0f
                 var gradientY = 0f
-                // 3×3 residual (simple local relief). A one-cell foundation or cellar has no
-                // slope on its flat top, so a single sun misses it when the wall runs with the
-                // light. This tints the picture only. The stored elevations are not averaged.
+                // 3×3 residual catches a one-cell wall. The feature-scale residual catches a
+                // cellar or foundation whose middle is flat. Neither one changes the DEM.
                 var microRelief = 0f
                 if (needsGradient) {
                     // Horn 3×3: a missing neighbour takes the centre value, never 0.
@@ -283,12 +296,18 @@ class ElevationGrid(
                 // archaeological miss). Keep most of the chosen light so the sun slider still
                 // turns the ground, and add a little light from the other three sides.
                 val crossShade = if (needsCrossLight) {
+                    val footprintTint = if (footprint != null) {
+                        (footprint[index] / footprintScale).coerceIn(-1f, 1f) * 0.16f
+                    } else {
+                        0f
+                    }
+                    val reliefTint = (microRelief + footprintTint).coerceIn(-0.22f, 0.22f)
                     (
                         primaryShade * 0.70f +
                             illumination(normalX, normalY, normalZ, rightLight) * 0.10f +
                             illumination(normalX, normalY, normalZ, oppositeLight) * 0.10f +
                             illumination(normalX, normalY, normalZ, leftLight) * 0.10f +
-                            microRelief
+                            reliefTint
                         ).coerceIn(0f, 1f)
                 } else {
                     0f
@@ -505,6 +524,44 @@ class ElevationGrid(
             }
         }
         return LocalStatistics(residual, roughness)
+    }
+
+    /** Elevation minus the local mean. No variance, so the default hillshade stays cheaper than mode 3. */
+    private fun localMeanResidual(elevations: FloatArray, radius: Int): FloatArray {
+        val stride = width + 1
+        val sum = DoubleArray((width + 1) * (height + 1))
+        val validCount = IntArray(sum.size)
+        for (y in 0 until height) {
+            var rowSum = 0.0
+            var rowCount = 0
+            for (x in 0 until width) {
+                val i = y * width + x
+                if (isUsable(elevations, i)) {
+                    rowSum += elevations[i].toDouble()
+                    rowCount++
+                }
+                val o = (y + 1) * stride + x + 1
+                sum[o] = sum[y * stride + x + 1] + rowSum
+                validCount[o] = validCount[y * stride + x + 1] + rowCount
+            }
+        }
+        val residual = FloatArray(elevations.size)
+        forEachRowInParallel { y ->
+            val y0 = (y - radius).coerceAtLeast(0)
+            val y1 = (y + radius).coerceAtMost(height - 1)
+            for (x in 0 until width) {
+                val index = y * width + x
+                if (!isUsable(elevations, index)) continue
+                val x0 = (x - radius).coerceAtLeast(0)
+                val x1 = (x + radius).coerceAtMost(width - 1)
+                val count = validCount[(y1 + 1) * stride + x1 + 1] - validCount[y0 * stride + x1 + 1] -
+                    validCount[(y1 + 1) * stride + x0] + validCount[y0 * stride + x0]
+                if (count <= 0) continue
+                val mean = rectangleSum(sum, stride, x0, y0, x1, y1) / count
+                residual[index] = (elevations[index] - mean).toFloat()
+            }
+        }
+        return residual
     }
 
     private fun curvature(elevations: FloatArray, cellDistance: Float): FloatArray {
