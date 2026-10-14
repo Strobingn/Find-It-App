@@ -28,13 +28,28 @@ object AppMemoryBudget {
     /** Set after an OutOfMemoryError so later decodes stay on the low-memory profile. */
     @Volatile private var memoryPressure = false
 
+    internal val hasMemoryPressure: Boolean get() = memoryPressure
+
     val isLowMemory: Boolean
         get() = lowMemoryOverride ?: (memoryPressure || maxHeapBytes < LOW_MEMORY_HEAP_BYTES)
 
     /** Parallel LAZ decode worker count. Fewer workers only shrink the in-flight chunk window; output is identical. */
-    fun decodeWorkers(): Int {
+    @Volatile var calibratedDecodeWorkers: Int? = null
+    @Volatile var thermalStatus: Int = 0
+
+    val decodeHeadroomBytes: Long
+        get() {
+            val runtime=Runtime.getRuntime()
+            val spare=(runtime.maxMemory()-runtime.totalMemory()+runtime.freeMemory()).coerceAtLeast(0)
+            return minOf(reservedHeadroomBytes,spare/2).coerceAtLeast(1)
+        }
+
+    fun decodeWorkers(requested: Int? = null): Int {
         val cores = Runtime.getRuntime().availableProcessors()
-        return if (isLowMemory) cores.coerceIn(1, 2) else cores.coerceIn(1, 8)
+        if(thermalStatus>=4) return 1
+        if(thermalStatus>=3) return cores.coerceIn(1,2)
+        return if (memoryPressure || lowMemoryOverride == true) cores.coerceIn(1,2)
+        else minOf(cores.coerceAtLeast(1),requested ?: calibratedDecodeWorkers ?: if(isLowMemory) 4 else 6).coerceIn(1,8)
     }
 
     private val trimmables = java.util.Collections.synchronizedList(ArrayList<java.lang.ref.WeakReference<() -> Unit>>())
@@ -59,19 +74,17 @@ object AppMemoryBudget {
 
     /** Budget available to the decoded-terrain and derived-layer caches together. */
     val persistentCacheBudgetBytes: Long
-        get() = (maxHeapBytes - reservedHeadroomBytes).coerceAtLeast(96L * MIB)
+        get() = (maxHeapBytes - reservedHeadroomBytes).coerceAtLeast(0)
 
     /** Decoded DEM cache gets the larger share because reopening LAZ is the most expensive path. */
     fun terrainMemoryCacheBytes(): Long = shareOfPersistentBudget(
         fraction = 0.62,
-        minimum = 96L * MIB,
         maximum = 3L * GIB,
     )
 
     /** Derived terrain layers retain the remainder for rapid analysis-mode switching. */
     fun derivedLayerMemoryCacheBytes(): Long = shareOfPersistentBudget(
         fraction = 0.38,
-        minimum = 64L * MIB,
         maximum = 2L * GIB,
     )
 
@@ -86,11 +99,12 @@ object AppMemoryBudget {
         append(formatBytes(reservedHeadroomBytes))
     }
 
-    private fun shareOfPersistentBudget(fraction: Double, minimum: Long, maximum: Long): Long {
+    private fun shareOfPersistentBudget(fraction: Double, maximum: Long): Long {
         // Low-memory devices give caches half the usual share, leaving room for decode + bitmaps.
         val available = if (isLowMemory) persistentCacheBudgetBytes / 2 else persistentCacheBudgetBytes
         val requested = (available * fraction).toLong()
-        return min(maximum, max(minimum.coerceAtMost(available), requested.coerceAtMost(available)))
+        // The two shares together must fit the common budget, including small heaps.
+        return min(maximum, requested)
     }
 
     private fun formatBytes(bytes: Long): String = when {

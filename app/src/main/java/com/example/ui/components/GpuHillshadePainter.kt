@@ -27,7 +27,7 @@ internal class GpuHillshadePainter(private val data: com.example.data.GpuHeightD
             val alt = Math.toRadians(frame.altitude.coerceIn(1f,89f).toDouble())
             shader.setFloatUniform("uLight$i", (sin(az)*cos(alt)).toFloat(), (-cos(az)*cos(alt)).toFloat(), sin(alt).toFloat())
         }
-        shader.setFloatUniform("uContrast", frame.contrast.coerceIn(.5f,4f))
+        shader.setFloatUniform("uContrast", if(frame.mode in 9..11) frame.contrast.coerceIn(.4f,2.5f) else frame.contrast.coerceIn(.5f,4f))
         shader.setFloatUniform("uZ", frame.zScale.coerceIn(.25f,8f))
         shader.setIntUniform("uMode", frame.mode); shader.setIntUniform("uPalette", frame.palette)
         val saved = canvas.save()
@@ -72,6 +72,7 @@ internal class GpuHillshadePainter(private val data: com.example.data.GpuHeightD
                 float4 d=uHeight.eval(p);
                 if(d.a<0.5) return half4(0.0);
                 float c=rawHeight(d);
+                if(uMode==11) return half4(float3(floor(clamp(1.0-(1.0-c)*uContrast,0.0,1.0)*255.0)/255.0),1);
                 if(uMode==9 || uMode==10) {
                     float gray=floor(clamp(0.5+(c-1.570796327)/3.141592654*uContrast,0.0,1.0)*255.0)/255.0;
                     return half4(float3(gray),1);

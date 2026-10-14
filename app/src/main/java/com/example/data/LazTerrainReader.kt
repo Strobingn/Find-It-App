@@ -24,18 +24,27 @@ internal object LazTerrainReader {
     internal data class FocusWork(val chunks: Int, val sourceChunks: Int, val decodedPoints: Long)
     @Volatile internal var lastFocusWork: FocusWork? = null
     @Volatile internal var decodedChunkCacheEnabled = true
+    private val workerOverride = ThreadLocal<Int?>()
+    internal data class BenchmarkWork(val workers: Int, val chunks: Int, val decodedPoints: Long)
+    private val benchmarkWork = ThreadLocal<BenchmarkWork?>()
+    internal fun lastBenchmarkWork(): BenchmarkWork? = benchmarkWork.get()
     private val backendOverride = ThreadLocal<LazDecoderBackend?>()
     private val bypassChunkCache = object : InheritableThreadLocal<Boolean>() { override fun initialValue() = false }
     internal fun readForBenchmark(file: File, options: LidarImportOptions, backend: LazDecoderBackend,
-                                  shouldContinue: () -> Boolean): DemGenerator.LasLoadResult? {
+                                  workers: Int? = null, shouldContinue: () -> Boolean): DemGenerator.LasLoadResult? {
+        val oldWorkers = workerOverride.get(); workerOverride.set(workers); benchmarkWork.remove()
         val previous = backendOverride.get(); val cache = bypassChunkCache.get()
         backendOverride.set(backend); bypassChunkCache.set(true)
-        return try { read(file, options, shouldContinue) } finally { backendOverride.set(previous); bypassChunkCache.set(cache) }
+        return try { read(file, options, shouldContinue) } finally { backendOverride.set(previous); workerOverride.set(oldWorkers); bypassChunkCache.set(cache) }
     }
     private val decodedChunks = object : LinkedHashMap<String, DecodedChunk>(16, .75f, true) {}
     private var decodedChunkBytes = 0L
-    init { AppMemoryBudget.registerTrimmable { clearDecodedChunks() } }
-    internal fun clearDecodedChunks() = synchronized(decodedChunks) { decodedChunks.clear(); decodedChunkBytes = 0 }
+    private val nativeRanges=object : LinkedHashMap<String,ByteArray>(16,.75f,true) {}
+    private var nativeRangeBytes=0L
+    @Volatile internal var nativeRangeCacheHits=0
+    private val cacheTrimHook: () -> Unit = { clearDecodedChunks() }
+    init { AppMemoryBudget.registerTrimmable(cacheTrimHook) }
+    internal fun clearDecodedChunks() = synchronized(decodedChunks) { decodedChunks.clear(); decodedChunkBytes = 0; nativeRanges.clear();nativeRangeBytes=0;nativeRangeCacheHits=0 }
     private fun cachedChunk(key: String): DecodedChunk? = synchronized(decodedChunks) {
         if (decodedChunkCacheEnabled && bypassChunkCache.get() != true) decodedChunks[key] else null
     }
@@ -43,12 +52,28 @@ internal object LazTerrainReader {
         val bytes = chunk.count * 22L
         val cap = minOf(24L * 1024 * 1024, AppMemoryBudget.reservedHeadroomBytes / 3)
         if (!decodedChunkCacheEnabled || bypassChunkCache.get() == true || bytes > cap) return@synchronized
+        nativeRanges.clear();nativeRangeBytes=0
         decodedChunks.remove(key)?.let { decodedChunkBytes -= it.count * 22L }
         decodedChunks[key] = chunk; decodedChunkBytes += bytes
         while (decodedChunkBytes > cap) {
             val iterator = decodedChunks.entries.iterator()
             val entry = iterator.next(); decodedChunkBytes -= entry.value.count * 22L; iterator.remove()
         }
+    }
+
+    private fun nativeRange(key: String): ByteArray? = synchronized(decodedChunks) {
+        if(!decodedChunkCacheEnabled || bypassChunkCache.get()==true) null
+        else nativeRanges[key]?.also { nativeRangeCacheHits++ }
+    }
+    private fun retainNativeRange(key: String,buffer: java.nio.ByteBuffer,count: Int) = synchronized(decodedChunks) {
+        val bytes=count*LazRsNativeDecoder.RECORD_BYTES
+        val cap=minOf(24L shl 20,AppMemoryBudget.reservedHeadroomBytes/3)
+        if(!decodedChunkCacheEnabled || bypassChunkCache.get()==true || bytes>cap) return@synchronized
+        val values=ByteArray(bytes);buffer.duplicate().apply { position(0) }.get(values)
+        decodedChunks.clear();decodedChunkBytes=0
+        nativeRanges.remove(key)?.let { nativeRangeBytes-=it.size }
+        nativeRanges[key]=values;nativeRangeBytes+=bytes
+        while(nativeRangeBytes>cap) { val iterator=nativeRanges.entries.iterator();val first=iterator.next();nativeRangeBytes-=first.value.size;iterator.remove() }
     }
 
     private const val DECODE_BATCH_POINTS = 32_768
@@ -753,9 +778,10 @@ internal object LazTerrainReader {
         } else IntArray(sourceChunks.toInt()) { it }
         if (selected.isEmpty()) return null
         // Keep the two-chunks-per-worker window within the device decode headroom.
-        val memoryWorkers = (AppMemoryBudget.reservedHeadroomBytes / (44L * chunkSize)).coerceIn(1, 8).toInt()
-        val workers = minOf(AppMemoryBudget.decodeWorkers(), selected.size, memoryWorkers)
+        val memoryWorkers = (AppMemoryBudget.decodeHeadroomBytes / (44L * chunkSize)).coerceIn(1, 8).toInt()
+        val workers = minOf(AppMemoryBudget.decodeWorkers(workerOverride.get()), selected.size, memoryWorkers)
         val selectedPoints = selected.sumOf { min(chunkSize.toLong(), pointCount - it.toLong() * chunkSize) }
+        benchmarkWork.set(BenchmarkWork(workers,selected.size,selectedPoints))
         if ((backendOverride.get() ?: LazDecoderSettings.resolve()) == LazDecoderBackend.NATIVE_LAZ_RS && LazRsNativeDecoder.isAvailable) {
             val native = runCatching {
                 readNativeRanges(file, header, limited, selected, chunkSize, workers, selectedPoints, shouldContinue, onProgress)
@@ -944,7 +970,8 @@ internal object LazTerrainReader {
             val buffer = java.nio.ByteBuffer.allocateDirect(it.maxBatch * LazRsNativeDecoder.RECORD_BYTES)
                 .order(java.nio.ByteOrder.LITTLE_ENDIAN)
             val rasterizer = newRasterizer(header.withUnits(file), options, header.pointCount)
-            val builder = if (options.focusBounds == null &&
+            val builder = if (options.focusBounds == null && chunkIndexEnabled &&
+                LazChunkIndex.load(file,header.pointCount,chunkSize)==null &&
                 LazChunkIndex.supported(header.pointCount, chunkSize, header.minX, header.maxX, header.minY, header.maxY))
                 LazChunkIndex.Builder(header.pointCount, chunkSize, header.minX, header.maxX, header.minY, header.maxY, header.pointFormat)
                 else null
@@ -958,17 +985,24 @@ internal object LazTerrainReader {
                 while (start < end) {
                     if (!shouldContinue()) return@use null
                     val count = minOf(end - start, it.maxBatch.toLong()).toInt()
-                    val n = TerrainStageProfiler.stage("inflate_native", "$count records") { it.read(start, count, buffer) }
-                    check(n == count) { "Native range ended after $n of $count points" }
-                    TerrainStageProfiler.stage("bin_native", "$count records") {
-                        buffer.position(0)
+                    val key="${file.canonicalPath}|$identityLength|$identityModified|$start|$count|native-abi2"
+                    val retained=nativeRange(key)
+                    val packed=if(retained!=null) java.nio.ByteBuffer.wrap(retained).order(java.nio.ByteOrder.LITTLE_ENDIAN) else {
+                        val n=TerrainStageProfiler.stage("inflate_native", "$count records") { it.read(start,count,buffer) }
+                        check(n==count) { "Native range ended after $n of $count points" }
+                        if(!shouldContinue()) return@use null
+                        retainNativeRange(key,buffer,count)
+                        buffer
+                    }
+                    TerrainStageProfiler.stage("bin_native", "$count records · raw cache=${retained!=null}") {
+                        packed.position(0)
                         repeat(count) {
-                            val x = buffer.int * header.scaleX + header.offsetX
-                            val y = buffer.int * header.scaleY + header.offsetY
-                            val z = (buffer.int * header.scaleZ + header.offsetZ).toFloat()
-                            val classification = buffer.get().toInt() and 255
-                            val flags = buffer.get().toInt() and 255
-                            buffer.short
+                            val x = packed.int * header.scaleX + header.offsetX
+                            val y = packed.int * header.scaleY + header.offsetY
+                            val z = (packed.int * header.scaleZ + header.offsetZ).toFloat()
+                            val classification = packed.get().toInt() and 255
+                            val flags = packed.get().toInt() and 255
+                            packed.short
                             builder?.add(x, y, classification, flags and 2 != 0)
                             rasterizer.addPoint(x, y, z, classification, flags and 1 != 0, flags and 2 != 0)
                         }

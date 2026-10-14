@@ -77,10 +77,17 @@ class ElevationGrid(
                                   shouldContinue: () -> Boolean): FloatArray {
         val key=Triple(vegetation,radius,negative)
         if(opennessKey==key) opennessValues?.let { return it }
-        val values=TerrainOpenness.compute(this,vegetation,radius,negative,shouldContinue)
+        val values=TerrainDerivedFields.field(this,if(negative) "negative-openness" else "positive-openness",vegetation,radius,shouldContinue) {
+            TerrainOpenness.compute(this,vegetation,radius,negative,shouldContinue=shouldContinue)
+        }
         opennessKey=key; opennessValues=values
         return values
     }
+
+    internal fun skyViewAnalysis(vegetation: Float, radius: Float, shouldContinue: () -> Boolean): FloatArray =
+        TerrainDerivedFields.field(this,"sky-view-factor",vegetation,radius,shouldContinue) {
+            TerrainOpenness.compute(this,vegetation,radius,false,skyView=true,shouldContinue=shouldContinue)
+        }
 
     /** 0 shows the full surface model; 1 shows the extracted bare-earth model. */
     fun getElevationAt(col: Int, row: Int, vegetationFilter: Float): Float {
@@ -156,11 +163,14 @@ class ElevationGrid(
             arr
         }
 
-        val analysisRadius = (featureScaleMeters.coerceAtLeast(cellDistance) / cellDistance)
-            .toInt()
-            .coerceIn(1, max(1, min(width, height) / 4))
+        val analysisRadiusX = (featureScaleMeters / cellSizeXMeters).toInt().coerceIn(0,(width-1).coerceAtLeast(0))
+        val analysisRadiusY = (featureScaleMeters / cellSizeYMeters).toInt().coerceIn(0,(height-1).coerceAtLeast(0))
         val local = if (visualizationMode == 3 || visualizationMode == 5) {
-            cachedLocal ?: localStatistics(elevations, analysisRadius).also { stats ->
+            val computed by lazy { localStatistics(elevations, analysisRadiusX, analysisRadiusY) }
+            cachedLocal ?: LocalStatistics(
+                TerrainDerivedFields.field(this,"local-relief-metric",vegetationFilter,featureScaleMeters,shouldContinue) { computed.residual },
+                TerrainDerivedFields.field(this,"local-roughness-metric",vegetationFilter,featureScaleMeters,shouldContinue) { computed.roughness },
+            ).also { stats ->
                 cachedLocal = stats
                 cachedResidualScale = robustMagnitudeScale(stats.residual)
                 cachedRoughnessScale = robustMagnitudeScale(stats.roughness)
@@ -169,13 +179,14 @@ class ElevationGrid(
             null
         }
         val curvatureArr = if (visualizationMode == 4 || visualizationMode == 5) {
-            cachedCurvature ?: curvature(elevations).also { arr ->
+            cachedCurvature ?: TerrainDerivedFields.field(this,"curvature",vegetationFilter,0f,shouldContinue) { curvature(elevations) }.also { arr ->
                 cachedCurvature = arr
                 cachedCurvatureScale = robustMagnitudeScale(arr)
             }
         } else {
             null
         }
+        val skyView = if(visualizationMode == 11) skyViewAnalysis(vegetationFilter,featureScaleMeters.coerceAtLeast(.01f),shouldContinue) else null
         val openness = if(visualizationMode in 9..10) opennessAnalysis(vegetationFilter,
             featureScaleMeters.coerceAtLeast(.01f),visualizationMode==10,shouldContinue) else null
         val residualScale = cachedResidualScale
@@ -191,7 +202,7 @@ class ElevationGrid(
         val contrastValue = contrast.coerceIn(0.5f, 4f)
         val zMultiplier = zScale.coerceIn(0.25f, 8f)
         val contourInterval = contourIntervalMeters.coerceAtLeast(0f)
-        val boundedMode = visualizationMode.coerceIn(0, 10)
+        val boundedMode = visualizationMode.coerceIn(0, 11)
 
         // Sun direction is constant across the raster, but shade() used to recompute
         // toRadians/sin/cos from it on every pixel - and it was called five times per pixel
@@ -324,7 +335,14 @@ class ElevationGrid(
                     9, 10 -> {
                         val angle=openness!![index]
                         if(!angle.isFinite()) Color.TRANSPARENT else {
-                            val gray=((.5f+(angle-(Math.PI/2).toFloat())/Math.PI.toFloat()*analysisSensitivity)*255f).toInt().coerceIn(0,255)
+                            val gray=((.5f+(angle-(Math.PI/2).toFloat())/Math.PI.toFloat()*analysisSensitivity.coerceIn(.4f,2.5f))*255f).toInt().coerceIn(0,255)
+                            Color.rgb(gray,gray,gray)
+                        }
+                    }
+                    11 -> {
+                        val factor=skyView!![index]
+                        if(!factor.isFinite()) Color.TRANSPARENT else {
+                            val gray=((1f-(1f-factor)*analysisSensitivity.coerceIn(.4f,2.5f)).coerceIn(0f,1f)*255f).toInt()
                             Color.rgb(gray,gray,gray)
                         }
                     }
@@ -458,7 +476,7 @@ class ElevationGrid(
     private fun isUsable(elevations: FloatArray, i: Int): Boolean =
         validData[i] && elevations[i].isFinite()
 
-    private fun localStatistics(elevations: FloatArray, radius: Int): LocalStatistics {
+    internal fun localStatistics(elevations: FloatArray, radiusX: Int, radiusY: Int): LocalStatistics {
         // NaN-aware box statistics: no-data cells (NaN since the DEM stopped nearest-filling)
         // are excluded from the sums and counted separately so they cannot poison the
         // integral image for every cell below/right of them.
@@ -487,13 +505,13 @@ class ElevationGrid(
         val residual = FloatArray(elevations.size)
         val roughness = FloatArray(elevations.size)
         forEachRowInParallel { y ->
-            val y0 = (y - radius).coerceAtLeast(0)
-            val y1 = (y + radius).coerceAtMost(height - 1)
+            val y0 = (y - radiusY).coerceAtLeast(0)
+            val y1 = (y + radiusY).coerceAtMost(height - 1)
             for (x in 0 until width) {
                 val index = y * width + x
                 if (!isUsable(elevations, index)) continue
-                val x0 = (x - radius).coerceAtLeast(0)
-                val x1 = (x + radius).coerceAtMost(width - 1)
+                val x0 = (x - radiusX).coerceAtLeast(0)
+                val x1 = (x + radiusX).coerceAtMost(width - 1)
                 val count = validCount[(y1 + 1) * stride + x1 + 1] - validCount[y0 * stride + x1 + 1] -
                     validCount[(y1 + 1) * stride + x0] + validCount[y0 * stride + x0]
                 if (count <= 0) continue
@@ -696,7 +714,7 @@ class ElevationGrid(
     private fun normalizeDegrees(value: Float): Float = ((value % 360f) + 360f) % 360f
 
     private class LightVector(val lx: Float, val ly: Float, val lz: Float)
-    private data class LocalStatistics(val residual: FloatArray, val roughness: FloatArray)
+    internal data class LocalStatistics(val residual: FloatArray, val roughness: FloatArray)
 }
 
 /** Downslope direction clockwise from north; grid Y grows south. */

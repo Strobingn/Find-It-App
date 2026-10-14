@@ -255,6 +255,10 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        com.example.data.TerrainStageProfiler.stage("gpu_submission") { drawFrame() }
+    }
+
+    private fun drawFrame() {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         val activeScene = scene ?: return
         activeScene.heightmap?.let {

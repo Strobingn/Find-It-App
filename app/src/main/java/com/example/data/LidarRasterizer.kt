@@ -434,6 +434,7 @@ internal class LidarRasterizer(
                 cellSizeYMeters = cellY,
             ),
             totalPointsRead = pointsDecoded.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            decodedPoints = pointsDecoded,
             groundPointsUsed = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
             } else {

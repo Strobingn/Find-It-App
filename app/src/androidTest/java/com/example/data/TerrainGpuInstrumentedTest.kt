@@ -24,7 +24,7 @@ class TerrainGpuInstrumentedTest {
         val grid=ElevationGrid(w,h,FloatArray(w*h){100f+(it%w)*.2f+(it/w)*.3f},FloatArray(w*h),3f,valid,
             cellSizeXMeters=2f,cellSizeYMeters=3f)
         val data=GpuHeightData.build(grid,1f,shouldContinue={true})
-        for(mode in listOf(0,1,2,6,7)) for(palette in 0..2) {
+        for(mode in listOf(0,1,2,6,7,9,10,11)) for(palette in 0..2) {
             val cpu=grid.renderHillshade(315f,35f,1f,palette,contrast=1.3f,visualizationMode=mode)
             val reader=ImageReader.newInstance(w,h,PixelFormat.RGBA_8888,2)
             val renderer=HardwareRenderer().apply { setSurface(reader.surface); setOpaque(false) }
@@ -32,7 +32,12 @@ class TerrainGpuInstrumentedTest {
             try {
                 val canvas=node.beginRecording(w,h)
                 canvas.drawColor(Color.TRANSPARENT,PorterDuff.Mode.CLEAR)
-                GpuHillshadePainter(data).draw(canvas,GpuTerrainFrame(data,315f,35f,1.3f,1f,mode,palette),0f,0f,w.toFloat(),h.toFloat())
+                val frameData=if(mode in 9..11) {
+                    val values=if(mode==11) grid.skyViewAnalysis(1f,6f){true} else grid.opennessAnalysis(1f,6f,mode==10){true}
+                    val analysis=ElevationGrid(w,h,values,FloatArray(w*h),grid.cellSizeMeters,grid.validData,grid.interpolatedData,grid.cellSizeXMeters,grid.cellSizeYMeters)
+                    GpuHeightData.build(analysis,1f,shouldContinue={true})
+                } else data
+                GpuHillshadePainter(frameData).draw(canvas,GpuTerrainFrame(frameData,315f,35f,if(mode in 9..11) 1.2f else 1.3f,1f,mode,palette),0f,0f,w.toFloat(),h.toFloat())
                 node.endRecording(); renderer.setContentRoot(node)
                 renderer.createRenderRequest().setWaitForPresent(true).syncAndDraw()
                 var image=reader.acquireNextImage()
@@ -65,6 +70,19 @@ class TerrainGpuInstrumentedTest {
             }
         } finally { file.delete() }
     }
+    @Test fun balancedWorkerBenchmarkValidatesEveryTimedTerrain() {
+        val instrumentation=InstrumentationRegistry.getInstrumentation()
+        val file=File(instrumentation.targetContext.cacheDir,"worker-benchmark.laz")
+        val cache=File(instrumentation.targetContext.cacheDir,"worker-benchmark-cache")
+        try {
+            instrumentation.context.assets.open("laz/viewport-chunks.laz").use { input -> file.outputStream().use { input.copyTo(it) } }
+            val result=TerrainDecoderBenchmark.run(file,LidarImportOptions(rasterResolution=64),cache)
+            assertTrue(result.trials.any { it.backend==LazDecoderBackend.NATIVE_LAZ_RS })
+            assertTrue(result.trials.all { it.samples.size==3 && it.actualWorkers in 1..6 })
+            assertTrue(result.firstReadMs>0)
+            assertEquals(setOf(256,512),result.tileTrials.map { it.cells }.toSet())
+        } finally { file.delete();cache.deleteRecursively() }
+    }
     @Test fun floatHeightTextureCompilesAndDrawsOnGles3() {
         val display=EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         assertTrue(EGL14.eglInitialize(display,IntArray(2),0,IntArray(2),0))
@@ -76,11 +94,15 @@ class TerrainGpuInstrumentedTest {
         assertTrue(EGL14.eglMakeCurrent(display,surface,surface,context))
         try {
             GLES30.glViewport(0,0,96,96)
+            GLES30.glClearColor(0f,0f,0f,0f);GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
             val grid=ElevationGrid(128,96,FloatArray(128*96){40f},FloatArray(128*96),3f,cellSizeXMeters=2f,cellSizeYMeters=3f)
             val m=FloatArray(16); android.opengl.Matrix.setIdentityM(m,0)
             val renderer=HeightfieldGlRenderer()
             renderer.draw(HeightmapCdlod.pack(grid),m,96,96,1f)
             assertEquals(GLES30.GL_NO_ERROR,GLES30.glGetError())
+            val pixels=java.nio.ByteBuffer.allocateDirect(96*96*4)
+            GLES30.glReadPixels(0,0,96,96,GLES30.GL_RGBA,GLES30.GL_UNSIGNED_BYTE,pixels)
+            assertTrue("Heightfield draw produced no terrain pixels",(0 until 96*96).any { (pixels.get(it*4).toInt() and 255)>0 })
             renderer.release()
         } finally {
             EGL14.eglMakeCurrent(display,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_CONTEXT)

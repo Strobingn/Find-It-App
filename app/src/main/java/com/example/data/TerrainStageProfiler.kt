@@ -12,7 +12,7 @@ import kotlin.system.measureNanoTime
 object TerrainStageProfiler {
     const val TAG = "FindItTerrainPerf"
 
-    data class StageSample(val name: String, val millis: Double, val detail: String)
+    data class StageSample(val name: String, val millis: Double, val detail: String, val count: Int = 1, val totalMillis: Double = millis)
 
     @Volatile
     var lastReport: String = ""
@@ -57,13 +57,13 @@ object TerrainStageProfiler {
     fun snapshot(): List<StageSample> = totalsMs.keys.sorted().map { name ->
         val n = counts[name] ?: 1
         val total = totalsMs[name] ?: 0.0
-        StageSample(name, total / n, lastDetail[name].orEmpty())
+        StageSample(name, total / n, lastDetail[name].orEmpty(),n,total)
     }
 
     fun formatReport(): String {
         val rows = snapshot()
         lastReport = buildString {
-            appendLine("Terrain stage timings")
+            appendLine("Terrain stage timings · mean / samples / sum (worker sums overlap; not sequential wall time)")
             if (rows.isEmpty()) {
                 appendLine("no samples")
             } else {
@@ -71,15 +71,18 @@ object TerrainStageProfiler {
                     appendLine(
                         String.format(
                             Locale.US,
-                            "  %-22s %8.2f ms  %s",
+                            "  %-22s mean=%8.2f ms n=%d sum=%.2f ms  %s",
                             row.name,
                             row.millis,
+                            row.count,
+                            row.totalMillis,
                             row.detail,
                         ),
                     )
                 }
             }
-            append(TerrainMemoryMonitor.snapshot().format())
+            appendLine(TerrainMemoryMonitor.snapshot().format())
+            append(TerrainFrameProfiler.report())
         }.trimEnd()
         emit(lastReport)
         return lastReport

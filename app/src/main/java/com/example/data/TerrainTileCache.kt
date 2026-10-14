@@ -5,8 +5,9 @@ import java.io.File
 import kotlin.math.*
 
 /** Stable source-coordinate lattice. Each tile has fixed interpolation context, independent of pan. */
-internal class TerrainTileCache(directory: File) {
-    private val disk = LazTerrainDiskCache(directory, 256L * 1024 * 1024)
+internal class TerrainTileCache(directory: File, private val tileCells: Int = TILE) {
+    init { require(tileCells==256 || tileCells==512) }
+    private val disk = LazTerrainDiskCache(if(tileCells==512) directory else File(directory,"tile-size-$tileCells"), 128L * 1024 * 1024)
     private val memory = LazTerrainMemoryCache(maxBytes = 24L * 1024 * 1024)
     data class Outcome(val terrain: DemGenerator.TerrainLoadResult, val bounds: NormalizedRasterBounds,
                        val hits: Int, val misses: Int)
@@ -19,7 +20,8 @@ internal class TerrainTileCache(directory: File) {
     fun refine(file: File, options: LidarImportOptions, shouldContinue: () -> Boolean = { true },
                progress: (Float, String) -> Unit = { _, _ -> }): Outcome? {
         val info = LasCrsReader.read(file) ?: return null
-        val safe = LazTerrainReader.focusDecodeOptions(file, options.sanitized(), shouldContinue)
+        val safe = if(options.fixedWidth!=null && options.fixedHeight!=null) options.sanitized()
+            else LazTerrainReader.focusDecodeOptions(file, options.sanitized(), shouldContinue)
         val focus = safe.focusBounds ?: return null
         val plan = plan(info.maxX - info.minX, info.maxY - info.minY, focus, safe.rasterResolution)
         val units = LasTerrainUnits.read(file)
@@ -30,14 +32,14 @@ internal class TerrainTileCache(directory: File) {
         val valid = BooleanArray(elevations.size)
         val interpolated = BooleanArray(elevations.size)
         val tiles = mutableListOf<Pair<Int, Int>>()
-        for (ty in plan.y0.coerceAtMost(plan.ny-1) / TILE..plan.y1.coerceAtMost(plan.ny-1) / TILE) for (tx in plan.x0.coerceAtMost(plan.nx-1) / TILE..plan.x1.coerceAtMost(plan.nx-1) / TILE) tiles += tx to ty
+        for (ty in plan.y0.coerceAtMost(plan.ny-1) / tileCells..plan.y1.coerceAtMost(plan.ny-1) / tileCells) for (tx in plan.x0.coerceAtMost(plan.nx-1) / tileCells..plan.x1.coerceAtMost(plan.nx-1) / tileCells) tiles += tx to ty
         var hits = 0; var misses = 0
         for ((ordinal, coordinate) in tiles.withIndex()) {
             if (!shouldContinue()) return null
             val (tx, ty) = coordinate
-            val cx0 = tx * TILE; val cy0 = ty * TILE
-            val cx1 = if(cx0+TILE>=plan.nx) plan.nx else cx0+TILE-1
-            val cy1 = if(cy0+TILE>=plan.ny) plan.ny else cy0+TILE-1
+            val cx0 = tx * tileCells; val cy0 = ty * tileCells
+            val cx1 = if(cx0+tileCells>=plan.nx) plan.nx else cx0+tileCells-1
+            val cy1 = if(cy0+tileCells>=plan.ny) plan.ny else cy0+tileCells-1
             // 256 nodes cover the two closing-radius passes; source edge context is clipped.
             val px0 = maxOf(0, cx0 - HALO); val py0 = maxOf(0, cy0 - HALO)
             val px1 = minOf(plan.nx, cx1 + HALO); val py1 = minOf(plan.ny, cy1 + HALO)
@@ -95,13 +97,18 @@ internal class TerrainTileCache(directory: File) {
             require(rangeX > 0 && rangeY > 0 && rangeX.isFinite() && rangeY.isFinite())
             val longSide = max(rangeX, rangeY)
             val target = max(rangeX * (focus.right - focus.left), rangeY * (focus.bottom - focus.top)) / (resolution - 1).coerceAtLeast(1)
-            val intervals = 1 shl floor(log2(longSide / target)).toInt().coerceIn(6, 24)
-            val nx = (intervals * rangeX / longSide).roundToInt().coerceAtLeast(47)
-            val ny = (intervals * rangeY / longSide).roundToInt().coerceAtLeast(47)
-            val x0 = floor(focus.left * nx).toInt().coerceIn(0, nx - 1)
-            val y0 = floor(focus.top * ny).toInt().coerceIn(0, ny - 1)
-            return Plan(nx, ny, x0, y0, ceil(focus.right * nx).toInt().coerceIn(x0 + 1, nx),
-                ceil(focus.bottom * ny).toInt().coerceIn(y0 + 1, ny))
+            var intervals = 1 shl floor(log2(longSide / target)).toInt().coerceIn(6, 24)
+            while(true) {
+                val nx = (intervals * rangeX / longSide).roundToInt().coerceAtLeast(47)
+                val ny = (intervals * rangeY / longSide).roundToInt().coerceAtLeast(47)
+                val x0 = floor(focus.left * nx).toInt().coerceIn(0, nx - 1)
+                val y0 = floor(focus.top * ny).toInt().coerceIn(0, ny - 1)
+                val result=Plan(nx, ny, x0, y0, ceil(focus.right * nx).toInt().coerceIn(x0 + 1, nx),
+                    ceil(focus.bottom * ny).toInt().coerceIn(y0 + 1, ny))
+                // Outward lattice snapping can add two nodes. Keep the declared raster/texture limit.
+                if(maxOf(result.width,result.height)<=resolution || intervals==64) return result
+                intervals/=2
+            }
         }
     }
 }

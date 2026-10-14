@@ -149,7 +149,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val surveyBoundaryDao = AppDatabase.get(application).surveyBoundaryDao()
     private val pendingSyncDao = AppDatabase.get(application).pendingSyncDao()
     private val refinementMemoryCache = LazTerrainMemoryCache()
-    private val terrainTileCache = com.example.data.TerrainTileCache(File(application.cacheDir, "terrain-tiles"))
+    private val terrainTileDirectory=File(application.cacheDir,"terrain-tiles")
+    private var terrainTileCells=com.example.data.LazDecoderSettings.terrainTileCells
+    private var terrainTileCache=com.example.data.TerrainTileCache(terrainTileDirectory,terrainTileCells)
+    private fun activeTerrainTileCache(): com.example.data.TerrainTileCache {
+        val cells=if(com.example.data.AppMemoryBudget.hasMemoryPressure) 256 else com.example.data.LazDecoderSettings.terrainTileCells
+        if(cells!=terrainTileCells) {
+            terrainTileCells=cells
+            terrainTileCache=com.example.data.TerrainTileCache(terrainTileDirectory,cells)
+        }
+        return terrainTileCache
+    }
+    init { com.example.data.TerrainDerivedFields.configure(File(application.cacheDir,"terrain-derived-fields")) }
     private val _gpuTerrainFrame = MutableStateFlow<com.example.data.GpuTerrainFrame?>(null)
     val gpuTerrainFrame = _gpuTerrainFrame.asStateFlow()
     private var gpuHeightData: com.example.data.GpuHeightData? = null
@@ -981,11 +992,12 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     if (android.os.Build.VERSION.SDK_INT >= 33 &&
                         com.example.data.GpuTerrainFrame.supported(mode, liveKey.overlayType, liveKey.contourIntervalMeters)) {
                         val data = gpuHeightData?.takeIf { it.gridIdentity === liveGrid && it.vegetation == liveKey.vegetationFilter &&
-                            it.analysisMode == (if(mode in 9..10) mode else -1) &&
-                            (mode !in 9..10 || it.featureScale == liveKey.featureScaleMeters) }
+                            it.analysisMode == (if(mode in 9..11) mode else -1) &&
+                            (mode !in 9..11 || it.featureScale == liveKey.featureScaleMeters) }
                             ?: withContext(Dispatchers.Default) {
-                                if(mode in 9..10) {
-                                    val values=liveGrid.opennessAnalysis(liveKey.vegetationFilter,liveKey.featureScaleMeters,mode==10) { generation==renderGeneration }
+                                if(mode in 9..11) {
+                                    val values=if(mode==11) liveGrid.skyViewAnalysis(liveKey.vegetationFilter,liveKey.featureScaleMeters) { generation==renderGeneration }
+                                        else liveGrid.opennessAnalysis(liveKey.vegetationFilter,liveKey.featureScaleMeters,mode==10) { generation==renderGeneration }
                                     val analysis=com.example.data.ElevationGrid(liveGrid.width,liveGrid.height,values,FloatArray(values.size),liveGrid.cellSizeMeters,
                                         liveGrid.validData,liveGrid.interpolatedData,liveGrid.cellSizeXMeters,liveGrid.cellSizeYMeters)
                                     com.example.data.GpuHeightData.build(analysis,liveKey.vegetationFilter,{generation==renderGeneration},liveGrid,mode,liveKey.featureScaleMeters)
@@ -993,7 +1005,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                             }.also { gpuHeightData = it }
                         if (generation == renderGeneration) _gpuTerrainFrame.value = com.example.data.GpuTerrainFrame(
                             data, liveKey.sunAzimuth, liveKey.sunAltitude,
-                            if(mode in 9..10) liveKey.analysisSensitivity else liveKey.contrast, liveKey.zScale, mode, liveKey.palette)
+                            if(mode in 9..11) liveKey.analysisSensitivity else liveKey.contrast, liveKey.zScale, mode, liveKey.palette)
                         // CPU snapshots remain available for exports, AI, Google Maps and older devices.
                         // Settled controls get one snapshot; dragging updates only shader uniforms.
                         if (_hillshadeBitmap.value != null) delay(180)
@@ -1163,7 +1175,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             var loadedFromCache = false
             val result = runCatching {
                 sourceFile?.let { file ->
-                    val outcome = terrainTileCache.refine(file, options, shouldContinue = { refineContext.isActive }, progress = { fraction, message ->
+                    val outcome = activeTerrainTileCache().refine(file, options, shouldContinue = { refineContext.isActive }, progress = { fraction, message ->
                         _terrainRefinementProgress.value = TerrainRefinementProgress(0.04f + fraction * .86f, message)
                     })
                     outcome?.also {
@@ -1546,7 +1558,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
     fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateContrast(value: Float) { _contrast.value = value.coerceIn(1f, 2.5f); scheduleRender() }
-    fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 10); scheduleRender() }
+    fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 11); scheduleRender() }
     fun updateOverlayType(value: Int) { _overlayType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateOverlayOpacity(value: Float) { _overlayOpacity.value = value.coerceIn(0.1f, 0.9f); scheduleRender() }
     fun updateGridSpacing(value: Float) { _gridSpacing.value = value.coerceIn(0f, 10f) }
@@ -2195,6 +2207,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         8 -> "Canopy height"
         9 -> "Positive openness"
         10 -> "Negative openness"
+        11 -> "Sky-view factor"
         else -> "Terrain"
     }
 

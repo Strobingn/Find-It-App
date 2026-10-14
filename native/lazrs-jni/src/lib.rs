@@ -9,6 +9,24 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::sync::{atomic::{AtomicI64, Ordering}, Mutex, OnceLock};
 
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+extern "C" {
+    fn ATrace_beginSection(name: *const std::os::raw::c_char);
+    fn ATrace_endSection();
+}
+struct TraceSpan;
+impl TraceSpan {
+    fn new(_name: &str) -> Self {
+        #[cfg(target_os = "android")]
+        if let Ok(name) = std::ffi::CString::new(_name) { unsafe { ATrace_beginSection(name.as_ptr()); } }
+        Self
+    }
+}
+impl Drop for TraceSpan {
+    fn drop(&mut self) { #[cfg(target_os = "android")] unsafe { ATrace_endSection(); } }
+}
+
 const RECORD_BYTES: usize = 16;
 const MAX_SCRATCH: usize = 16 * 1024 * 1024;
 struct Decoder {
@@ -24,6 +42,7 @@ static NEXT: AtomicI64 = AtomicI64::new(1);
 static READERS: OnceLock<Mutex<HashMap<i64, Decoder>>> = OnceLock::new();
 fn readers() -> &'static Mutex<HashMap<i64, Decoder>> { READERS.get_or_init(|| Mutex::new(HashMap::new())) }
 fn open(path: &str, workers: usize) -> Result<Decoder, ()> {
+    let _trace = TraceSpan::new("FindIt:native_laz_open");
     let source = Reader::from_path(path).map_err(|_| ())?;
     let h = source.header();
     let data = h.vlrs().iter().chain(h.evlrs()).find(|v| v.user_id == "laszip encoded" && v.record_id == 22204).ok_or(())?;
@@ -39,7 +58,7 @@ fn open(path: &str, workers: usize) -> Result<Decoder, ()> {
     file.seek(SeekFrom::Start(raw.offset_to_point_data as u64)).map_err(|_| ())?;
     Ok(Decoder {
         reader: ParLasZipDecompressor::new(file, vlr).map_err(|_| ())?,
-        pool: rayon::ThreadPoolBuilder::new().num_threads(workers.clamp(1,8)).build().map_err(|_| ())?,
+        pool: rayon::ThreadPoolBuilder::new().num_threads(workers.clamp(1,8)).thread_name(|id| format!("laz-rs-{id}")).build().map_err(|_| ())?,
         record_len: len, format, points, position: 0, scratch: Vec::new(),
     })
 }
@@ -60,6 +79,7 @@ fn pack(raw: &[u8], len: usize, format: u8, out: &mut [u8]) -> Result<usize, ()>
 }
 impl Decoder {
     fn read(&mut self, start: u64, count: usize, out: &mut [u8]) -> Result<usize, ()> {
+        let _trace = TraceSpan::new("FindIt:native_laz_batch");
         if count == 0 || count > self.max_batch() || start.checked_add(count as u64).filter(|end| *end <= self.points).is_none() || out.len() < count * RECORD_BYTES { return Err(()); }
         if self.position != start { self.reader.seek(start).map_err(|_| ())?; }
         self.scratch.resize(count * self.record_len, 0);

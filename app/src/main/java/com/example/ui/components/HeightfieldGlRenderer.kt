@@ -3,7 +3,7 @@ package com.example.ui.components
 import android.opengl.GLES30 as GL
 import com.example.data.HeightmapTexture
 import com.example.data.TerrainStageProfiler
-import com.example.data.TerrainFrustumCuller
+import com.example.data.AdaptiveTerrainLod
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.*
@@ -16,15 +16,21 @@ internal class HeightfieldGlRenderer {
     private var indices = 0
     private var source: HeightmapTexture? = null
     private val uniforms = HashMap<String, Int>()
+    private var plan: AdaptiveTerrainLod.Plan? = null
+    private var planSource: HeightmapTexture? = null
+    private var planMatrix = FloatArray(16)
+    private var planWidth = 0
+    private var planHeight = 0
     private var minZ = 0f
     private var maxZ = 1f
-    fun contextLost() { program = 0; texture = 0; vertices = 0; indices = 0; source = null; uniforms.clear() }
+    fun contextLost() { program = 0; texture = 0; vertices = 0; indices = 0; source = null; plan = null; planSource = null; uniforms.clear() }
     fun release() {
         if (texture != 0) GL.glDeleteTextures(1,intArrayOf(texture),0)
         if (vertices != 0) GL.glDeleteBuffers(2,intArrayOf(vertices,indices),0)
         if (program != 0) GL.glDeleteProgram(program)
         contextLost()
     }
+    @Suppress("UNUSED_PARAMETER")
     fun draw(height: HeightmapTexture, mvp: FloatArray, viewWidth: Int, viewHeight: Int, zoom: Float) {
         if (program == 0) setup()
         if (source !== height) TerrainStageProfiler.stage("height_texture_upload", "${height.width}x${height.height}") {
@@ -51,25 +57,25 @@ internal class HeightfieldGlRenderer {
         GL.glUniform2f(uniform("uCell"),height.cellSizeXMeters,height.cellSizeYMeters)
         val span = max((height.width-1)*height.cellSizeXMeters,(height.height-1)*height.cellSizeYMeters).coerceAtLeast(.001f)
         GL.glUniform1f(uniform("uSpan"),span); GL.glUniform1f(uniform("uMinZ"),minZ)
-        val ratio=max(height.width,height.height)/(max(viewWidth,viewHeight).coerceAtLeast(1)*zoom.coerceAtLeast(.1f))
-        val step=1 shl ceil(log2(ratio.coerceAtLeast(1f))).toInt().coerceIn(0,4)
-        GL.glUniform1i(uniform("uStep"),step)
+        GL.glUniform2f(uniform("uView"),viewWidth.toFloat(),viewHeight.toFloat())
+        GL.glUniform1f(uniform("uTargetPixels"),AdaptiveTerrainLod.TARGET_PIXELS)
+        if(plan==null || planSource!==height || !planMatrix.contentEquals(mvp) || planWidth!=viewWidth || planHeight!=viewHeight) {
+            plan=TerrainStageProfiler.stage("adaptive_lod", "${viewWidth}x${viewHeight}") {
+                AdaptiveTerrainLod.select(height,mvp,viewWidth,viewHeight,minZ,maxZ)
+            }
+            planSource=height; mvp.copyInto(planMatrix); planWidth=viewWidth; planHeight=viewHeight
+        }
+        val selected=checkNotNull(plan)
+        GL.glUniform1i(uniform("uMaxLevel"),selected.maxLevel)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER,vertices)
         val attribute=GL.glGetAttribLocation(program,"aGrid")
         GL.glEnableVertexAttribArray(attribute); GL.glVertexAttribPointer(attribute,2,GL.GL_FLOAT,false,8,0)
         GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER,indices)
-        val planes=TerrainFrustumCuller.extractPlanes(mvp)
-        for (y in 0 until height.height-1 step 64*step) for (x in 0 until height.width-1 step 64*step) {
-            val x1=min(x+64*step,height.width-1); val y1=min(y+64*step,height.height-1)
-            val box=TerrainFrustumCuller.Aabb(
-                x*height.cellSizeXMeters/span*2f-(height.width-1)*height.cellSizeXMeters/span,
-                (height.height-1)*height.cellSizeYMeters/span-y1*height.cellSizeYMeters/span*2f,
-                0f,
-                x1*height.cellSizeXMeters/span*2f-(height.width-1)*height.cellSizeXMeters/span,
-                (height.height-1)*height.cellSizeYMeters/span-y*height.cellSizeYMeters/span*2f,
-                (maxZ-minZ)/span*2f)
-            if (!TerrainFrustumCuller.isVisible(box,planes)) continue
-            GL.glUniform2i(uniform("uOrigin"),x,y)
+        for (patch in selected.patches) {
+            GL.glUniform2i(uniform("uOrigin"),patch.x,patch.y)
+            GL.glUniform1i(uniform("uStep"),patch.step)
+            GL.glUniform1i(uniform("uLevel"),patch.level)
+            GL.glUniform1i(uniform("uEdges"),patch.edges)
             GL.glDrawElements(GL.GL_TRIANGLES,64*64*6,GL.GL_UNSIGNED_SHORT,0)
         }
         GL.glDisableVertexAttribArray(attribute)
@@ -105,35 +111,64 @@ internal class HeightfieldGlRenderer {
             in vec2 aGrid;
             uniform highp sampler2D uHeight;
             uniform mat4 uMvp; uniform ivec2 uSize; uniform ivec2 uOrigin; uniform int uStep;
+            uniform int uLevel; uniform int uMaxLevel; uniform int uEdges;
             uniform vec2 uCell; uniform float uSpan; uniform float uMinZ;
+            uniform vec2 uView; uniform float uTargetPixels;
             out vec2 vGrid; out float vLight;
             float zAt(ivec2 p,float center) {
                 float z=texelFetch(uHeight,clamp(p,ivec2(0),uSize-1),0).r;
                 return isnan(z)||isinf(z)?center:z;
             }
+            vec4 world(vec3 grid) {
+                vec2 extent=vec2(uSize-1)*uCell;
+                vec2 xy=(grid.xy*uCell*2.0-extent)/uSpan; xy.y=-xy.y;
+                return vec4(xy,(grid.z-uMinZ)*2.0/uSpan,1.0);
+            }
+            vec3 lattice(ivec2 raw,int level) {
+                int step=1<<level;
+                ivec2 p=raw/step*step;
+                if(raw.x==uSize.x-1) p.x=raw.x;
+                if(raw.y==uSize.y-1) p.y=raw.y;
+                return vec3(vec2(p),zAt(p,uMinZ));
+            }
+            float morph(vec3 grid,int step) {
+                vec4 p=uMvp*world(grid);
+                vec4 a=uMvp*world(grid+vec3(float(step),0,0));
+                vec4 b=uMvp*world(grid+vec3(0,float(step),0));
+                if(p.w<=0.00001 || a.w<=0.00001 || b.w<=0.00001) return 0.0;
+                float pixels=max(length((a.xy/a.w-p.xy/p.w)*uView*0.5),length((b.xy/b.w-p.xy/p.w)*uView*0.5));
+                return clamp(2.0-2.0*pixels/uTargetPixels,0.0,1.0);
+            }
             void main() {
-                ivec2 p=min(uOrigin+ivec2(aGrid)*uStep,uSize-1);
-                float z=texelFetch(uHeight,p,0).r;
-                if(isnan(z)||isinf(z)) z=uMinZ;
+                ivec2 raw=min(uOrigin+ivec2(aGrid)*uStep,uSize-1);
+                bool coarseEdge=(aGrid.x==0.0 && (uEdges&1)!=0)||(aGrid.x==64.0 && (uEdges&2)!=0)||
+                    (aGrid.y==0.0 && (uEdges&4)!=0)||(aGrid.y==64.0 && (uEdges&8)!=0);
+                int first=uLevel+(coarseEdge?1:0);
+                vec3 grid=lattice(raw,uMaxLevel+1);
+                for(int level=8;level>=0;level--) {
+                    if(level>uMaxLevel || level<first) continue;
+                    vec3 fine=lattice(raw,level);
+                    grid=mix(fine,grid,morph(fine,1<<level));
+                }
+                ivec2 p=clamp(ivec2(round(grid.xy)),ivec2(0),uSize-1);
+                float z=zAt(p,uMinZ);
                 float gx=(zAt(p+ivec2(1,0),z)-zAt(p-ivec2(1,0),z))/(2.0*uCell.x);
                 float gy=(zAt(p+ivec2(0,1),z)-zAt(p-ivec2(0,1),z))/(2.0*uCell.y);
                 vec3 n=normalize(vec3(-gx,gy,1.0));
                 vLight=0.28+0.72*max(dot(n,normalize(vec3(-0.45,0.65,0.8))),0.0);
-                vec2 extent=vec2(uSize-1)*uCell;
-                vec2 xy=(vec2(p)*uCell*2.0-extent)/uSpan; xy.y=-xy.y;
-                gl_Position=uMvp*vec4(xy,(z-uMinZ)*2.0/uSpan,1.0);
-                vGrid=vec2(p);
+                gl_Position=uMvp*world(grid);
+                vGrid=grid.xy;
             }
         """
         internal const val FRAGMENT="""#version 300 es
             precision highp float;
             precision highp int;
-            uniform highp sampler2D uHeight; uniform ivec2 uSize; uniform int uStep;
+            uniform highp sampler2D uHeight; uniform ivec2 uSize;
             in vec2 vGrid; in float vLight; out vec4 color;
-            bool bad(ivec2 p) { float z=texelFetch(uHeight,min(p,uSize-1),0).r; return isnan(z)||isinf(z); }
+            bool bad(ivec2 p) { float z=texelFetch(uHeight,clamp(p,ivec2(0),uSize-1),0).r; return isnan(z)||isinf(z); }
             void main() {
-                ivec2 p=ivec2(floor(vGrid/float(uStep)))*uStep;
-                if(bad(p)||bad(p+ivec2(uStep,0))||bad(p+ivec2(0,uStep))||bad(p+ivec2(uStep))) discard;
+                ivec2 p=ivec2(floor(vGrid));
+                if(bad(p)||bad(p+ivec2(1,0))||bad(p+ivec2(0,1))||bad(p+ivec2(1))) discard;
                 color=vec4(vec3(0.72*vLight),1.0);
             }
         """

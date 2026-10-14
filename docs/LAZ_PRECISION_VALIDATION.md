@@ -68,9 +68,9 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
   stream through a direct buffer in batches up to 200,000 records and 16 MiB of
   scratch data. Adjacent selected chunks share a batch; cancellation is checked
   between batches. The Actions build packages arm64-v8a, armeabi-v7a and x86_64.
-- Refinement reuses canonical 512-node elevation tiles on an anchored source lattice,
-  with 256-node interpolation context. Memory and disk budgets are 24/256 MiB.
-  A bounded Java decoded-chunk cache reuses overlapping compressed ranges.
+- Refinement reuses canonical 256/512-node elevation tiles on an anchored source lattice,
+  with 256-node interpolation context. Memory is capped at 24 MiB per active tile cache; each tile-size disk namespace is capped at 128 MiB.
+  A bounded shared raw cache reuses overlapping Java decoded chunks or native integer batches. Switching backends clears the other representation.
   Tile context makes revisiting the same lattice stable. Harmonic interpolation
   remains an estimate and may differ from a full-footprint solve near large gaps.
 - Android 13+ hardware Canvas shades supported 2D views from a cached raw height
@@ -79,8 +79,9 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
   Display heights use relative 24-bit encoding; authoritative float elevations remain
   unchanged. Positive/negative openness use eight physical-direction profiles.
 - The active GLES 3 renderer uses an R32F height texture and one reusable 65x65
-  topology, with conservative frustum culling and a shared power-of-two mesh spacing.
-  This avoids per-cell CPU mesh construction; it is not adaptive CDLOD geomorphing.
+  topology, with conservative frustum culling, balanced adaptive quadtree selection, and hierarchical
+  geomorphing. Fine edges collapse to the same parent lattice as adjacent coarse
+  patches. Selection uses physical X/Y geometry and projected pixel spacing.
 - Local COPC refinement traverses hierarchy metadata and seeks intersecting node
   ranges using the LAS header footprint. Ordinary LAZ is not converted to COPC.
 
@@ -154,3 +155,32 @@ heightfield preparation, and physical-direction openness on planes and pits.
 `TerrainGpuInstrumentedTest` validates packaged native decode, AGSL/CPU pixel parity
 and R32F GLES shader compilation/drawing on API 35. Actions gates the branch APK on
 these checks. Emulator checks do not establish real-phone frame times or peak memory.
+
+## Completed research follow-up
+
+- Local-relief windows now have separate physical X/Y radii, including zero radius
+  when requested detail is smaller than the sampling interval. Curvature, local
+  relief/roughness, openness and SVF products use a bounded checksummed derived cache
+  keyed by elevation/canopy values, masks, axis units and analysis inputs. Lighting
+  and sensitivity changes do not invalidate these products.
+- The decoder benchmark prepares one reference/index, bypasses decoded-point caches,
+  alternates backend/worker order for three repetitions, rejects any output mismatch,
+  and reports median/range for 2/4/6 worker candidates (clamped by cores/memory/chunks).
+  Native skips rebuilding an existing chunk index. The first application read is
+  reported separately; OS caches are uncontrolled and are never described as flushed.
+- The same benchmark compares empty DEM-cache and revisit timings for 256/512-node
+  tile candidates. Apply measured settings persists decoder, actual workers and tile
+  size. Low-memory workers use actual spare heap; pressure/test profiles retain two
+  workers. Severe/critical thermal status reduces later reads to two/one worker without changing point selection. Combined cache shares fit their common budget without oversized floors.
+- MainActivity captures real window frame metrics (p50/p95), available GPU duration,
+  native heap and thermal status. GL CPU submission has a separate trace. Native
+  batches have ATrace sections and named Rayon threads. Tools can reset frame capture
+  before a representative pan/zoom/light interaction.
+- Research completion tests verify balanced/non-overlapping LODs, exact geomorphed
+  seam vertex matches, SVF on a flat surface/pit, derived-cache identity/CRC/cancel,
+  physical relief radii, total memory shares, and a measured pit crossing four tiles.
+  The owned tile fixture agrees within 0.01 m for interpolation and exactly for
+  measured cells; this tolerance is a fixture assertion, not a universal survey bound.
+- No Android device was connected for sustained field trials. Run the benchmark and
+  reset/show frame timings separately on each target phone/tablet. COPC conversion
+  remains a source-preparation operation; local/remote COPC spatial reading is present.

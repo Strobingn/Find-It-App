@@ -11,9 +11,11 @@ import com.example.ui.HillshadeViewModel
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
+  private var frameProfiling: java.io.Closeable? = null
   override fun onCreate(savedInstanceState: Bundle?) {
     installSplashScreen()
     super.onCreate(savedInstanceState)
+    frameProfiling = com.example.data.TerrainFrameProfiler.attach(window,applicationContext)
     enableEdgeToEdge()
     setContent {
       MyApplicationTheme(darkTheme = true) {
@@ -21,5 +23,10 @@ class MainActivity : ComponentActivity() {
         FindItAppRootWired(viewModel = vm)
       }
     }
+  }
+  override fun onDestroy() {
+    frameProfiling?.close()
+    frameProfiling=null
+    super.onDestroy()
   }
 }

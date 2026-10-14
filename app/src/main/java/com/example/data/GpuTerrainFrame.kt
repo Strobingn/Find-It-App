@@ -42,6 +42,6 @@ class GpuHeightData(val bitmap: Bitmap, val base: Float, val range: Float,
 data class GpuTerrainFrame(val data: GpuHeightData, val azimuth: Float, val altitude: Float,
                            val contrast: Float, val zScale: Float, val mode: Int, val palette: Int) {
     companion object {
-        fun supported(mode: Int, overlay: Int, contour: Float) = mode in setOf(0,1,2,6,7,9,10) && overlay == 0 && contour < .05f
+        fun supported(mode: Int, overlay: Int, contour: Float) = mode in setOf(0,1,2,6,7,9,10,11) && overlay == 0 && contour < .05f
     }
 }

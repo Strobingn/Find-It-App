@@ -261,6 +261,7 @@ fun LidarControlPanel(
                     Option(8, "Canopy", "DSM minus bare earth"),
                     Option(9, "Positive openness", "Grayscale ridges and earthworks"),
                     Option(10, "Negative openness", "Grayscale depressions and cellar holes"),
+                    Option(11, "Sky-view factor", "Grayscale sky exposure within the selected radius"),
                 ),
                 selected = visualizationMode,
                 onSelected = onVisualizationModeChanged,

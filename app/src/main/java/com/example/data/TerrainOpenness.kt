@@ -5,7 +5,7 @@ import kotlin.math.*
 /** Eight physical-direction horizon profiles. No survey returns are changed by this visualization. */
 internal object TerrainOpenness {
     fun compute(grid: ElevationGrid, vegetation: Float, radiusMeters: Float, negative: Boolean,
-                shouldContinue: () -> Boolean): FloatArray {
+                skyView: Boolean = false, shouldContinue: () -> Boolean): FloatArray {
         require(radiusMeters.isFinite() && radiusMeters>0)
         val out=FloatArray(grid.width*grid.height){Float.NaN}
         val heights=FloatArray(out.size){ i -> grid.bareEarth[i]+grid.canopySpikes[i]*(1f-vegetation.coerceIn(0f,1f)) }
@@ -38,7 +38,10 @@ internal object TerrainOpenness {
                         val slope=(sample-heights[index])/distance * if(negative) -1.0 else 1.0
                         horizon=max(horizon,slope)
                     }
-                    if(horizon.isFinite()) { sum+=PI/2-atan(horizon); directions++ }
+                    if(horizon.isFinite()) {
+                        sum += if (skyView) { val obstruction=max(0.0,horizon); 1.0/(1.0+obstruction*obstruction) } else PI/2-atan(horizon)
+                        directions++
+                    }
                 }
                 if(directions>=4) out[index]=(sum/directions).toFloat()
             }
