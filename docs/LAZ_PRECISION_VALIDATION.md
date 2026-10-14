@@ -29,6 +29,9 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
 - Persistent caches store both axis spacings and the measured/interpolated mask.
   Old algorithm entries are invalidated. All permitted 2048x2048 refine grids fit
   the cache reader's dimension limit.
+- Focused decode retains exact maximum-boundary returns: laszip4j's exclusive
+  rectangle bounds are expanded by one representable double, while the rasterizer
+  applies the original inclusive crop. Full focused crops equal full-footprint grids.
 - Projected coordinate bounds are checked before converting to display percentages,
   preventing positions just beyond the source extent from landing in the last pixel.
   LAS header inspection keeps file lengths as `Long` for files larger than 2 GB.

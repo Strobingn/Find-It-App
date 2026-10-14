@@ -148,6 +148,11 @@ class LazPrecisionRegressionTest {
                 assertArrayEquals(sequential.grid.bareEarth, parallel.grid.bareEarth, 0f)
                 assertArrayEquals(sequential.grid.validData, parallel.grid.validData)
                 assertArrayEquals(sequential.grid.interpolatedData, parallel.grid.interpolatedData)
+                // A full focused crop must retain returns exactly on max X / max Y.
+                val focused = LazTerrainReader.read(source, options.copy(focusBounds = NormalizedRasterBounds.Full))!!
+                assertEquals(parallel.totalPointsRead, focused.totalPointsRead)
+                assertArrayEquals(parallel.grid.bareEarth, focused.grid.bareEarth, 0f)
+                assertArrayEquals(parallel.grid.interpolatedData, focused.grid.interpolatedData)
                 assertNull(LazTerrainReader.read(source, options, shouldContinue = { false }))
             }
         } finally {

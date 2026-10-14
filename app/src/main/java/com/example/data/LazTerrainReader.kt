@@ -520,8 +520,8 @@ internal object LazTerrainReader {
             reader.insideRectangle(
                 header.minX + it.left * rangeX,
                 header.minY + (1.0 - it.bottom) * rangeY,
-                header.minX + it.right * rangeX,
-                header.minY + (1.0 - it.top) * rangeY,
+                Math.nextUp(header.minX + it.right * rangeX),
+                Math.nextUp(header.minY + (1.0 - it.top) * rangeY),
             )
         } ?: reader
         constrained.getCloseablePoints().use { points ->
@@ -896,8 +896,9 @@ internal object LazTerrainReader {
         reader.inside_rectangle(
             header.minX + focus.left * rangeX,
             header.minY + (1.0 - focus.bottom) * rangeY,
-            header.minX + focus.right * rangeX,
-            header.minY + (1.0 - focus.top) * rangeY,
+            // laszip4j rectangles have exclusive upper bounds; our node-grid crop is inclusive.
+            Math.nextUp(header.minX + focus.right * rangeX),
+            Math.nextUp(header.minY + (1.0 - focus.top) * rangeY),
         )
     }
 

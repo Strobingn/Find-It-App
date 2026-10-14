@@ -195,7 +195,7 @@ class LazTerrainDiskCache(
         val sanitized = options.sanitized()
         val key = buildString {
             append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
-            append("|terrainPrecision5")
+            append("|terrainPrecision6")
             append('|').append(file.length())
             append('|').append(file.lastModified())
             append('|').append(sanitized.groundMode.name)
