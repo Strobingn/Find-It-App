@@ -125,6 +125,9 @@ internal fun chooseAiRefineResolution(
 }
 
 /** Hillshade shows bare earth by default; the slider can still blend canopy back in. */
+/** How long a finished precise fix stays the device position while the user stays on it. */
+internal const val PRECISE_FIX_HOLD_MS = 120_000L
+
 internal const val DEFAULT_VEGETATION_FILTER = 1f
 
 internal fun isEffectivelyWholeTerrain(bounds: NormalizedRasterBounds): Boolean {
@@ -339,6 +342,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val currentLon: StateFlow<Double?> = _currentLon.asStateFlow()
 
     private val locationTracker = LocationTracker(application)
+    /** Precise GPS (phone high-accuracy GNSS, external RTK receiver, NTRIP, averaging). */
+    val preciseGps = com.example.gps.PreciseGpsController(application, viewModelScope)
+    val preciseGpsState: StateFlow<com.example.gps.PreciseGpsState> = preciseGps.state
+    /** A finished precise fix is held as the device position while the user stays on it. */
+    private var heldPreciseFix: com.example.gps.GnssFix? = null
     private val compassHeadingTracker = CompassHeadingTracker(application)
     private val _gpsEnabled = MutableStateFlow(false)
     val gpsEnabled: StateFlow<Boolean> = _gpsEnabled.asStateFlow()
@@ -725,19 +733,49 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun startLocationUpdates() {
         if (locationJob?.isActive == true) return
+        preciseGps.start()
         locationJob = viewModelScope.launch {
-            locationTracker.locationUpdates()
+            preciseGps.fixes
                 .catch { /* provider unavailable or a platform SecurityException — stop tracking */ }
-                .collect { fix ->
-                    _deviceLocationAccuracyMeters.value = fix.accuracyMeters
+                .collect { incoming ->
+                    val fix = if (incoming.source == com.example.gps.FixSource.AVERAGED) {
+                        heldPreciseFix = incoming
+                        incoming
+                    } else {
+                        heldPreciseFix?.takeIf { held -> keepHeldPreciseFix(held, incoming) } ?: incoming.also { heldPreciseFix = null }
+                    }
+                    _deviceLocationAccuracyMeters.value = fix.horizontalAccuracyMeters
                     _deviceLatitude.value = fix.latitude
                     _deviceLongitude.value = fix.longitude
-                    _deviceLocationRecordedAtMillis.value = fix.recordedAtMillis
-                    _deviceGridPosition.value =
-                        GeoSpatialLibrary.geographicToGrid(fix.latitude, fix.longitude, _activeGeoMetadata.value)
-                    appendBreadcrumbFix(fix.latitude, fix.longitude, fix.accuracyMeters)
+                    _deviceLocationRecordedAtMillis.value = fix.timeMillis
+                    _deviceGridPosition.value = GeoSpatialLibrary.geographicToGrid(
+                        fix.latitude, fix.longitude, _activeGeoMetadata.value, fix.frame, fix.timeMillis,
+                    )
+                    if (incoming.source != com.example.gps.FixSource.AVERAGED) {
+                        appendBreadcrumbFix(incoming.latitude, incoming.longitude, incoming.horizontalAccuracyMeters)
+                    }
                     refreshBoundaryProximity(fix.latitude, fix.longitude)
                 }
+        }
+    }
+
+    private fun keepHeldPreciseFix(held: com.example.gps.GnssFix, live: com.example.gps.GnssFix): Boolean {
+        if (live.timeMillis - held.timeMillis > PRECISE_FIX_HOLD_MS) return false
+        val moved = GeoSpatialLibrary.calculateGeodesicDistance(held.latitude, held.longitude, live.latitude, live.longitude)
+        return moved <= maxOf(3.0, live.horizontalAccuracyMeters.toDouble().takeIf { it.isFinite() } ?: 3.0)
+    }
+
+    fun startPreciseFix() {
+        if (!_gpsEnabled.value) toggleGpsTracking(true)
+        preciseGps.startPreciseFix()
+    }
+
+    fun cancelPreciseFix() = preciseGps.cancelPreciseFix()
+
+    fun saveGpsSettings(settings: com.example.gps.GpsSettings) {
+        preciseGps.settingsStore.save(settings)
+        if (locationJob?.isActive == true) {
+            preciseGps.restart()
         }
     }
 
@@ -770,6 +808,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private fun stopLocationUpdates() {
         locationJob?.cancel()
         locationJob = null
+        preciseGps.stop()
+        heldPreciseFix = null
         _deviceGridPosition.value = null
         _deviceLocationAccuracyMeters.value = null
         _deviceLatitude.value = null

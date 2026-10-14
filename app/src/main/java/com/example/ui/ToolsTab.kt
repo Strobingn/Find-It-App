@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
@@ -396,6 +397,42 @@ fun ToolsTab(
                     "before the first release-signed install if this copy is still debug-signed.",
             ) {
                 AppUpdateButtons(controller = updateController)
+            }
+        }
+        item {
+            val gpsContext = androidx.compose.ui.platform.LocalContext.current
+            val btLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+            ) { }
+            val gpsSettings = androidx.compose.runtime.remember { viewModel.preciseGps.settingsStore.load() }
+            ToolCard(
+                icon = Icons.Default.GpsFixed,
+                title = "Precise GPS / RTK",
+                status = if (gpsSettings.useExternalReceiver) {
+                    "External receiver" + if (gpsSettings.ntripEnabled) " + NTRIP" else ""
+                } else {
+                    "Phone GNSS · high accuracy"
+                },
+                statusActive = gpsSettings.useExternalReceiver,
+                description = "Phone GNSS shows Android's accuracy estimate. For true ≤1 m / cm, pair a " +
+                    "Bluetooth RTK receiver and stream free NYSNet corrections (register at cors.dot.ny.gov), " +
+                    "or use a mock-location NTRIP app.",
+            ) {
+                com.example.gps.ui.GpsSettingsCard(
+                    initial = gpsSettings,
+                    bondedReceivers = { viewModel.preciseGps.bondedReceivers() },
+                    onRequestBluetoothPermission = {
+                        if (android.os.Build.VERSION.SDK_INT >= 31 &&
+                            androidx.core.content.ContextCompat.checkSelfPermission(
+                                gpsContext, android.Manifest.permission.BLUETOOTH_CONNECT,
+                            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            btLauncher.launch(android.Manifest.permission.BLUETOOTH_CONNECT)
+                        }
+                    },
+                    onFetchMountpoints = { settings, callback -> viewModel.preciseGps.fetchMountpoints(settings, callback) },
+                    onSave = viewModel::saveGpsSettings,
+                )
             }
         }
         item {

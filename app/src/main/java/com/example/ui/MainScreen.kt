@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -332,6 +334,7 @@ private fun TerrainTab(
     val compassHeadingDegrees by viewModel.compassHeadingDegrees.collectAsStateWithLifecycle()
     val navPlaylistIds by viewModel.navPlaylistIds.collectAsStateWithLifecycle()
     val navPlaylistIndex by viewModel.navPlaylistIndex.collectAsStateWithLifecycle()
+    val preciseGpsState by viewModel.preciseGpsState.collectAsStateWithLifecycle()
     var showArGuidance by rememberSaveable { mutableStateOf(false) }
     val navigationSolution = remember(navigationTarget, deviceLatitude, deviceLongitude) {
         val target = navigationTarget ?: return@remember null
@@ -822,6 +825,19 @@ private fun TerrainTab(
             }
         }
 
+        if (gpsEnabled && hasLocationPermission) {
+            com.example.gps.ui.PreciseGpsPanel(
+                state = preciseGpsState,
+                onPreciseFix = viewModel::startPreciseFix,
+                onCancelPreciseFix = viewModel::cancelPreciseFix,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 10.dp, top = 112.dp)
+                    .fillMaxWidth(0.72f),
+            )
+        }
+
         // Ground quality / CRS / density honesty banner (product pack) — mirrors Home scorecard.
         terrainQuality?.let { quality ->
             Surface(
@@ -1202,6 +1218,16 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> viewModel.onLocationPermissionResult(granted) }
+    val preciseGpsState by viewModel.preciseGpsState.collectAsStateWithLifecycle()
+    Column {
+    if (gpsEnabled) {
+        com.example.gps.ui.PreciseGpsPanel(
+            state = preciseGpsState,
+            onPreciseFix = viewModel::startPreciseFix,
+            onCancelPreciseFix = viewModel::cancelPreciseFix,
+            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding() + 8.dp).fillMaxWidth(),
+        )
+    }
     TargetLoggerPanel(
         loggedSignals = signals,
         currentSweepX = sweepX,
@@ -1259,8 +1285,22 @@ private fun FindsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
         onSetNavPlaylist = viewModel::setNavPlaylist,
         onNavPlaylistNext = viewModel::navPlaylistNext,
         onClearNavPlaylist = viewModel::clearNavPlaylist,
-        modifier = Modifier.fillMaxSize().padding(padding),
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth()
+            .padding(
+                if (gpsEnabled) {
+                    PaddingValues(
+                        start = padding.calculateStartPadding(androidx.compose.ui.unit.LayoutDirection.Ltr),
+                        end = padding.calculateEndPadding(androidx.compose.ui.unit.LayoutDirection.Ltr),
+                        bottom = padding.calculateBottomPadding(),
+                    )
+                } else {
+                    padding
+                },
+            ),
     )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
