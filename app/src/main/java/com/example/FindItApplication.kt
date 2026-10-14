@@ -14,6 +14,7 @@ import io.sentry.protocol.User
 class FindItApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.example.data.LazChunkIndex.fallbackDir = java.io.File(cacheDir, "laz-chunks")
         LazDecoderSettings.load(this)
         initSentry()
     }

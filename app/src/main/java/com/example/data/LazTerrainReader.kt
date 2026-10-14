@@ -20,6 +20,9 @@ import kotlin.math.min
 internal object LazTerrainReader {
     /** Test hook: false forces the sequential decoder so parallel output can be compared to it. */
     @Volatile internal var parallelDecodeEnabled = true
+    @Volatile internal var chunkIndexEnabled = true
+    internal data class FocusWork(val chunks: Int, val sourceChunks: Int, val decodedPoints: Long)
+    @Volatile internal var lastFocusWork: FocusWork? = null
 
     private const val DECODE_BATCH_POINTS = 32_768
     private const val FILE_BUFFER_BYTES = 1024 * 1024
@@ -68,25 +71,33 @@ internal object LazTerrainReader {
         // then fills most cells from a few points and the hillshade shows facets/stair-steps.
         val focusX = extent.first * (focus.right - focus.left)
         val focusY = extent.second * (focus.bottom - focus.top)
+        // Collect once for legacy cached imports; new full decodes record bounds in the binner.
+        // The histogram chooses resolution before decoding, avoiding a second source pass.
+        val index = if (chunkIndexEnabled) runCatching { LazChunkIndex.ensure(file, shouldContinue) }.getOrNull() else null
+        if (!shouldContinue()) return null
+        val estimate = index?.takeIf { sanitized.allowedClasses == null }?.let {
+            val classified = sanitized.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED
+            val n = it.estimate(it.minX + focus.left * extent.first,
+                it.minY + (1.0 - focus.bottom) * extent.second,
+                it.minX + focus.right * extent.first, it.minY + (1.0 - focus.top) * extent.second, classified)
+            if (classified && n > 0) n else {
+                val r = FOCUS_CELL_TO_GROUND_SPACING / DEFAULT_CELL_TO_SPACING
+                it.estimate(it.minX + focus.left * extent.first, it.minY + (1.0 - focus.bottom) * extent.second,
+                    it.minX + focus.right * extent.first, it.minY + (1.0 - focus.top) * extent.second, false) * r * r
+            }
+        }
         val known = GroundDensityMemo.pointsPerArea(memoKey)
-        val first = if (known != null) {
+        val count = estimate ?: known?.let { it * focusX * focusY }
+        val first = if (count != null) {
             sanitized.copy(
                 rasterResolution = focusResolutionForPointSpacing(
-                    focusX, focusY, (known * focusX * focusY).toLong(), sanitized.rasterResolution,
+                    focusX, focusY, count.toLong(), sanitized.rasterResolution,
                 ),
             ).sanitized()
         } else {
             sanitized
         }
-        val result = readUnclamped(file, first, shouldContinue, onProgress) ?: return null
-        // Verify against the exact ground count inside the crop; re-bin once if still too fine.
-        val ideal = focusResolutionForPointSpacing(
-            focusX, focusY, effectiveGroundPoints(result), sanitized.rasterResolution,
-        )
-        val off = ideal.toDouble() / first.rasterResolution
-        if ((off in (1.0 / FOCUS_REDECODE_TOLERANCE)..FOCUS_REDECODE_TOLERANCE) || !shouldContinue()) return result
-        return readUnclamped(file, first.copy(rasterResolution = ideal).sanitized(), shouldContinue, onProgress)
-            ?: result
+        return readUnclamped(file, first, shouldContinue, onProgress)
     }
 
     /**
@@ -134,7 +145,7 @@ internal object LazTerrainReader {
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
         rethrowOom: Boolean,
     ): DemGenerator.LasLoadResult? {
-        if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
+        if (clampedOptions.focusBounds == null && LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
             val native = runCatching {
                 readNativePacked(file, clampedOptions, shouldContinue)
             }.onFailure { exception ->
@@ -678,10 +689,28 @@ internal object LazTerrainReader {
         if (pointCount <= 0L) return null
         val limited = densityLimitedOptions(header, options)
         val focus = limited.focusBounds
-        if (focus != null) return null
-        if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
-        val workers = AppMemoryBudget.decodeWorkers()
-        if (workers == 1) return null
+        if (!parallelDecodeEnabled) return null
+        val sourceChunks = ((pointCount - 1L) / chunkSize + 1L)
+        if (sourceChunks > Int.MAX_VALUE) return null
+        val index = if (chunkIndexEnabled) LazChunkIndex.load(file, pointCount, chunkSize) else null
+        if (focus != null && index == null) return null
+        val selected = if (focus != null) {
+            index!!.chunksOverlapping(header.minX + focus.left * (header.maxX - header.minX),
+                header.minY + (1.0 - focus.bottom) * (header.maxY - header.minY),
+                header.minX + focus.right * (header.maxX - header.minX),
+                header.minY + (1.0 - focus.top) * (header.maxY - header.minY))
+        } else IntArray(sourceChunks.toInt()) { it }
+        if (selected.isEmpty()) return null
+        // Keep the two-chunks-per-worker window within the device decode headroom.
+        val memoryWorkers = (AppMemoryBudget.reservedHeadroomBytes / (44L * chunkSize)).coerceIn(1, 8).toInt()
+        val workers = minOf(AppMemoryBudget.decodeWorkers(), selected.size, memoryWorkers)
+        val selectedPoints = selected.sumOf { min(chunkSize.toLong(), pointCount - it.toLong() * chunkSize) }
+        val builder = if (focus == null && index == null && chunkIndexEnabled &&
+            LazChunkIndex.supported(pointCount, chunkSize, header.minX, header.maxX, header.minY, header.maxY))
+            LazChunkIndex.Builder(pointCount, chunkSize, header.minX, header.maxX, header.minY, header.maxY, header.pointFormat)
+        else null
+        val sourceLength = file.length()
+        val sourceModified = file.lastModified()
 
         // One shared raster; workers only decode. Each claims the next compressed chunk, decodes
         // it into a compact buffer (~22 B/point), and a single binner adds chunks strictly in
@@ -689,7 +718,7 @@ internal object LazTerrainReader {
         // 8 workers) instead of a full private raster per worker (75 MB each at 1536²), so all
         // cores can be used, and the result is identical to the sequential decoder.
         val rasterizer = newRasterizer(header.withUnits(file), limited, pointCount)
-        val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
+        val totalChunks = selected.size
         val windowSize = workers * 2
         val results = Array(windowSize) { java.util.concurrent.CompletableFuture<DecodedChunk>() }
         val window = java.util.concurrent.Semaphore(windowSize)
@@ -713,7 +742,7 @@ internal object LazTerrainReader {
                             val future = results[chunk % windowSize]
                             try {
                                 checkNotNull(reader) { "Could not open ${file.name}" }
-                                val start = chunk.toLong() * chunkSize
+                                val start = selected[chunk].toLong() * chunkSize
                                 val count = min(chunkSize.toLong(), pointCount - start).toInt()
                                 check(reader.seek(start)) { "Seek to point $start failed" }
                                 future.complete(DecodedChunk.decode(reader, count))
@@ -742,11 +771,11 @@ internal object LazTerrainReader {
                         throw error.cause ?: error
                     }
                     results[chunk % windowSize] = java.util.concurrent.CompletableFuture()
-                    points.addTo(rasterizer)
+                    points.addTo(rasterizer, builder)
                     window.release()
                     decoded += points.count
-                    onProgress?.invoke(decoded, pointCount)
-                    if (points.count < min(chunkSize.toLong(), pointCount - chunk.toLong() * chunkSize)) {
+                    onProgress?.invoke(decoded, selectedPoints)
+                    if (points.count < min(chunkSize.toLong(), pointCount - selected[chunk].toLong() * chunkSize)) {
                         // Short chunk = reader hit EOF early; the sequential path would stop here too.
                         rasterizer.markTruncated()
                         throw java.util.concurrent.CancellationException("LAZ decode cancelled")
@@ -754,7 +783,11 @@ internal object LazTerrainReader {
                 }
             }
             if (!shouldContinue()) return null
-            finish(rasterizer, header, "parallel chunk decode ($workers cores)")
+            if (file.length() == sourceLength && file.lastModified() == sourceModified) {
+                builder?.finish()?.let { LazChunkIndex.store(file, it) }
+            }
+            if (focus != null) lastFocusWork = FocusWork(totalChunks, sourceChunks.toInt(), selectedPoints)
+            finish(rasterizer, header, "parallel chunk decode ($workers cores, $totalChunks/${sourceChunks} chunks)")
         } finally {
             cancelled.set(true)
             pool.shutdownNow()
@@ -784,8 +817,9 @@ internal object LazTerrainReader {
         private val classes: ByteArray,
         private val flags: ByteArray,
     ) {
-        fun addTo(rasterizer: LidarRasterizer) {
+        fun addTo(rasterizer: LidarRasterizer, index: LazChunkIndex.Builder? = null) {
             for (i in 0 until count) {
+                index?.add(xs[i], ys[i], classes[i].toInt() and 0xff, flags[i].toInt() and 2 != 0)
                 rasterizer.addPoint(
                     x = xs[i],
                     y = ys[i],
@@ -965,8 +999,6 @@ internal fun focusResolutionForPointSpacing(
 
 /** Refine cell vs measured ground spacing: ~1.25× keeps detail without per-point terracing. */
 internal const val FOCUS_CELL_TO_GROUND_SPACING = 1.25
-/** Re-decode a refine only when its cell is meaningfully (>15%) finer than the clamp. */
-private const val FOCUS_REDECODE_TOLERANCE = 1.15
 
 /** Ground points per source area unit, learned from full-footprint decodes this session. */
 internal object GroundDensityMemo {

@@ -45,9 +45,21 @@ The changes are isolated on `fix/laz-precision-performance-20261014`.
 - TIN vertex collection stops after the triangulation cap is exceeded, avoiding
   thousands of unused vertex objects per dense tile. IDW updates use growable
   primitive arrays rather than boxed collections.
-- Header extent queries do not initialize a compressed reader. Duplicate background
-  spatial-index requests are coalesced. Incomplete or unsupported >32-bit point-index
-  builds are rejected rather than publishing a misleading `.lax`.
+- Header extent queries do not initialize a compressed reader. Full imports record
+  conservative per-chunk XY bounds and eligible-return density in the same ordered
+  binner, persisting a checksummed `.fichunks` sidecar. Focused reads seek only to
+  overlapping chunks, in file order, with inclusive edges and no point thinning.
+- Focus uses the persisted density histogram (or session density / requested size)
+  to choose resolution once. It no longer decodes again to correct the resolution.
+  Explicit class filters still use chunk pruning; their density uses the existing
+  session estimate or requested size. Native whole-cloud decoding is bypassed for crops.
+- Sidecars validate source size/mtime, declared chunk geometry, exact length and CRC,
+  with bounded allocations and four in-memory entries. Cancelled builds do not publish
+  partial indexes. Read-only source folders use an app cache fallback. Legacy cached
+  imports need one lightweight XY/classification pass; duplicate builds are coalesced.
+  Existing vendor `.lax` remains a compatibility fallback, without a blocking LAX build.
+- One-worker devices still seek to selected chunks. Worker count also respects chunk
+  buffer size and device headroom.
 - Optional native whole-cloud packed allocation is limited to 64 MiB or half the
   reserved headroom, whichever is smaller. Larger files use the streaming Java
   path. Packed buffer arithmetic is checked for integer overflow. Native cancellation
@@ -70,7 +82,14 @@ affine plane reproduction across TIN tile seams, physical-distance IDW weights,
 and spacing through LOD. `ElevationGridTest` checks matching hillshade pixels for
 an identical physical slope sampled with different Y spacing.
 
-The owned LAZ fixture contains 450,123 points, nine complete 50,000-point chunks
+`LazViewportRefinementTest` verifies a coherent-strip crop decodes exactly 50,000
+of 250,123 source records (one of six chunks), once, with grids and masks identical
+to a full scan at the same resolution across surface modes and explicit class filters.
+It also checks cold sidecar reuse, corruption/staleness rejection, cancellation,
+inclusive boundaries and the short final chunk. The interleaved fixture below covers
+the entire footprint in every chunk; it intentionally cannot be spatially pruned.
+
+The owned interleaved LAZ fixture contains 450,123 points, nine complete 50,000-point chunks
 and one short chunk. XY has large projected origins, with withheld/noise returns
 at chunk boundaries. It is independently compressed with lazrs, read back with
 laspy, and decoded with laszip4j in tests. Regenerate it with:
