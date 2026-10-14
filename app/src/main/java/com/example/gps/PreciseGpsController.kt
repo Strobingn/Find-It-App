@@ -13,6 +13,7 @@ import com.example.gps.source.PhoneGnssSource
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -94,11 +95,12 @@ class PreciseGpsController(context: Context, private val scope: CoroutineScope) 
     fun restart() { stop(); start() }
 
     private suspend fun runExternal(settings: GpsSettings) {
+        val job = coroutineContext[Job] ?: return
         val preset = NtripPresets.byId(settings.presetId)
         val correctedFrame = if (preset.correctedFrameIsNad83) GeodeticFrame.NAD83_2011 else GeodeticFrame.ITRF
         if (settings.ntripEnabled && settings.ntripConfig().isComplete) startNtrip(settings)
         var backoff = 2_000L
-        while (isActive) {
+        while (job.isActive) {
             try {
                 _state.value = _state.value.copy(receiverConnected = false, error = null)
                 receiver.run(
@@ -109,7 +111,7 @@ class PreciseGpsController(context: Context, private val scope: CoroutineScope) 
                         lastGga = NmeaParser.buildGga(fix.latitude, fix.longitude, fix.altitudeMeters ?: 0.0, System.currentTimeMillis(), satellites = fix.satellitesUsed ?: 12)
                         onFix(fix)
                     },
-                    shouldContinue = { isActive },
+                    shouldContinue = { job.isActive },
                 )
             } catch (e: SecurityException) {
                 _state.value = _state.value.copy(error = "Bluetooth permission needed for the external receiver")
