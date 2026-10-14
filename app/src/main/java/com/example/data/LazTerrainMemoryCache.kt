@@ -34,6 +34,13 @@ class LazTerrainMemoryCache(
     private val entries = LinkedHashMap<CacheKey, CacheEntry>(8, 0.75f, true)
     private var currentBytes = 0L
 
+    // Strong reference held here; the budget registry only keeps it weakly.
+    private val trimHook: () -> Unit = { clear() }
+
+    init {
+        AppMemoryBudget.registerTrimmable(trimHook)
+    }
+
     @Synchronized
     fun get(file: File, options: LidarImportOptions): DemGenerator.TerrainLoadResult? {
         return entries[key(file, options)]?.result
