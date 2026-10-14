@@ -19,6 +19,39 @@ object AppMemoryBudget {
     val maxHeapBytes: Long
         get() = Runtime.getRuntime().maxMemory().coerceAtLeast(128L * MIB)
 
+    /** Heap ceiling below which tablets/phones get smaller caches and fewer decode workers. */
+    const val LOW_MEMORY_HEAP_BYTES = 768L * MIB
+
+    /** Test hook: force (true/false) or auto-detect (null) the low-memory profile. */
+    @Volatile var lowMemoryOverride: Boolean? = null
+
+    /** Set after an OutOfMemoryError so later decodes stay on the low-memory profile. */
+    @Volatile private var memoryPressure = false
+
+    val isLowMemory: Boolean
+        get() = lowMemoryOverride ?: (memoryPressure || maxHeapBytes < LOW_MEMORY_HEAP_BYTES)
+
+    /** Parallel LAZ decode worker count. Fewer workers only shrink the in-flight chunk window; output is identical. */
+    fun decodeWorkers(): Int {
+        val cores = Runtime.getRuntime().availableProcessors()
+        return if (isLowMemory) cores.coerceIn(1, 2) else cores.coerceIn(1, 8)
+    }
+
+    private val trimmables = java.util.Collections.synchronizedList(ArrayList<java.lang.ref.WeakReference<() -> Unit>>())
+
+    /** Register an in-memory cache that can be dropped under memory pressure. */
+    fun registerTrimmable(clear: () -> Unit) {
+        trimmables.add(java.lang.ref.WeakReference(clear))
+    }
+
+    /** Called after an OutOfMemoryError: drop every registered cache and switch to the low-memory profile. */
+    fun onOutOfMemory() {
+        memoryPressure = true
+        val hooks = synchronized(trimmables) { trimmables.removeAll { it.get() == null }; trimmables.mapNotNull { it.get() } }
+        hooks.forEach { runCatching(it) }
+        System.gc()
+    }
+
     /** Reserved for transient decoding, UI bitmaps, native/GPU allocations, and network buffers. */
     val reservedHeadroomBytes: Long
         get() = max(128L * MIB, (maxHeapBytes * 0.18).toLong())
@@ -54,7 +87,8 @@ object AppMemoryBudget {
     }
 
     private fun shareOfPersistentBudget(fraction: Double, minimum: Long, maximum: Long): Long {
-        val available = persistentCacheBudgetBytes
+        // Low-memory devices give caches half the usual share, leaving room for decode + bitmaps.
+        val available = if (isLowMemory) persistentCacheBudgetBytes / 2 else persistentCacheBudgetBytes
         val requested = (available * fraction).toLong()
         return min(maximum, max(minimum.coerceAtMost(available), requested.coerceAtMost(available)))
     }
