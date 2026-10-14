@@ -119,6 +119,21 @@ internal object LazTerrainReader {
         clampedOptions: LidarImportOptions,
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+    ): DemGenerator.LasLoadResult? = try {
+        readUnclampedOnce(file, clampedOptions, shouldContinue, onProgress, rethrowOom = true)
+    } catch (oom: OutOfMemoryError) {
+        // Drop caches, switch to the low-memory profile (fewer workers), retry once.
+        AppMemoryBudget.onOutOfMemory()
+        System.err.println("LAZ decode ran out of memory for ${file.name}; retrying with caches cleared")
+        readUnclampedOnce(file, clampedOptions, shouldContinue, onProgress, rethrowOom = false)
+    }
+
+    private fun readUnclampedOnce(
+        file: File,
+        clampedOptions: LidarImportOptions,
+        shouldContinue: () -> Boolean,
+        onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+        rethrowOom: Boolean,
     ): DemGenerator.LasLoadResult? {
         if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
             val native = runCatching {
@@ -132,6 +147,7 @@ internal object LazTerrainReader {
         val parallel = runCatching {
             readParallelChunks(file, clampedOptions, shouldContinue, onProgress)
         }.onFailure { exception ->
+            if (rethrowOom && exception is OutOfMemoryError) throw exception
             System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
         if (parallel != null) return parallel
@@ -141,6 +157,7 @@ internal object LazTerrainReader {
                 readOpenedLowLevel(reader, clampedOptions, shouldContinue, onProgress, indexSource = file)
             }
         }.onFailure { exception ->
+            if (rethrowOom && exception is OutOfMemoryError) throw exception
             System.err.println("Seekable selective LAZ decode failed for ${file.name}: ${exception.message}")
         }.getOrNull()
         if (optimized != null) return optimized
@@ -635,7 +652,7 @@ internal object LazTerrainReader {
         val focus = limited.focusBounds
         if (focus != null) return null
         if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
-        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+        val workers = AppMemoryBudget.decodeWorkers()
         if (workers == 1) return null
 
         // One shared raster; workers only decode. Each claims the next compressed chunk, decodes
