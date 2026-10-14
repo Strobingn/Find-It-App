@@ -75,7 +75,7 @@ class TerrainDecodeCoordinator(
                         buildGpuScene(fullLookup.result.grid)
                     }
                     LazSpatialIndex.ensureBuiltAsync(file)
-                    val outcome = TerrainDecodeOutcome(fullLookup.result, fullLookup.hit, scene)
+                    val outcome = TerrainDecodeOutcome(LasGeoreferencing.attach(fullLookup.result, file, sanitized), fullLookup.hit, scene)
                     onPreview?.invoke(outcome)
                     return@withLock outcome
                 }
@@ -249,10 +249,14 @@ class TerrainDecodeCoordinator(
                 options = options,
                 shouldContinue = { decodeContext.isActive },
             ) ?: return@withContext null
-            DemGenerator.TerrainLoadResult(
-                grid = laz.grid,
-                summary = laz.note,
-                isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+            LasGeoreferencing.attach(
+                DemGenerator.TerrainLoadResult(
+                    grid = laz.grid,
+                    summary = laz.note,
+                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+                ),
+                file,
+                options,
             )
         } else {
             if (displayName.substringAfterLast('.', "").equals("las", ignoreCase = true) ||
@@ -264,10 +268,14 @@ class TerrainDecodeCoordinator(
                         options = options,
                         shouldContinue = { decodeContext.isActive },
                     ) ?: return@stage null
-                    DemGenerator.TerrainLoadResult(
-                        grid = las.grid,
-                        summary = las.note,
-                        isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+                    LasGeoreferencing.attach(
+                        DemGenerator.TerrainLoadResult(
+                            grid = las.grid,
+                            summary = las.note,
+                            isBareEarth = las.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
+                        ),
+                        file,
+                        options,
                     )
                 }
             } else {

@@ -26,6 +26,8 @@ object GeoSpatialLibrary {
         val resolutionMeters: Double = 1.0,
         val columns: Int = 100,
         val rows: Int = 100,
+        /** Exact projected placement (LAS CRS). When set it replaces the lat/lon bounding-box fit. */
+        val projected: com.example.gps.crs.GridGeoreference? = null,
     ) {
         val isGeoreferenced: Boolean get() = bounds != null
         val widthMeters: Double get() = resolutionMeters * columns
@@ -81,6 +83,13 @@ object GeoSpatialLibrary {
         yPct: Float,
         metadata: GeoSpatialMetadata,
     ): Pair<Double, Double>? {
+        metadata.projected?.let { grid ->
+            return grid.gridPercentToGeographic(
+                xPct.coerceIn(0f, 100f).toDouble(), yPct.coerceIn(0f, 100f).toDouble(),
+                com.example.gps.crs.GeodeticFrame.ITRF,
+                com.example.gps.crs.DatumShift.decimalYear(System.currentTimeMillis()),
+            )
+        }
         val bounds = metadata.bounds ?: return null
         val x = xPct.coerceIn(0f, 100f) / 100.0
         val y = (100f - yPct.coerceIn(0f, 100f)) / 100.0
@@ -98,7 +107,14 @@ object GeoSpatialLibrary {
         lat: Double,
         lon: Double,
         metadata: GeoSpatialMetadata,
+        frame: com.example.gps.crs.GeodeticFrame = com.example.gps.crs.GeodeticFrame.ITRF,
+        epochMillis: Long = System.currentTimeMillis(),
     ): Pair<Float, Float>? {
+        // A projected LiDAR grid is not axis-aligned in lat/lon (meridian convergence, datum):
+        // the bbox fit below can be off by metres to tens of metres, so use the exact CRS path.
+        metadata.projected?.let { grid ->
+            return grid.toGridPercent(lat, lon, frame, com.example.gps.crs.DatumShift.decimalYear(epochMillis))
+        }
         val bounds = metadata.bounds ?: return null
         val latRange = bounds.maxLat - bounds.minLat
         val lonRange = bounds.maxLon - bounds.minLon
