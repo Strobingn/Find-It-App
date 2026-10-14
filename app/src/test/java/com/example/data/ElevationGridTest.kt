@@ -13,6 +13,16 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class ElevationGridTest {
     @Test
+    fun hornHillshadeUsesPhysicalSpacingOnBothAxes() {
+        val square = ElevationGrid(5, 5, FloatArray(25) { i -> 100f + i / 5 }, FloatArray(25))
+        val rectangular = ElevationGrid(5, 5, FloatArray(25) { i -> 100f + (i / 5) * 2f }, FloatArray(25),
+            cellSizeMeters = 2f, cellSizeXMeters = 1f, cellSizeYMeters = 2f)
+        val expected = square.renderHillshade(0f, 45f, 1f, palette = 0, contrast = 1f)
+        val actual = rectangular.renderHillshade(0f, 45f, 1f, palette = 0, contrast = 1f)
+        assertEquals(expected.getPixel(2, 2), actual.getPixel(2, 2))
+    }
+
+    @Test
     fun flatGroundGetsBrighterAsSunRises() {
         val grid = ElevationGrid(
             width = 3,

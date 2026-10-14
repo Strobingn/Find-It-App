@@ -1,10 +1,9 @@
 name: Find-it-appAPK
 
-# APK + GitHub Release only on pushes/merges to main (saves private-repo minutes).
-# Pull requests still run unit tests. Do not add extra release branches.
+# Main publishes stable releases. The LAZ fix branch builds an installable APK artifact.
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/laz-precision-performance-20261014']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -56,6 +55,50 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache native toolchain artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            native/lazrs-jni/target
+          key: native-laz-${{ runner.os }}-${{ hashFiles('native/lazrs-jni/Cargo.lock', 'native/lazrs-jni/Cargo.toml') }}-v2
+
+      - name: Build and test native LAZ decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native/lazrs-jni
+          cargo test --locked
+          command -v cargo-ndk >/dev/null || cargo install cargo-ndk --version 4.1.2 --locked
+          sdkmanager 'ndk;28.2.13676358'
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
+          cargo ndk --platform 24 -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release --locked
+          test -s ../../app/src/main/jniLibs/arm64-v8a/liblazrs_jni.so
+
+      - name: Preserve native libraries for main release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-laz-release
+          path: app/src/main/jniLibs/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Require Gradle wrapper
         run: |
           test -f gradlew || { echo "gradlew missing on this branch"; ls -la; exit 1; }
@@ -81,12 +124,67 @@ jobs:
           set -o pipefail
           ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
 
+      - name: Enable emulator acceleration
+        if: github.event_name != 'pull_request'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Validate native and GPU paths on Android
+        if: github.event_name != 'pull_request'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
+          script: ./gradlew connectedDebugAndroidTest --no-configuration-cache -Pandroid.testInstrumentationRunnerArguments.class=com.example.data.TerrainGpuInstrumentedTest
+
+      - name: Build branch APK
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        env:
+          VERSION_NAME: 2.0.${{ github.run_number }}-laz
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          export VERSION_CODE=$((1000000 + ${{ github.run_number }}))
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/findit-release.jks"
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/findit-release.jks"
+          else
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/ci/findit-debug.keystore"
+            export STORE_PASSWORD=android KEY_ALIAS=androiddebugkey KEY_PASSWORD=android
+          fi
+          ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          unzip -l app/build/outputs/apk/release/app-release.apk | grep 'lib/arm64-v8a/liblazrs_jni.so'
+          (cd app/build/outputs/apk/release && sha256sum *.apk > SHA256SUMS.txt)
+
+      - name: Upload branch APK
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        uses: actions/upload-artifact@v7
+        with:
+          name: Find-It-LAZ-${{ github.run_number }}
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload test diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: unit-test-log-${{ github.run_number }}
-          path: unit-test.log
+          path: |
+            unit-test.log
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
           if-no-files-found: warn
           retention-days: 14
 
@@ -99,6 +197,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Restore native LAZ libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-laz-release
+          path: app/src/main/jniLibs/
 
       - name: Resolve signing keystore
         id: signing
@@ -196,6 +300,7 @@ jobs:
           fi
           chmod +x ./gradlew
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          unzip -l app/build/outputs/apk/release/app-release.apk | grep 'lib/arm64-v8a/liblazrs_jni.so'
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
           test -n "$APK"
           DEST="$GITHUB_WORKSPACE/findit-${{ steps.version.outputs.code }}.apk"

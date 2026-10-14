@@ -301,6 +301,7 @@ object DemGenerator {
         val wasTruncated: Boolean = false,
         /** Structured ground-filter outcome; null for legacy non-rasterizer loads. */
         val groundReport: GroundSurfaceReport? = null,
+        val decodedPoints: Long = totalPointsRead.toLong(),
     )
 
     /**
@@ -311,6 +312,8 @@ object DemGenerator {
         inputStream: java.io.InputStream,
         options: LidarImportOptions,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+        horizontalUnitToMeters: Double? = null,
+        verticalUnitToMeters: Double? = null,
     ): LasLoadResult? {
         return try {
             val buffered = if (inputStream is java.io.BufferedInputStream) {
@@ -335,7 +338,28 @@ object DemGenerator {
             if (rawPointFormat and 0xC0 != 0) {
                 return LazTerrainReader.read(buffered, options, shouldContinue = shouldContinue)
             }
-            if (offsetToPoints < 227 || pointRecordLength < 20 || pointRecordLength > 512) return null
+            // A stream cannot seek to VLR/EVLR metadata after the point payload. Spool only
+            // metadata-bearing stream imports; file-backed callers already supply both units.
+            val hasMetadata = readIntLE(header, 100) != 0 ||
+                (versionMajor == 1 && versionMinor >= 4 && headerBytes >= 247 && readIntLE(header, 243) != 0)
+            if (hasMetadata && (horizontalUnitToMeters == null || verticalUnitToMeters == null)) {
+                val temp = java.io.File.createTempFile("find-it-las-units-", ".las")
+                try {
+                    temp.outputStream().buffered(256 * 1024).use { output ->
+                        val copyBuffer = ByteArray(256 * 1024)
+                        while (shouldContinue()) {
+                            val n = buffered.read(copyBuffer)
+                            if (n < 0) break
+                            if (n > 0) output.write(copyBuffer, 0, n)
+                        }
+                    }
+                    if (!shouldContinue()) return null
+                    return parseLasFileMapped(temp, options, shouldContinue)
+                } finally { temp.delete() }
+            }
+            val minimumRecordLengths = intArrayOf(20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67)
+            if (pointFormat !in minimumRecordLengths.indices || offsetToPoints < 227 ||
+                pointRecordLength < minimumRecordLengths[pointFormat] || pointRecordLength > 512) return null
 
             var pointCount = readIntLE(header, 107).toLong() and 0xFFFFFFFFL
             if (versionMajor == 1 && versionMinor >= 4 && headerBytes >= 255) {
@@ -352,7 +376,7 @@ object DemGenerator {
             val maxY = readDoubleLE(header, 195)
             val minY = readDoubleLE(header, 203)
             if (!listOf(scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, maxX, minX, maxY, minY)
-                    .all { it.isFinite() } || maxX <= minX || maxY <= minY
+                    .all { it.isFinite() } || scaleX <= 0 || scaleY <= 0 || scaleZ <= 0 || maxX <= minX || maxY <= minY
             ) {
                 return null
             }
@@ -373,16 +397,21 @@ object DemGenerator {
                 lasVersionMajor = versionMajor,
                 lasVersionMinor = versionMinor,
                 pointFormat = pointFormat,
+                horizontalUnitToMeters = horizontalUnitToMeters ?: 1.0,
+                verticalUnitToMeters = verticalUnitToMeters ?: 1.0,
             )
             val classOffset = if (pointFormat >= 6) 16 else 15
             val classMask = if (pointFormat >= 6) 0xFF else 0x1F
             val keyPointMask = if (pointFormat >= 6) 0x02 else 0x40
-            val keyPointOffset = if (pointFormat >= 6) 15 else 15
+            val keyPointOffset = 15
+            val withheldMask = if (pointFormat >= 6) 0x04 else 0x80
             val batchRecords = 4_096
             val batch = ByteArray(pointRecordLength * batchRecords)
             var decoded = 0L
-            while (true) {
-                val bytesRead = readBulkRecords(buffered, batch, pointRecordLength)
+            while (decoded < pointCount) {
+                if (!shouldContinue()) return null
+                val wantedBytes = (minOf(batchRecords.toLong(), pointCount - decoded) * pointRecordLength).toInt()
+                val bytesRead = readBulkRecords(buffered, batch, pointRecordLength, wantedBytes)
                 if (bytesRead < pointRecordLength) break
                 val records = bytesRead / pointRecordLength
                 var offset = 0
@@ -398,15 +427,16 @@ object DemGenerator {
                         z = (rawZ * scaleZ + offsetZ).toFloat(),
                         classification = classification,
                         isKeyPoint = isKeyPoint,
+                        isWithheld = batch[offset + keyPointOffset].toInt() and withheldMask != 0,
                     )
                     offset += pointRecordLength
                     decoded++
                 }
                 if (!shouldContinue()) {
-                    rasterizer.markTruncated()
-                    break
+                    return null
                 }
             }
+            if (decoded != pointCount) return null
             TerrainStageProfiler.stage("grid", "LAS stream") {
                 rasterizer.finish(
                     pointFormat = pointFormat,
@@ -428,6 +458,7 @@ object DemGenerator {
         options: LidarImportOptions,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
     ): LasLoadResult? = TerrainStageProfiler.stage("decode_mapped_las", file.name) {
+        val units = LasTerrainUnits.read(file)
         runCatching {
             java.io.RandomAccessFile(file, "r").use { raf ->
                 val mapped = raf.channel.map(
@@ -447,10 +478,10 @@ object DemGenerator {
                         mapped.limit(limit)
                         return n
                     }
-                }).buffered(256 * 1024), options, shouldContinue)
+                }).buffered(256 * 1024), options, shouldContinue, units.horizontal, units.vertical)
             }
         }.getOrElse {
-            file.inputStream().buffered(256 * 1024).use { parseLasStreamDetailed(it, options, shouldContinue) }
+            file.inputStream().buffered(256 * 1024).use { parseLasStreamDetailed(it, options, shouldContinue, units.horizontal, units.vertical) }
         }
     }
 
@@ -496,11 +527,11 @@ object DemGenerator {
     }
 
     /** Reads as many whole point records as will fit in [target]. Returns bytes actually read. */
-    private fun readBulkRecords(input: java.io.InputStream, target: ByteArray, recordLength: Int): Int {
+    private fun readBulkRecords(input: java.io.InputStream, target: ByteArray, recordLength: Int, limit: Int = target.size): Int {
         if (recordLength <= 0) return 0
         var offset = 0
-        while (offset < target.size) {
-            val count = input.read(target, offset, target.size - offset)
+        while (offset < limit) {
+            val count = input.read(target, offset, limit - offset)
             if (count < 0) break
             if (count == 0) break
             offset += count

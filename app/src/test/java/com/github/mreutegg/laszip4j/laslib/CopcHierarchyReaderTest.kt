@@ -29,6 +29,20 @@ class CopcHierarchyReaderTest {
         )
     }
 
+    @Test fun normalizedSelectionUsesLasFootprintRatherThanOctreeCube() {
+        val file=temporaryFolder.newFile("narrow.copc.laz")
+        writeSyntheticCopc(file.absolutePath)
+        RandomAccessFile(file,"rw").use { source ->
+            source.seek(179)
+            source.write(ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN)
+                .putDouble(90.0).putDouble(10.0).putDouble(90.0).putDouble(-90.0).array())
+        }
+        val ranges=RandomAccessFile(file,"r").use { source ->
+            CopcHierarchyReader(source).selectedPointRanges(NormalizedCopcBounds(0.0,0.0,.49,.49))
+        }
+        assertEquals(listOf(CopcPointRange(0,10)),ranges)
+    }
+
     private fun writeSyntheticCopc(path: String) {
         RandomAccessFile(path, "rw").use { file ->
             file.setLength(1_300)

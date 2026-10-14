@@ -38,21 +38,23 @@ class LazTerrainDiskCache(
         return runCatching {
             DataInputStream(BufferedInputStream(FileInputStream(cacheFile), BUFFER_BYTES)).use { input ->
                 val magic = input.readUTF()
-                require(magic == MAGIC_V3 || magic == MAGIC_V2) { "Unsupported terrain cache entry" }
+                require(magic == MAGIC_V4) { "Unsupported terrain cache entry" }
                 val width = input.readInt()
                 val height = input.readInt()
                 val cells = width.toLong() * height.toLong()
                 require(width > 0 && height > 0 && cells <= MAX_CELLS) { "Invalid cached grid size" }
                 val cellSize = input.readFloat()
+                val cellX = input.readFloat()
+                val cellY = input.readFloat()
                 val isBareEarth = input.readBoolean()
                 val summary = input.readUTF()
                 val bare = FloatArray(cells.toInt()) { input.readFloat() }
                 val canopy = FloatArray(cells.toInt()) { input.readFloat() }
                 val valid = BooleanArray(cells.toInt()) { input.readBoolean() }
-                val geoMetadata = if (magic == MAGIC_V3) readGeoMetadata(input, width, height, cellSize) else null
+                val interpolated = BooleanArray(cells.toInt()) { input.readBoolean() }
+                val geoMetadata = readGeoMetadata(input, width, height, cellSize)
                 DemGenerator.TerrainLoadResult(
-                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid)
-                        .ensureBareEarthCoverage(),
+                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid, interpolated, cellX, cellY),
                     summary = summary,
                     isBareEarth = isBareEarth,
                     geoMetadata = geoMetadata,
@@ -74,15 +76,18 @@ class LazTerrainDiskCache(
         partial.delete()
         runCatching {
             DataOutputStream(BufferedOutputStream(FileOutputStream(partial), BUFFER_BYTES)).use { output ->
-                output.writeUTF(MAGIC_V3)
+                output.writeUTF(MAGIC_V4)
                 output.writeInt(result.grid.width)
                 output.writeInt(result.grid.height)
                 output.writeFloat(result.grid.cellSizeMeters)
+                output.writeFloat(result.grid.cellSizeXMeters)
+                output.writeFloat(result.grid.cellSizeYMeters)
                 output.writeBoolean(result.isBareEarth)
                 output.writeUTF(result.summary.take(MAX_SUMMARY_CHARS))
                 result.grid.bareEarth.forEach(output::writeFloat)
                 result.grid.canopySpikes.forEach(output::writeFloat)
                 result.grid.validData.forEach(output::writeBoolean)
+                result.grid.interpolatedData.forEach(output::writeBoolean)
                 writeGeoMetadata(output, result.geoMetadata)
                 output.flush()
             }
@@ -190,11 +195,13 @@ class LazTerrainDiskCache(
         val sanitized = options.sanitized()
         val key = buildString {
             append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
+            append("|terrainPrecision8")
             append('|').append(file.length())
             append('|').append(file.lastModified())
             append('|').append(sanitized.groundMode.name)
             append('|').append(sanitized.rasterResolution)
             append('|').append(sanitized.smoothingRadius)
+            append('|').append(sanitized.fixedWidth).append('x').append(sanitized.fixedHeight)
             append('|').append(sanitized.focusBounds)
             // Refines cached before the ground-spacing clamp were over-fine (stair-steps).
             if (sanitized.focusBounds != null) append("|groundSpacingClamp1")
@@ -220,12 +227,11 @@ class LazTerrainDiskCache(
     }
 
     companion object {
-        // V2: validData mask from full raster. V3: same + optional georeference metadata.
-        private const val MAGIC_V2 = "FINDIT_DEM_CACHE_V2"
-        private const val MAGIC_V3 = "FINDIT_DEM_CACHE_V3"
+        // V5: filtered terrain, both physical axis spacings, provenance masks and geo metadata.
+        private const val MAGIC_V4 = "FINDIT_DEM_CACHE_V5"
         private const val CACHE_EXTENSION = "fitdem"
         private const val BUFFER_BYTES = 256 * 1024
-        private const val MAX_CELLS = 2_000_000L
+        private const val MAX_CELLS = 2_048L * 2_048L
         private const val MAX_SUMMARY_CHARS = 16_000
     }
 }

@@ -135,6 +135,8 @@ internal fun interpolateBareEarth(
     totalPoints: Long,
     groundPoints: Int,
     sourceCounts: IntArray? = null,
+    cellSizeXMeters: Float = cellSizeMeters,
+    cellSizeYMeters: Float = cellSizeMeters,
 ): BareEarthInterpolationResult {
     require(measuredElevations.size == width * height)
     require(measuredMask.size == width * height)
@@ -142,7 +144,10 @@ internal fun interpolateBareEarth(
     val interpolated = BooleanArray(width * height)
     val valid = BooleanArray(width * height) { measuredMask[it] && elevations[it].isFinite() }
 
-    val area = width.toDouble() * height.toDouble() * cellSizeMeters.toDouble() * cellSizeMeters.toDouble()
+    require(cellSizeXMeters.isFinite() && cellSizeXMeters > 0 && cellSizeYMeters.isFinite() && cellSizeYMeters > 0)
+    val scaleX = cellSizeXMeters.toDouble() / cellSizeMeters
+    val scaleY = cellSizeYMeters.toDouble() / cellSizeMeters
+    val area = (width - 1).coerceAtLeast(1).toDouble() * (height - 1).coerceAtLeast(1) * cellSizeXMeters * cellSizeYMeters
     val spacing = meanSpacingMeters(area, groundPoints.coerceAtLeast(valid.count { it }).toLong())
     val recommendedCell = recommendedCellSizeMeters(area, groundPoints.coerceAtLeast(1).toLong())
         ?: (spacing * DEFAULT_CELL_TO_SPACING.toFloat())
@@ -150,12 +155,12 @@ internal fun interpolateBareEarth(
     // edges up to VOID_MAX_EDGE would cover is interpolated, wider true voids stay NaN. The data
     // hull is a morphological closing, so nothing is extruded outside the real footprint.
     val maxEdgeCells = voidMaxEdgeCells(cellSizeMeters)
-    val hull = buildDataHull(valid, width, height, maxEdgeCells)
+    val hull = buildDataHull(valid, width, height, maxEdgeCells, scaleX, scaleY)
     val tilesTriangulated = 0
     val trianglesKept = 0
     val trianglesKilled = 0
     val tilesIdw = 0
-    fillVoidsSmooth(elevations, valid, interpolated, hull, width, height)
+    fillVoidsSmooth(elevations, valid, interpolated, hull, width, height, scaleX, scaleY)
 
     var interpolatedCells = 0
     var emptyTotal = 0
@@ -215,7 +220,8 @@ internal fun emptyShareInsideHull(grid: ElevationGrid): Float {
     val measured = BooleanArray(grid.width * grid.height) { index ->
         grid.validData[index] && grid.bareEarth[index].isFinite()
     }
-    val hull = buildDataHull(measured, grid.width, grid.height, voidMaxEdgeCells(grid.cellSizeMeters))
+    val hull = buildDataHull(measured, grid.width, grid.height, voidMaxEdgeCells(grid.cellSizeMeters),
+        grid.cellSizeXMeters.toDouble() / grid.cellSizeMeters, grid.cellSizeYMeters.toDouble() / grid.cellSizeMeters)
     return emptyShareInsideHull(grid.validData, hull)
 }
 
@@ -238,6 +244,8 @@ internal fun ElevationGrid.ensureBareEarthCoverage(): ElevationGrid {
         cellSizeMeters = cellSizeMeters,
         totalPoints = measured.count { it }.toLong(),
         groundPoints = measured.count { it },
+        cellSizeXMeters = cellSizeXMeters,
+        cellSizeYMeters = cellSizeYMeters,
     )
     return ElevationGrid(
         width = width,
@@ -247,6 +255,8 @@ internal fun ElevationGrid.ensureBareEarthCoverage(): ElevationGrid {
         cellSizeMeters = cellSizeMeters,
         validData = filled.validData,
         interpolatedData = filled.interpolatedData,
+        cellSizeXMeters = cellSizeXMeters,
+        cellSizeYMeters = cellSizeYMeters,
     )
 }
 
@@ -318,16 +328,18 @@ internal fun buildDataHull(
     width: Int,
     height: Int,
     radiusCells: Float,
+    scaleX: Double = 1.0,
+    scaleY: Double = 1.0,
 ): BooleanArray {
     val radius = ceil(radiusCells / 2.0).toInt().coerceIn(1, (MAX_VOID_EDGE_CELLS / 2).toInt())
-    val dilated = dilateMask(measured, width, height, radius)
+    val dilated = dilateMask(measured, width, height, radius, scaleX, scaleY)
     val outside = BooleanArray(dilated.size) { !dilated[it] }
     if (outside.none { it }) {
         // No footprint edge in view. Dense data: the whole raster is inside. A handful of
         // isolated samples is not a surface, so nothing is extrapolated around them.
         return if (measured.count { it } >= 16) dilated else measured.copyOf()
     }
-    val grown = dilateMask(outside, width, height, radius)
+    val grown = dilateMask(outside, width, height, radius, scaleX, scaleY)
     return BooleanArray(dilated.size) { measured[it] || !grown[it] }
 }
 
@@ -343,13 +355,15 @@ internal fun fillVoidsSmooth(
     hull: BooleanArray,
     width: Int,
     height: Int,
+    scaleX: Double = 1.0,
+    scaleY: Double = 1.0,
 ) {
     val free = BooleanArray(width * height) { hull[it] && !valid[it] }
     if (free.none { it } || valid.none { it }) return
     val solved = harmonicLevel(
         FloatArray(width * height) { if (valid[it]) elevations[it] else 0f },
         FloatArray(width * height) { if (valid[it]) 1f else 0f },
-        width, height, free,
+        width, height, free, scaleX, scaleY,
     )
     for (i in free.indices) {
         if (!free[i]) continue
@@ -368,6 +382,8 @@ private fun harmonicLevel(
     width: Int,
     height: Int,
     free: BooleanArray?,
+    scaleX: Double,
+    scaleY: Double,
 ): FloatArray {
     val out = FloatArray(width * height) { if (weight[it] > 0f) values[it] else Float.NaN }
     val unknown = BooleanArray(width * height) { weight[it] <= 0f && (free == null || free[it]) }
@@ -393,7 +409,7 @@ private fun harmonicLevel(
         cwt[c] += wgt
     }
     for (c in cv.indices) if (cwt[c] > 0f) cv[c] /= cwt[c]
-    val coarse = harmonicLevel(cv, cwt, cw, ch, null)
+    val coarse = harmonicLevel(cv, cwt, cw, ch, null, scaleX, scaleY)
     // Bilinear prolongation of the coarse solution onto this level's unknowns.
     for (y in 0 until height) for (x in 0 until width) {
         val i = y * width + x
@@ -414,16 +430,22 @@ private fun harmonicLevel(
         val bottom = if (d.isFinite()) c + (d - c) * tx else c
         out[i] = if (bottom.isFinite()) top + (bottom - top) * ty else top
     }
+    // Discrete Laplace equation on rectangular physical cells: weights are 1 / spacing².
+    val inverseX = 1.0 / (scaleX * scaleX)
+    val inverseY = 1.0 / (scaleY * scaleY)
+    val normalization = max(inverseX, inverseY)
+    val wx = (inverseX / normalization).toFloat()
+    val wy = (inverseY / normalization).toFloat()
     repeat(RELAX_ITERATIONS) {
         for (y in 0 until height) for (x in 0 until width) {
             val i = y * width + x
             if (!unknown[i]) continue
             var sum = 0f
-            var n = 0
-            if (x > 0) out[i - 1].let { if (it.isFinite()) { sum += it; n++ } }
-            if (x < width - 1) out[i + 1].let { if (it.isFinite()) { sum += it; n++ } }
-            if (y > 0) out[i - width].let { if (it.isFinite()) { sum += it; n++ } }
-            if (y < height - 1) out[i + width].let { if (it.isFinite()) { sum += it; n++ } }
+            var n = 0f
+            if (x > 0) out[i - 1].let { if (it.isFinite()) { sum += it * wx; n += wx } }
+            if (x < width - 1) out[i + 1].let { if (it.isFinite()) { sum += it * wx; n += wx } }
+            if (y > 0) out[i - width].let { if (it.isFinite()) { sum += it * wy; n += wy } }
+            if (y < height - 1) out[i + width].let { if (it.isFinite()) { sum += it * wy; n += wy } }
             if (n > 0) out[i] = sum / n
         }
     }
@@ -432,29 +454,53 @@ private fun harmonicLevel(
 
 private const val RELAX_ITERATIONS = 12
 
-private fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: Int): BooleanArray {
+/** Exact Euclidean dilation in physical cell coordinates, O(width * height), independent of radius.
+ * Two weighted 1D squared-distance transforms replace up to 128 full-grid growth passes.
+ */
+internal fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: Int,
+                        scaleX: Double = 1.0, scaleY: Double = 1.0): BooleanArray {
+    require(source.size == width * height && scaleX > 0 && scaleY > 0)
     if (radius <= 0) return source.copyOf()
-    // Alternating 3×3 square / plus steps grow an octagon ≈ disc of [radius]: a round window
-    // leaves round true voids (like a TIN edge kill) instead of square, blocky ones.
-    var cur = source.copyOf()
-    var next = BooleanArray(source.size)
-    for (step in 0 until radius) {
-        val square = step % 2 == 0
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                val i = row + x
-                var hit = cur[i] ||
-                    (x > 0 && cur[i - 1]) || (x < width - 1 && cur[i + 1]) ||
-                    (y > 0 && cur[i - width]) || (y < height - 1 && cur[i + width])
-                if (!hit && square) {
-                    hit = (y > 0 && ((x > 0 && cur[i - width - 1]) || (x < width - 1 && cur[i - width + 1]))) ||
-                        (y < height - 1 && ((x > 0 && cur[i + width - 1]) || (x < width - 1 && cur[i + width + 1])))
-                }
-                next[i] = hit
-            }
+    val distance = DoubleArray(source.size) { if (source[it]) 0.0 else Double.POSITIVE_INFINITY }
+    val length = max(width, height)
+    val f = DoubleArray(length)
+    val out = DoubleArray(length)
+    val vertices = IntArray(length)
+    val crossings = DoubleArray(length + 1)
+    fun transform(n: Int, axisWeight: Double) {
+        val first = (0 until n).firstOrNull { f[it].isFinite() }
+        if (first == null) { java.util.Arrays.fill(out, 0, n, Double.POSITIVE_INFINITY); return }
+        var k = 0
+        vertices[0] = first
+        crossings[0] = Double.NEGATIVE_INFINITY
+        crossings[1] = Double.POSITIVE_INFINITY
+        for (q in first + 1 until n) {
+            if (!f[q].isFinite()) continue
+            fun crossing(v: Int) = ((f[q] - f[v]) / axisWeight + q.toDouble() * q - v.toDouble() * v) / (2.0 * (q - v))
+            var s = crossing(vertices[k])
+            while (k > 0 && s <= crossings[k]) { k--; s = crossing(vertices[k]) }
+            k++
+            vertices[k] = q
+            crossings[k] = s
+            crossings[k + 1] = Double.POSITIVE_INFINITY
         }
-        val t = cur; cur = next; next = t
+        k = 0
+        for (q in 0 until n) {
+            while (crossings[k + 1] < q) k++
+            val delta = q - vertices[k]
+            out[q] = f[vertices[k]] + axisWeight * delta.toDouble() * delta
+        }
     }
-    return cur
+    for (y in 0 until height) {
+        for (x in 0 until width) f[x] = distance[y * width + x]
+        transform(width, scaleX * scaleX)
+        for (x in 0 until width) distance[y * width + x] = out[x]
+    }
+    for (x in 0 until width) {
+        for (y in 0 until height) f[y] = distance[y * width + x]
+        transform(height, scaleY * scaleY)
+        for (y in 0 until height) distance[y * width + x] = out[y]
+    }
+    val radiusSq = radius.toDouble() * radius
+    return BooleanArray(source.size) { distance[it] <= radiusSq }
 }

@@ -14,6 +14,8 @@ data class LasCrsInfo(
     val maxY: Double,
     /** Why [crs] is null, for UI diagnostics. */
     val problem: String? = null,
+    val verticalUnitToMeters: Double? = null,
+    val horizontalUnitToMeters: Double? = crs?.unitToMeters,
 )
 
 object LasCrsReader {
@@ -23,7 +25,7 @@ object LasCrsReader {
 
     fun read(file: File): LasCrsInfo? = runCatching {
         RandomAccessFile(file, "r").use { raf ->
-            val head = ByteArray(375.coerceAtMost(raf.length().toInt()))
+            val head = ByteArray(minOf(375L, raf.length()).toInt())
             raf.readFully(head)
             if (String(head, 0, 4, Charsets.US_ASCII) != "LASF") return null
             val b = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN)
@@ -75,9 +77,28 @@ object LasCrsReader {
                 geoKeys != null -> "Unsupported EPSG code in GeoKeys"
                 else -> "No CRS stored in this file"
             }
-            LasCrsInfo(crs, minX, maxX, minY, maxY, problem)
+            LasCrsInfo(crs, minX, maxX, minY, maxY, problem,
+                wkt?.let(WktCrsParser::verticalUnitToMeters) ?: geoKeys?.let { linearUnitFromGeoKeys(it, 4099) },
+                wkt?.let(WktCrsParser::horizontalUnitToMeters) ?: geoKeys?.let { linearUnitFromGeoKeys(it, 3076) } ?: crs?.unitToMeters)
         }
     }.getOrNull()
+
+    internal fun linearUnitFromGeoKeys(data: ByteArray, key: Int): Double? {
+        if (data.size < 8) return null
+        val b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        val keys = b.getShort(6).toInt() and 0xFFFF
+        for (k in 0 until minOf(keys, (data.size - 8) / 8)) {
+            val base = 8 + k * 8
+            if ((b.getShort(base).toInt() and 0xFFFF) != key || b.getShort(base + 2).toInt() != 0) continue
+            return when (b.getShort(base + 6).toInt() and 0xFFFF) {
+                9001 -> 1.0
+                9002 -> ProjectedCrs.INTERNATIONAL_FOOT
+                9003 -> ProjectedCrs.US_SURVEY_FOOT
+                else -> null
+            }
+        }
+        return null
+    }
 
     /** GeoTIFF key directory: ProjectedCSTypeGeoKey (3072) + optional ProjLinearUnitsGeoKey (3076). */
     internal fun fromGeoKeys(data: ByteArray): ProjectedCrs? {

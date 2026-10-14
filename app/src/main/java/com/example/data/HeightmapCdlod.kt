@@ -10,6 +10,8 @@ data class HeightmapTexture(
     val height: Int,
     val floats: FloatArray,
     val cellSizeMeters: Float,
+    val cellSizeXMeters: Float = cellSizeMeters,
+    val cellSizeYMeters: Float = cellSizeMeters,
 )
 
 data class CdlodNode(
@@ -33,7 +35,7 @@ object HeightmapCdlod {
             val z = grid.bareEarth[index]
             floats[index] = if (grid.validData[index] && z.isFinite()) z else Float.NaN
         }
-        return HeightmapTexture(grid.width, grid.height, floats, grid.cellSizeMeters)
+        return HeightmapTexture(grid.width, grid.height, floats, grid.cellSizeMeters, grid.cellSizeXMeters, grid.cellSizeYMeters)
     }
 
     /**
@@ -154,7 +156,7 @@ object GpuAnalysisKernels {
         layout (local_size_x = 8, local_size_y = 8) in;
         layout (r32f, binding = 0) readonly uniform highp image2D uHeight;
         layout (rgba8, binding = 1) writeonly uniform lowp image2D uShade;
-        uniform float uCell;
+        uniform vec2 uCell;
         uniform vec3 uLight;
         float sampleZ(ivec2 p, ivec2 size, float center) {
             if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) return center;
@@ -178,8 +180,8 @@ object GpuAnalysisKernels {
             float z20 = sampleZ(p + ivec2(-1,  1), size, c);
             float z21 = sampleZ(p + ivec2( 0,  1), size, c);
             float z22 = sampleZ(p + ivec2( 1,  1), size, c);
-            float gx = ((z02 + 2.0 * z12 + z22) - (z00 + 2.0 * z10 + z20)) / (8.0 * uCell);
-            float gy = ((z20 + 2.0 * z21 + z22) - (z00 + 2.0 * z01 + z02)) / (8.0 * uCell);
+            float gx = ((z02 + 2.0 * z12 + z22) - (z00 + 2.0 * z10 + z20)) / (8.0 * uCell.x);
+            float gy = ((z20 + 2.0 * z21 + z22) - (z00 + 2.0 * z01 + z02)) / (8.0 * uCell.y);
             vec3 n = normalize(vec3(-gx, -gy, 1.0));
             float shade = clamp(dot(n, normalize(uLight)), 0.0, 1.0);
             imageStore(uShade, p, vec4(vec3(0.18 + shade * 0.82), 1.0));

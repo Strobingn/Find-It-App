@@ -27,6 +27,7 @@ data class GridGeoreference(
     fun toGridPercent(latDeg: Double, lonDeg: Double, frame: GeodeticFrame, epochYear: Double): Pair<Float, Float>? {
         val (lat, lon) = DatumShift.convert(latDeg, lonDeg, frame, crs.frame, epochYear)
         val (e, n) = crs.project(lat, lon)
+        if (!e.isFinite() || !n.isFinite() || e !in minX..maxX || n !in minY..maxY) return null
         val x = (e - minX) / rangeX * (width - 1) / width * 100.0
         val y = (maxY - n) / rangeY * (height - 1) / height * 100.0
         if (!x.isFinite() || !y.isFinite() || x !in 0.0..100.0 || y !in 0.0..100.0) return null

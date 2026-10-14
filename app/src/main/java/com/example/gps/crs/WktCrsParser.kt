@@ -51,6 +51,20 @@ object WktCrsParser {
         return runCatching { node() }.getOrNull()
     }
 
+    /** Linear unit even when the projection itself is not implemented by the map transform. */
+    fun horizontalUnitToMeters(wkt: String): Double? {
+        val projected = parse(wkt.trim().trimEnd('\u0000'))?.find("PROJCS", "PROJCRS") ?: return null
+        val unit = projected.children("UNIT").lastOrNull() ?: projected.children("LENGTHUNIT").lastOrNull()
+            ?: projected.children("AXIS").firstNotNullOfOrNull { it.child("LENGTHUNIT", "UNIT") }
+        return unit?.num(1)?.takeIf { it.isFinite() && it > 0.0 }
+    }
+
+    /** Read only the vertical CRS unit; horizontal feet do not imply vertical feet. */
+    fun verticalUnitToMeters(wkt: String): Double? {
+        val vertical = parse(wkt.trim().trimEnd('\u0000'))?.find("VERT_CS", "VERTCRS", "VERTICALCRS") ?: return null
+        return vertical.find("LENGTHUNIT", "UNIT")?.num(1)?.takeIf { it.isFinite() && it > 0.0 }
+    }
+
     fun parseProjected(wkt: String): ProjectedCrs? {
         val root = parse(wkt.trim().trimEnd('\u0000')) ?: return null
         val projcs = root.find("PROJCS") ?: return root.find("PROJCRS")?.let(::fromWkt2Id)

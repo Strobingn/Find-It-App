@@ -90,6 +90,8 @@ import java.io.File
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -151,6 +153,8 @@ fun ToolsTab(
     var regionalCorpusStatus by remember { mutableStateOf<String?>(null) }
     var perfHarnessStatus by remember { mutableStateOf<String?>(null) }
     var decoderBenchStatus by remember { mutableStateOf<String?>(null) }
+    var lastDecoderBenchmark by remember { mutableStateOf<com.example.data.DecoderBenchmarkResult?>(null) }
+    var decoderBenchmarkJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var mosaicStressStatus by remember { mutableStateOf<String?>(null) }
     val arCoreStatus = remember(context) { ArCoreAvailability.status(context) }
     val reviewedStore = remember(context) {
@@ -651,31 +655,50 @@ fun ToolsTab(
         item {
             val decoderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
                 if (uri == null) return@rememberLauncherForActivityResult
-                scope.launch(Dispatchers.IO) {
-                    val name = uri.lastPathSegment.orEmpty()
+                decoderBenchmarkJob?.cancel()
+                lastDecoderBenchmark=null
+                decoderBenchmarkJob=scope.launch(Dispatchers.IO) {
+                    val benchContext=currentCoroutineContext()
+                    val name=runCatching {
+                        context.contentResolver.query(uri,arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),null,null,null)?.use { cursor ->
+                            if(cursor.moveToFirst()) cursor.getString(0) else null
+                        }
+                    }.getOrNull() ?: uri.lastPathSegment.orEmpty()
                     val ext = when {
                         name.endsWith(".laz", ignoreCase = true) -> "laz"
                         else -> "las"
                     }
                     val copy = File(context.cacheDir, "decoder-bench-${System.currentTimeMillis()}.$ext")
                     try {
-                        runCatching {
-                            context.contentResolver.openInputStream(uri)?.use { input ->
-                                copy.outputStream().use { input.copyTo(it) }
+                        withContext(Dispatchers.Main) { decoderBenchStatus="Copying selected survey…" }
+                        requireNotNull(context.contentResolver.openInputStream(uri)).use { input ->
+                            copy.outputStream().use { output ->
+                                val buffer=ByteArray(256*1024)
+                                while(true) {
+                                    if(!benchContext.isActive) throw java.util.concurrent.CancellationException("Benchmark cancelled")
+                                    val n=input.read(buffer);if(n<0) break;output.write(buffer,0,n)
+                                }
                             }
                         }
                         val result = runCatching {
                             TerrainDecoderBenchmark.run(
                                 file = copy,
                                 cacheDir = File(context.cacheDir, "decoder-bench-cache"),
+                                shouldContinue = { benchContext.isActive },
+                                onProgress = { progress -> scope.launch(Dispatchers.Main) { if(benchContext.isActive) decoderBenchStatus=progress } },
                             )
                         }.getOrElse { error ->
-                            decoderBenchStatus = error.message
+                            if(error is java.util.concurrent.CancellationException) throw error
+                            withContext(Dispatchers.Main) { decoderBenchStatus = error.message }
                             return@launch
                         }
                         withContext(Dispatchers.Main) {
+                            lastDecoderBenchmark=result
                             decoderBenchStatus = result.format().trim()
                         }
+                    } catch(error: Exception) {
+                        if(error is java.util.concurrent.CancellationException) throw error
+                        withContext(Dispatchers.Main) { decoderBenchStatus=error.message ?: "Benchmark could not read the selected file" }
                     } finally {
                         copy.delete()
                     }
@@ -687,14 +710,22 @@ fun ToolsTab(
                 status = decoderBenchStatus
                     ?: "laszip4j vs laz-rs on the same file · native=${LazRsNativeDecoder.isAvailable} · prefer=${LazDecoderSettings.preferred}",
                 statusActive = decoderBenchStatus != null,
-                description = "Times laszip4j and laz-rs on the same file (JNI direct buffer, " +
-                    "parallel chunk decompression). Default stays laszip4j until native wins " +
-                    "on this phone. " + TerrainMemoryMonitor.snapshot().format(),
+                description = "Compares repeated equivalent reads with 2/4/6 workers and alternating order. " +
+                    "Reports first-read/index cost separately and verifies DEM parity. " + TerrainMemoryMonitor.snapshot().format(),
             ) {
                 TextButton(
                     onClick = { decoderPicker.launch(arrayOf("*/*")) },
                     modifier = Modifier.testTag("tool_decoder_benchmark_run"),
                 ) { Text("Benchmark a LAS/LAZ file") }
+                TextButton(onClick={ decoderBenchmarkJob?.cancel(); decoderBenchStatus="Benchmark cancelled" },enabled=decoderBenchmarkJob?.isActive==true) { Text("Cancel benchmark") }
+                TextButton(onClick={
+                    lastDecoderBenchmark?.let { result ->
+                        LazDecoderSettings.applyMeasured(context,result.recommendedBackend,result.recommendedWorkers,result.recommendedTileCells)
+                        decoderBenchStatus="Applied ${result.recommendedBackend.name} · ${result.recommendedWorkers} measured workers · ${result.recommendedTileCells}-node tiles"
+                    }
+                },enabled=lastDecoderBenchmark!=null) { Text("Apply measured settings") }
+                TextButton(onClick={ com.example.data.TerrainFrameProfiler.reset(); decoderBenchStatus="Frame capture reset. Pan, zoom or change lighting, then show frame timings." }) { Text("Reset frame capture") }
+                TextButton(onClick={ decoderBenchStatus=com.example.data.TerrainFrameProfiler.report() }) { Text("Show frame timings") }
                 TextButton(
                     onClick = {
                         val next = if (LazDecoderSettings.preferred == LazDecoderBackend.LASZIP4J) {

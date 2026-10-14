@@ -55,6 +55,8 @@ internal class LidarRasterizer(
     lasVersionMajor: Int = 1,
     lasVersionMinor: Int = 2,
     pointFormat: Int = 0,
+    private val horizontalUnitToMeters: Double = 1.0,
+    private val verticalUnitToMeters: Double = 1.0,
 ) {
     private val options = options.sanitized()
     private val isOverview = this.options.focusBounds == null
@@ -82,7 +84,7 @@ internal class LidarRasterizer(
     private val groundMin: FloatArray
     private val groundCount: IntArray
     /** Sum of ground Z per cell: the cell value is the ground mean (PDAL writers.gdal mean), not the min. */
-    private val groundSum: FloatArray
+    private val groundSum: DoubleArray
     private val allMin: FloatArray
     private val allSecondMin: FloatArray
     private val allLowBandCount: IntArray
@@ -107,7 +109,10 @@ internal class LidarRasterizer(
     var truncatedByReader: Boolean = false
 
     init {
-        if (rangeX >= rangeY) {
+        if (this.options.fixedWidth != null && this.options.fixedHeight != null) {
+            width = this.options.fixedWidth
+            height = this.options.fixedHeight
+        } else if (rangeX >= rangeY) {
             width = longSide
             height = (longSide * rangeY / rangeX).roundToInt().coerceIn(MIN_SHORT_SIDE, longSide)
         } else {
@@ -118,7 +123,7 @@ internal class LidarRasterizer(
         yToGrid = (height - 1).toDouble() / rangeY
         groundMin = FloatArray(width * height) { Float.MAX_VALUE }
         groundCount = IntArray(width * height)
-        groundSum = FloatArray(width * height)
+        groundSum = DoubleArray(width * height)
         allMin = FloatArray(width * height) { Float.MAX_VALUE }
         allSecondMin = FloatArray(width * height) { Float.MAX_VALUE }
         allLowBandCount = IntArray(width * height)
@@ -155,9 +160,11 @@ internal class LidarRasterizer(
      * Adds a complete elevation sample. Every finite in-bounds return is binned; the grid itself
      * is the memory bound, so there is no sample stride.
      */
-    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false): Boolean {
+    fun addPoint(x: Double, y: Double, z: Float, classification: Int, isKeyPoint: Boolean = false, isWithheld: Boolean = false): Boolean {
         advance()
-        if (!z.isFinite()) return true
+        if (!z.isFinite() || isWithheld || classification == 7 || classification == 18) return true
+        val elevation = (z.toDouble() * verticalUnitToMeters).toFloat()
+        if (!elevation.isFinite()) return true
         val normalizedClass = classification.coerceIn(0, 255)
         // Explicit class filter: skip elevation/coverage for non-matching returns entirely.
         if (allowedClasses != null && normalizedClass !in allowedClasses) {
@@ -170,21 +177,21 @@ internal class LidarRasterizer(
 
         coverageCount[index]++
 
-        if (z < allMin[index]) {
+        if (elevation < allMin[index]) {
             // A newly observed low demotes the previous minimum to second place. Returns that
             // corroborate each other within a narrow band keep the band count high; a lone return
             // far below everything else stays isolated and can later be rejected as a low spike.
             allSecondMin[index] = allMin[index]
-            allMin[index] = z
+            allMin[index] = elevation
             allLowBandCount[index] =
-                if (allSecondMin[index] - z <= LOW_BAND_METERS) 2 else 1
-        } else if (z < allSecondMin[index]) {
-            allSecondMin[index] = z
-            if (z - allMin[index] <= LOW_BAND_METERS) allLowBandCount[index]++
-        } else if (z - allMin[index] <= LOW_BAND_METERS) {
+                if (allSecondMin[index] - elevation <= LOW_BAND_METERS) 2 else 1
+        } else if (elevation < allSecondMin[index]) {
+            allSecondMin[index] = elevation
+            if (elevation - allMin[index] <= LOW_BAND_METERS) allLowBandCount[index]++
+        } else if (elevation - allMin[index] <= LOW_BAND_METERS) {
             allLowBandCount[index]++
         }
-        if (z > allMax[index]) allMax[index] = z
+        if (elevation > allMax[index]) allMax[index] = elevation
         if (allCount[index] == 0) elevationCellsPopulated++
         allCount[index]++
         pointsBinned++
@@ -201,8 +208,8 @@ internal class LidarRasterizer(
                 pointFormat = pointFormat,
             )
             if (isSourceGround) {
-                if (z < groundMin[index]) groundMin[index] = z
-                groundSum[index] += z
+                if (elevation < groundMin[index]) groundMin[index] = elevation
+                groundSum[index] += elevation
                 groundCount[index]++
                 groundPointsBinned++
             }
@@ -257,7 +264,7 @@ internal class LidarRasterizer(
         }
         val source = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED -> FloatArray(width * height) { i ->
-                if (groundCount[i] > 0) groundSum[i] / groundCount[i] else groundMin[i]
+                if (groundCount[i] > 0) (groundSum[i] / groundCount[i]).toFloat() else groundMin[i]
             }
             GroundSurfaceMode.AUTO_LOWEST -> automaticGround ?: allMin
             GroundSurfaceMode.SURFACE_MODEL -> allMax
@@ -272,7 +279,9 @@ internal class LidarRasterizer(
         for (index in surface.indices) {
             surface[index] = if (measuredMask[index]) source[index] else Float.NaN
         }
-        val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
+        val cellX = (rangeX * horizontalUnitToMeters / (width - 1)).toFloat()
+        val cellY = (rangeY * horizontalUnitToMeters / (height - 1)).toFloat()
+        val cellSize = max(cellX.toDouble(), cellY.toDouble())
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
         val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
@@ -291,9 +300,11 @@ internal class LidarRasterizer(
             totalPoints = pointsDecoded,
             groundPoints = groundSamples,
             sourceCounts = sourceCounts,
+            cellSizeXMeters = cellX,
+            cellSizeYMeters = cellY,
         )
 
-        val cleaned = if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
+        val cleaned = if (appliedMode != GroundSurfaceMode.AUTO_LOWEST) {
             filled.elevations
         } else {
             suppressIsolatedLowNoise(filled.elevations, width, height)
@@ -374,7 +385,7 @@ internal class LidarRasterizer(
 
         val wasTruncated = truncatedByReader
         val earlyOutNote = if (wasTruncated) " · truncated" else ""
-        val samplingNote = "every return used · $pointsDecoded points decoded$earlyOutNote"
+        val samplingNote = "every eligible return used · $pointsDecoded points decoded$earlyOutNote"
         val modeNote = when (appliedMode) {
             GroundSurfaceMode.SOURCE_CLASSIFIED ->
                 "ASPRS ground classes: $groundPointsBinned / $pointsBinned sampled returns"
@@ -419,8 +430,11 @@ internal class LidarRasterizer(
                 cellSizeMeters = cellSize,
                 validData = validData,
                 interpolatedData = interpolatedData,
+                cellSizeXMeters = cellX,
+                cellSizeYMeters = cellY,
             ),
             totalPointsRead = pointsDecoded.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            decodedPoints = pointsDecoded,
             groundPointsUsed = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
                 groundPointsBinned
             } else {
@@ -479,6 +493,8 @@ internal class LidarRasterizer(
             totalPoints = pointsDecoded,
             groundPoints = samples,
             sourceCounts = counts,
+            cellSizeXMeters = (rangeX * horizontalUnitToMeters / (width - 1)).toFloat(),
+            cellSizeYMeters = (rangeY * horizontalUnitToMeters / (height - 1)).toFloat(),
         )
         val cleaned = suppressIsolatedLowNoise(filled.elevations, width, height)
         val ground = if (options.smoothingRadius > 0) {
@@ -542,9 +558,9 @@ internal class LidarRasterizer(
 /**
  * ASPRS ground used for [GroundSurfaceMode.SOURCE_CLASSIFIED].
  *
- * Class 2 is always Ground. Class 8 is Model Key-Point only in LAS 1.0–1.3 (point formats 0–5).
- * LAS 1.4 moved key-points to a classification flag and reserved class 8, so class 8 is not
- * treated as ground there. The key-point flag on class 2 is redundant and ignored.
+ * Class 2 is always Ground. Class 8 is Model Key-Point in legacy point formats 0–5,
+ * including legacy payloads inside LAS 1.4. Formats 6–10 reserve class 8 and carry key-points
+ * in a classification flag. The key-point flag on class 2 is redundant and ignored.
  */
 @Suppress("UNUSED_PARAMETER")
 internal fun isSourceGround(
@@ -557,8 +573,7 @@ internal fun isSourceGround(
     // The key-point flag is ignored: class 2 is always ground, and LAS 1.4 key-points are a flag
     // on whatever class they already have — they are not a substitute for class 8.
     if (classification == 2) return true
-    val preLas14 = versionMajor < 1 || (versionMajor == 1 && versionMinor < 4) || pointFormat < 6
-    return preLas14 && classification == 8
+    return pointFormat in 0..5 && classification == 8
 }
 
 internal fun fillMissingNearest(grid: FloatArray, width: Int, height: Int) {

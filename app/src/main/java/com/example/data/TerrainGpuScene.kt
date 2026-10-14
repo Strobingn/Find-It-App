@@ -152,6 +152,10 @@ object TerrainGpuSceneBuilder {
         return TerrainGpuScene(levels, source.width, source.height, heightmap, nodes)
     }
 
+    fun buildHeightfield(source: ElevationGrid): TerrainGpuScene = TerrainGpuScene(
+        listOf(TerrainGpuLevel(1, source.width, source.height, emptyList())), source.width, source.height,
+        HeightmapCdlod.pack(source))
+
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
         val bounds = elevationBounds(grid)
         return buildBatch(grid, tile, bounds.first, bounds.second, useIntIndices = false)
@@ -277,9 +281,9 @@ object TerrainGpuSceneBuilder {
         }
 
         val dx = (elevationAt(x + 1, y) - elevationAt(x - 1, y)) /
-            max(2f * grid.cellSizeMeters, 0.001f)
+            max(2f * grid.cellSizeXMeters, 0.001f)
         val dy = (elevationAt(x, y + 1) - elevationAt(x, y - 1)) /
-            max(2f * grid.cellSizeMeters, 0.001f)
+            max(2f * grid.cellSizeYMeters, 0.001f)
         var nx = -dx
         var ny = dy
         var nz = 1f

@@ -1,57 +1,45 @@
 package com.example.data
 
+import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/**
- * JNI front for laz-rs (`native/lazrs-jni`). Packed record is 16 bytes, little-endian:
- * `f32 dx, f32 dy, f32 dz` relative to a double-precision origin, then `u8 class, u8 flags, u16 pad`.
- *
- * The library is optional. [isAvailable] is false until `liblazrs_jni.so` is built with
- * cargo-ndk and placed in `jniLibs`. laszip4j remains the default fallback.
- */
+/** ABI 2: i32 source XYZ, u8 class, u8 key/withheld flags and two padding bytes. */
 object LazRsNativeDecoder {
     const val RECORD_BYTES = 16
-
-    @Volatile
-    var continueCheck: () -> Boolean = { true }
-
     val isAvailable: Boolean = runCatching {
         System.loadLibrary("lazrs_jni")
-        nativeAvailable()
+        nativeAbi() == 2
     }.getOrDefault(false)
 
-    @JvmStatic
-    fun isCancelled(): Boolean = !continueCheck() || Thread.currentThread().isInterrupted
-
-    /**
-     * Decodes returns into [destination] (direct buffer) as origin-relative f32.
-     * Writes the reconstruction origin into [origins] (`x, y, z`).
-     * Returns the point count, or -1 if the native library is missing or the file could not be read.
-     */
-    fun decodePacked(
-        file: File,
-        destination: ByteBuffer,
-        origins: DoubleArray = DoubleArray(3),
-        shouldContinue: () -> Boolean = { true },
-    ): Int {
-        if (!isAvailable) return -1
-        require(destination.isDirect) { "laz-rs JNI writes a direct buffer" }
-        require(origins.size >= 3) { "origins must hold x, y, z" }
-        destination.order(ByteOrder.LITTLE_ENDIAN)
-        val previous = continueCheck
-        continueCheck = shouldContinue
-        return try {
-            nativeDecode(file.absolutePath, destination, origins)
-        } finally {
-            continueCheck = previous
-        }
+    fun open(file: File, workers: Int): Session? {
+        if (!isAvailable) return null
+        val handle = nativeOpen(file.absolutePath, workers.coerceIn(1, 8))
+        if (handle == 0L) return null
+        val batch = nativeMaxBatch(handle)
+        if (batch <= 0) { nativeClose(handle); return null }
+        return Session(handle, batch)
     }
 
-    @Suppress("unused")
-    private external fun nativeAvailable(): Boolean
-
-    @Suppress("unused")
-    private external fun nativeDecode(path: String, destination: ByteBuffer, origins: DoubleArray): Int
+    class Session internal constructor(private var handle: Long, val maxBatch: Int) : Closeable {
+        @Synchronized
+        fun read(start: Long, count: Int, destination: ByteBuffer): Int {
+            check(handle != 0L) { "Decoder is closed" }
+            require(start >= 0 && count in 1..maxBatch)
+            require(destination.isDirect && destination.capacity().toLong() >= count.toLong() * RECORD_BYTES)
+            destination.clear()
+            destination.order(ByteOrder.LITTLE_ENDIAN)
+            return nativeRead(handle, start, count, destination)
+        }
+        @Synchronized
+        override fun close() {
+            if (handle != 0L) { nativeClose(handle); handle = 0L }
+        }
+    }
+    private external fun nativeAbi(): Int
+    private external fun nativeOpen(path: String, workers: Int): Long
+    private external fun nativeMaxBatch(handle: Long): Int
+    private external fun nativeRead(handle: Long, start: Long, count: Int, destination: ByteBuffer): Int
+    private external fun nativeClose(handle: Long)
 }

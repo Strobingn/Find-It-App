@@ -17,6 +17,8 @@ internal object PackedPointRasterizer {
         originY: Double = 0.0,
         originZ: Double = 0.0,
     ): Boolean {
+        require(pointCount >= 0 && pointCount.toLong() * LazRsNativeDecoder.RECORD_BYTES <= packed.capacity())
+        if (!shouldContinue()) return false
         val buffer = packed.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         buffer.clear()
         repeat(pointCount) { index ->
@@ -36,12 +38,15 @@ internal object PackedPointRasterizer {
                 z = z,
                 classification = classification,
                 isKeyPoint = flags and 0x01 != 0,
+                isWithheld = flags and 0x02 != 0,
             )
         }
         return true
     }
 
-    fun allocate(pointCount: Int): ByteBuffer =
-        ByteBuffer.allocateDirect(pointCount.coerceAtLeast(0) * LazRsNativeDecoder.RECORD_BYTES)
+    fun allocate(pointCount: Int): ByteBuffer {
+        require(pointCount in 0..(Int.MAX_VALUE / LazRsNativeDecoder.RECORD_BYTES)) { "Packed point buffer exceeds JVM capacity" }
+        return ByteBuffer.allocateDirect(pointCount * LazRsNativeDecoder.RECORD_BYTES)
             .order(ByteOrder.LITTLE_ENDIAN)
+    }
 }

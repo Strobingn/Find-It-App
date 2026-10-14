@@ -74,7 +74,7 @@ class TerrainDecodeCoordinator(
                     val scene = TerrainStageProfiler.stageSuspend("mesh", "cache") {
                         buildGpuScene(fullLookup.result.grid)
                     }
-                    LazSpatialIndex.ensureBuiltAsync(file)
+                    LazChunkIndex.ensureBuiltAsync(file)
                     val outcome = TerrainDecodeOutcome(LasGeoreferencing.attach(fullLookup.result, file, sanitized), fullLookup.hit, scene)
                     onPreview?.invoke(outcome)
                     return@withLock outcome
@@ -119,7 +119,7 @@ class TerrainDecodeCoordinator(
                 currentCoroutineContext().ensureActive()
                 cache.putMemory(file, sanitized, decoded)
                 cache.putDisk(file, sanitized, decoded)
-                LazSpatialIndex.ensureBuiltAsync(file)
+                LazChunkIndex.ensureBuiltAsync(file)
                 onStage("Preparing full-detail GPU terrain…")
                 val scene = TerrainStageProfiler.stageSuspend("mesh", "${decoded.grid.width}x${decoded.grid.height}") {
                     buildGpuScene(decoded.grid)
@@ -225,13 +225,7 @@ class TerrainDecodeCoordinator(
     private suspend fun buildGpuScene(grid: ElevationGrid): TerrainGpuScene =
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            val scene = TerrainGpuSceneBuilder.build(
-                source = grid,
-                maxFinestDimension = maxOf(grid.width, grid.height, 64),
-                tileSize = GPU_PREVIEW_TILE_SIZE,
-                useIntIndices = false,
-                attachHeightmap = true,
-            )
+            val scene = TerrainGpuSceneBuilder.buildHeightfield(grid)
             TerrainMemoryMonitor.noteGpuScene(scene)
             scene
         }

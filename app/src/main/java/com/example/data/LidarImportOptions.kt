@@ -11,13 +11,14 @@ data class NormalizedRasterBounds(
     val bottom: Double,
 ) {
     fun sanitized(): NormalizedRasterBounds {
-        val safeLeft = left.coerceIn(0.0, 0.999)
-        val safeTop = top.coerceIn(0.0, 0.999)
+        if (!listOf(left, top, right, bottom).all { it.isFinite() }) return Full
+        val safeLeft = left.coerceIn(0.0, 1.0 - 1e-9)
+        val safeTop = top.coerceIn(0.0, 1.0 - 1e-9)
         return copy(
             left = safeLeft,
             top = safeTop,
-            right = right.coerceIn(safeLeft + 0.001, 1.0),
-            bottom = bottom.coerceIn(safeTop + 0.001, 1.0),
+            right = right.coerceIn(safeLeft + 1e-9, 1.0),
+            bottom = bottom.coerceIn(safeTop + 1e-9, 1.0),
         )
     }
 
@@ -66,6 +67,9 @@ data class LidarImportOptions(
     val focusBounds: NormalizedRasterBounds? = null,
     /** When non-null and non-empty, only these ASPRS classes contribute to elevation binning. */
     val allowedClasses: Set<Int>? = null,
+    /** Anchored tile grids specify both node counts; ordinary imports derive their shape. */
+    val fixedWidth: Int? = null,
+    val fixedHeight: Int? = null,
 ) {
     fun sanitized(): LidarImportOptions {
         val sanitizedFocus = focusBounds?.sanitized()
@@ -80,6 +84,8 @@ data class LidarImportOptions(
         return copy(
             rasterResolution = rasterResolution.coerceIn(MIN_RASTER_RESOLUTION, maxResolution),
             smoothingRadius = smoothingRadius.coerceIn(0, 4),
+            fixedWidth = fixedWidth?.coerceIn(2, maxResolution),
+            fixedHeight = fixedHeight?.coerceIn(2, maxResolution),
             focusBounds = sanitizedFocus,
             allowedClasses = classes,
         )

@@ -467,8 +467,10 @@ private fun TerrainTab(
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val controlsMaxHeight = maxHeight * 0.76f
 
+        val gpuTerrainFrame by viewModel.gpuTerrainFrame.collectAsStateWithLifecycle()
         LidarMapCanvas(
             bitmap = bitmap,
+            gpuFrame = gpuTerrainFrame,
             isRendering = isRendering,
             sweepX = sweepX,
             sweepY = sweepY,

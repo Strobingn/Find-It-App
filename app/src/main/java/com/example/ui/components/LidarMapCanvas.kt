@@ -136,12 +136,19 @@ fun LidarMapCanvas(
     viewshedGridWidth: Int = 0,
     viewshedGridHeight: Int = 0,
     modifier: Modifier = Modifier,
+    gpuFrame: com.example.data.GpuTerrainFrame? = null,
 ) {
     val imageBitmap = remember(bitmap) {
         runCatching {
             bitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
         }.getOrNull()
     }
+    val gpuPainter = remember(gpuFrame?.data) {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && gpuFrame != null)
+            runCatching { GpuHillshadePainter(gpuFrame.data) }.getOrNull() else null
+    }
+    val terrainWidth = gpuFrame?.data?.bitmap?.width ?: imageBitmap?.width ?: 1
+    val terrainHeight = gpuFrame?.data?.bitmap?.height ?: imageBitmap?.height ?: 1
     val basemapImageBitmap = remember(basemapBitmap) {
         runCatching {
             basemapBitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
@@ -350,11 +357,11 @@ fun LidarMapCanvas(
                         val fit = containScale(
                             canvasWidth,
                             canvasHeight,
-                            imageBitmap.width.toFloat(),
-                            imageBitmap.height.toFloat(),
+                            terrainWidth.toFloat(),
+                            terrainHeight.toFloat(),
                         )
-                        val displayWidth = imageBitmap.width * fit * zoom
-                        val displayHeight = imageBitmap.height * fit * zoom
+                        val displayWidth = terrainWidth * fit * zoom
+                        val displayHeight = terrainHeight * fit * zoom
                         val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
                         val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
                         val normalizedX = (offset.x - imageLeft) / displayWidth
@@ -378,17 +385,18 @@ fun LidarMapCanvas(
             ) {
                 val canvasWidth = size.width.coerceAtLeast(1f)
                 val canvasHeight = size.height.coerceAtLeast(1f)
-                val fit = containScale(canvasWidth, canvasHeight, imageBitmap.width.toFloat(), imageBitmap.height.toFloat())
-                val displayWidth = imageBitmap.width * fit * zoom
-                val displayHeight = imageBitmap.height * fit * zoom
+                val fit = containScale(canvasWidth, canvasHeight, terrainWidth.toFloat(), terrainHeight.toFloat())
+                val displayWidth = terrainWidth * fit * zoom
+                val displayHeight = terrainHeight * fit * zoom
                 val imageLeft = (canvasWidth - displayWidth) * 0.5f + pan.x
                 val imageTop = (canvasHeight - displayHeight) * 0.5f + pan.y
 
-                drawImage(
-                    image = imageBitmap,
-                    dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
-                    dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
-                )
+                if (android.os.Build.VERSION.SDK_INT >= 33 && gpuPainter != null && gpuFrame != null && drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
+                    gpuPainter.draw(drawContext.canvas.nativeCanvas, gpuFrame, imageLeft, imageTop, displayWidth, displayHeight)
+                } else {
+                    drawImage(image = imageBitmap, dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
+                        dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()))
+                }
                 if (showBasemap && basemapImageBitmap != null) {
                     drawImage(
                         image = basemapImageBitmap,

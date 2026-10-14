@@ -27,7 +27,7 @@ class ReferenceDemComparisonTest {
         var sum = 0.0; var n = 0
         for (yy in 5 until g.height - 5) for (xx in 5 until g.width - 5) {
             val i = yy * g.width + xx
-            val x = xx * 40.0 / (g.width - 1); 
+            val x = xx * 40.0 / (g.width - 1);
             sum += (g.bareEarth[i] - (10.0 + 0.05 * x)); n++
         }
         assertTrue("bias ${sum / n} must be ~0 (min picking biased it low)", abs(sum / n) < 0.02)

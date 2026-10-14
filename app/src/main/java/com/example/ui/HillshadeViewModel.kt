@@ -39,7 +39,7 @@ import com.example.data.LazDatasetStore
 import com.example.data.LazTerrainCache
 import com.example.data.LazTerrainDiskCache
 import com.example.data.LazTerrainMemoryCache
-import com.example.data.LazSpatialIndex
+import com.example.data.LazChunkIndex
 import com.example.data.LazTerrainReader
 import com.example.data.LidarImportOptions
 import com.example.data.MetalType
@@ -94,6 +94,8 @@ import java.io.File
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -147,6 +149,21 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val surveyBoundaryDao = AppDatabase.get(application).surveyBoundaryDao()
     private val pendingSyncDao = AppDatabase.get(application).pendingSyncDao()
     private val refinementMemoryCache = LazTerrainMemoryCache()
+    private val terrainTileDirectory=File(application.cacheDir,"terrain-tiles")
+    private var terrainTileCells=com.example.data.LazDecoderSettings.terrainTileCells
+    private var terrainTileCache=com.example.data.TerrainTileCache(terrainTileDirectory,terrainTileCells)
+    private fun activeTerrainTileCache(): com.example.data.TerrainTileCache {
+        val cells=if(com.example.data.AppMemoryBudget.hasMemoryPressure) 256 else com.example.data.LazDecoderSettings.terrainTileCells
+        if(cells!=terrainTileCells) {
+            terrainTileCells=cells
+            terrainTileCache=com.example.data.TerrainTileCache(terrainTileDirectory,cells)
+        }
+        return terrainTileCache
+    }
+    init { com.example.data.TerrainDerivedFields.configure(File(application.cacheDir,"terrain-derived-fields")) }
+    private val _gpuTerrainFrame = MutableStateFlow<com.example.data.GpuTerrainFrame?>(null)
+    val gpuTerrainFrame = _gpuTerrainFrame.asStateFlow()
+    private var gpuHeightData: com.example.data.GpuHeightData? = null
     private val refinementDiskCache = AppTerrainStorage.decodedTerrainCache(application)
     private val terrainSessionStore = TerrainSessionStore(application)
     // Shares its directory with AiTerrainViewModel so layers analyzed on the AI tab
@@ -186,7 +203,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     val sunAltitude = _sunAltitude.asStateFlow()
     private val _vegetationFilter = MutableStateFlow(DEFAULT_VEGETATION_FILTER)
     val vegetationFilter = _vegetationFilter.asStateFlow()
-    private val _paletteType = MutableStateFlow(1)
+    private val _paletteType = MutableStateFlow(0)
     val paletteType = _paletteType.asStateFlow()
     private val _contrast = MutableStateFlow(1.5f)
     val contrast = _contrast.asStateFlow()
@@ -972,6 +989,27 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                             maxOf(liveGrid.width, liveGrid.height),
                         ),
                     )
+                    if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                        com.example.data.GpuTerrainFrame.supported(mode, liveKey.overlayType, liveKey.contourIntervalMeters)) {
+                        val data = gpuHeightData?.takeIf { it.gridIdentity === liveGrid && it.vegetation == liveKey.vegetationFilter &&
+                            it.analysisMode == (if(mode in 9..11) mode else -1) &&
+                            (mode !in 9..11 || it.featureScale == liveKey.featureScaleMeters) }
+                            ?: withContext(Dispatchers.Default) {
+                                if(mode in 9..11) {
+                                    val values=if(mode==11) liveGrid.skyViewAnalysis(liveKey.vegetationFilter,liveKey.featureScaleMeters) { generation==renderGeneration }
+                                        else liveGrid.opennessAnalysis(liveKey.vegetationFilter,liveKey.featureScaleMeters,mode==10) { generation==renderGeneration }
+                                    val analysis=com.example.data.ElevationGrid(liveGrid.width,liveGrid.height,values,FloatArray(values.size),liveGrid.cellSizeMeters,
+                                        liveGrid.validData,liveGrid.interpolatedData,liveGrid.cellSizeXMeters,liveGrid.cellSizeYMeters)
+                                    com.example.data.GpuHeightData.build(analysis,liveKey.vegetationFilter,{generation==renderGeneration},liveGrid,mode,liveKey.featureScaleMeters)
+                                } else com.example.data.GpuHeightData.build(liveGrid,liveKey.vegetationFilter,{generation==renderGeneration})
+                            }.also { gpuHeightData = it }
+                        if (generation == renderGeneration) _gpuTerrainFrame.value = com.example.data.GpuTerrainFrame(
+                            data, liveKey.sunAzimuth, liveKey.sunAltitude,
+                            if(mode in 9..11) liveKey.analysisSensitivity else liveKey.contrast, liveKey.zScale, mode, liveKey.palette)
+                        // CPU snapshots remain available for exports, AI, Google Maps and older devices.
+                        // Settled controls get one snapshot; dragging updates only shader uniforms.
+                        if (_hillshadeBitmap.value != null) delay(180)
+                    } else _gpuTerrainFrame.value = null
                     val bitmap = withContext(Dispatchers.Default) {
                         val renderGrid = gridForHillshadePreview(liveGrid, liveKey.previewMaxSide)
                         renderGrid.renderHillshade(
@@ -1030,7 +1068,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         source?.uri?.let { uriString ->
             val uri = Uri.parse(uriString)
             if (uri.scheme.equals("file", ignoreCase = true)) {
-                uri.path?.let { path -> LazSpatialIndex.ensureBuiltAsync(File(path)) }
+                uri.path?.let { path -> LazChunkIndex.ensureBuiltAsync(File(path)) }
             }
         }
         // Durable session pointer so cold start reopens this LAZ even if the decode cache was purged.
@@ -1063,7 +1101,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
         // 2D hillshade updates immediately; rebuild the GPU mesh so 3D refine matches it.
         viewModelScope.launch(Dispatchers.Default) {
-            val scene = TerrainGpuSceneBuilder.build(grid)
+            val scene = TerrainGpuSceneBuilder.buildHeightfield(grid)
             TerrainPerformanceSession.publish(scene)
         }
     }
@@ -1131,62 +1169,19 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _terrainDetailMessage.value =
             "Opening ${options.rasterResolution} px source detail for this viewport…"
         viewModelScope.launch(Dispatchers.IO) {
+            val refineContext = currentCoroutineContext()
+            var resolvedBounds = absoluteBounds
             var decodedNow = false
             var loadedFromCache = false
             val result = runCatching {
                 sourceFile?.let { file ->
-                    refinementMemoryCache.get(file, options)?.also { loadedFromCache = true }
-                        ?: refinementDiskCache.get(file, options)?.also {
-                            refinementMemoryCache.put(file, options, it)
-                            loadedFromCache = true
-                        }
-                        ?: run {
-                            // Zooming to a small viewport asks the decoder for a tiny fraction of
-                            // a file that can hold hundreds of millions of returns. A spatial
-                            // index lets it seek past whole compressed chunks outside that
-                            // viewport instead of decompressing every point just to discard it.
-                            // This one-time pass only reads X/Y, so it costs far less than a real
-                            // decode, and every later zoom on this file reuses the sidecar it
-                            // writes rather than paying it again.
-                            if (!LazSpatialIndex.exists(file)) {
-                                _terrainRefinementProgress.value = TerrainRefinementProgress(
-                                    fraction = 0.04f,
-                                    message = "Indexing source for fast zoomed reads (one-time)…",
-                                )
-                                LazSpatialIndex.build(
-                                    file,
-                                    onProgress = { indexed, totalPoints ->
-                                        val indexFraction = if (totalPoints > 0L) {
-                                            indexed.toFloat() / totalPoints.toFloat()
-                                        } else {
-                                            0f
-                                        }
-                                        _terrainRefinementProgress.value = TerrainRefinementProgress(
-                                            fraction = 0.04f + indexFraction.coerceIn(0f, 1f) * 0.04f,
-                                            message = "Indexing source for fast zoomed reads · " +
-                                                "${(indexFraction * 100f).toInt().coerceIn(0, 100)}%",
-                                        )
-                                    },
-                                )
-                            }
-                            LazTerrainReader.read(file, options) { decoded, total ->
-                                val decodedFraction = if (total > 0L) decoded.toFloat() / total.toFloat() else 0f
-                                _terrainRefinementProgress.value = TerrainRefinementProgress(
-                                    fraction = 0.08f + decodedFraction.coerceIn(0f, 1f) * 0.82f,
-                                    message = "Decoding ${options.rasterResolution} px source detail · " +
-                                        "${(decodedFraction * 100f).toInt().coerceIn(0, 100)}%",
-                                )
-                            }?.let { laz ->
-                                DemGenerator.TerrainLoadResult(
-                                    grid = laz.grid,
-                                    summary = laz.note,
-                                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
-                                )
-                            }?.also {
-                                refinementMemoryCache.put(file, options, it)
-                                decodedNow = true
-                            }
-                        }
+                    val outcome = activeTerrainTileCache().refine(file, options, shouldContinue = { refineContext.isActive }, progress = { fraction, message ->
+                        _terrainRefinementProgress.value = TerrainRefinementProgress(0.04f + fraction * .86f, message)
+                    })
+                    outcome?.also {
+                        resolvedBounds = it.bounds
+                        loadedFromCache = it.misses == 0
+                    }?.terrain
                 } ?: getApplication<Application>().contentResolver.openInputStream(sourceUri)?.buffered()?.use { input ->
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                             fraction = 0.08f,
@@ -1231,7 +1226,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                         fraction = if (loadedFromCache) 0.96f else 0.92f,
                         message = if (loadedFromCache) "Opening cached detail…" else "Rendering refined terrain…",
                     )
-                    currentSourceBounds = absoluteBounds
+                    currentSourceBounds = resolvedBounds
                     _isDetailedTerrain.value = true
                     _terrainDetailMessage.value = if (loadedFromCache) {
                         "${options.rasterResolution} px detailed viewport opened from cache."
@@ -1446,9 +1441,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                                 loadedFromCache = true
                             }
                             ?: run {
-                                if (!LazSpatialIndex.exists(file)) {
-                                    LazSpatialIndex.build(file)
-                                }
+                                LazChunkIndex.ensure(file)
                                 LazTerrainReader.read(file, options)?.let { laz ->
                                     DemGenerator.TerrainLoadResult(
                                         grid = laz.grid,
@@ -1565,7 +1558,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     fun updateVegetationFilter(value: Float) { _vegetationFilter.value = value.coerceIn(0f, 1f); scheduleRender() }
     fun updatePalette(value: Int) { _paletteType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateContrast(value: Float) { _contrast.value = value.coerceIn(1f, 2.5f); scheduleRender() }
-    fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 8); scheduleRender() }
+    fun updateVisualizationMode(value: Int) { _visualizationMode.value = value.coerceIn(0, 11); scheduleRender() }
     fun updateOverlayType(value: Int) { _overlayType.value = value.coerceIn(0, 2); scheduleRender() }
     fun updateOverlayOpacity(value: Float) { _overlayOpacity.value = value.coerceIn(0.1f, 0.9f); scheduleRender() }
     fun updateGridSpacing(value: Float) { _gridSpacing.value = value.coerceIn(0f, 10f) }
@@ -2212,6 +2205,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         6 -> "Aspect"
         7 -> "Elevation"
         8 -> "Canopy height"
+        9 -> "Positive openness"
+        10 -> "Negative openness"
+        11 -> "Sky-view factor"
         else -> "Terrain"
     }
 
