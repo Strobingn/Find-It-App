@@ -38,9 +38,16 @@ class LazDownloadManager(
         private const val PROGRESS_STEP_BYTES = 4L * 1024L * 1024L
         private const val RETRY_BASE_DELAY_MS = 1_000L
         private const val RETRY_MAX_DELAY_MS = 8_000L
-        internal const val DEFAULT_PARALLEL_CONNECTIONS = 6
+        internal const val DEFAULT_PARALLEL_CONNECTIONS = 12
         /** Below this, one connection is already near line rate and setup cost dominates. */
-        private const val PARALLEL_MIN_BYTES = 16L * 1024L * 1024L
+        /** USGS rockyweb serves ~0.35 MB/s per connection, so even 10 MB tiles gain from ranges. */
+        private const val PARALLEL_MIN_BYTES = 2L * 1024L * 1024L
+        /**
+         * Work unit for the connection pool. Many small segments pulled from a queue keep every
+         * connection busy to the end instead of waiting on the slowest of N equal slices.
+         */
+        internal const val SEGMENT_BYTES = 4L * 1024L * 1024L
+        private const val MAX_SEGMENTS = 4_096
         private const val SEGMENT_STATE_SUFFIX = ".segments"
 
         /** Shared by LAS and LAZ; LAZ is LAS with compressed point data. */
@@ -251,7 +258,8 @@ class LazDownloadManager(
         if (total < PARALLEL_MIN_BYTES) return null.also { clearParallelState(partial, stateFile) }
         check(total <= MAX_IMPORT_BYTES) { "LAZ file exceeds the 10 GB import limit" }
 
-        val segments = parallelConnections.coerceIn(2, 16)
+        val connections = parallelConnections.coerceIn(2, 16)
+        val segments = parallelSegmentCount(total, connections)
         val starts = LongArray(segments) { total * it / segments }
         val ends = LongArray(segments) { total * (it + 1) / segments }
         val done = LongArray(segments)
@@ -271,7 +279,7 @@ class LazDownloadManager(
         persist()
         progress?.invoke(downloaded.get(), total)
 
-        val pool = java.util.concurrent.Executors.newFixedThreadPool(segments) { task ->
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(connections) { task ->
             Thread(task, "laz-download").apply { isDaemon = true }
         }
         try {
@@ -363,6 +371,9 @@ class LazDownloadManager(
                     }
                     if (position < endExclusive) throw EOFException("Segment $index ended at $position of $endExclusive")
                 }
+                // Body fully drained and closed: leave the socket in the keep-alive pool so the
+                // next segment skips the TCP/TLS handshake.
+                connection = null
                 return
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -376,6 +387,10 @@ class LazDownloadManager(
         }
         throw lastFailure ?: IOException("Segment $index failed")
     }
+
+    /** Deterministic from the size, so a resumed transfer reuses the same segment layout. */
+    internal fun parallelSegmentCount(total: Long, connections: Int): Int =
+        ((total + SEGMENT_BYTES - 1) / SEGMENT_BYTES).coerceIn(connections.toLong(), MAX_SEGMENTS.toLong()).toInt()
 
     private fun readSegmentState(stateFile: File, total: Long, segments: Int): LongArray? = runCatching {
         if (!stateFile.isFile) return null

@@ -20,6 +20,9 @@ import kotlin.math.min
 
 /** Pure-Java LAZ decoding backed by laszip4j; all rasterization remains memory bounded. */
 internal object LazTerrainReader {
+    /** Test hook: false forces the sequential decoder so parallel output can be compared to it. */
+    @Volatile internal var parallelDecodeEnabled = true
+
     private const val DECODE_BATCH_POINTS = 32_768
     private const val FILE_BUFFER_BYTES = 1024 * 1024
     /** Sparse preview is disabled at the coordinator; keep denser knobs if re-enabled later. */
@@ -631,75 +634,129 @@ internal object LazTerrainReader {
         val limited = densityLimitedOptions(header, options)
         val focus = limited.focusBounds
         if (focus != null) return null
-        if (pointCount < chunkSize.toLong() * 2L) return null
-        // Worker 0's raster doubles as the size probe, so nothing is allocated twice.
-        val firstRaster = newRasterizer(header, limited, pointCount)
-        val workers = parallelDecodeWorkers(
-            cores = Runtime.getRuntime().availableProcessors(),
-            maxHeapBytes = Runtime.getRuntime().maxMemory(),
-            rasterCells = firstRaster.width.toLong() * firstRaster.height.toLong(),
-        )
+        if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
+        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
         if (workers == 1) return null
 
+        // One shared raster; workers only decode. Each claims the next compressed chunk, decodes
+        // it into a compact buffer (~17 B/point), and a single binner adds chunks strictly in
+        // file order. Memory is bounded by the in-flight window (2 chunks per worker, ~14 MB at
+        // 8 workers) instead of a full private raster per worker (75 MB each at 1536²), so all
+        // cores can be used, and the result is identical to the sequential decoder.
+        val rasterizer = newRasterizer(header, limited, pointCount)
         val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
-        val chunksPerWorker = (totalChunks + workers - 1) / workers
+        val results = Array(totalChunks) { java.util.concurrent.CompletableFuture<DecodedChunk>() }
+        val window = java.util.concurrent.Semaphore(workers * 2)
+        val nextChunk = java.util.concurrent.atomic.AtomicInteger(0)
         val cancelled = AtomicBoolean(false)
-        val decoded = AtomicLong(0L)
         val pool = Executors.newFixedThreadPool(workers) { task ->
             Thread(task, "laz-chunk").apply { isDaemon = true }
         }
         return try {
-            val tasks = (0 until workers).map { worker ->
-                val startChunk = worker * chunksPerWorker
-                val endChunk = min(totalChunks, startChunk + chunksPerWorker)
-                Callable {
-                    if (startChunk >= endChunk) return@Callable null
-                    val startPoint = startChunk.toLong() * chunkSize.toLong()
-                    val endPoint = min(pointCount, endChunk.toLong() * chunkSize.toLong())
-                    if (startPoint >= endPoint) return@Callable null
-                    val rasterizer = if (worker == 0) firstRaster else newRasterizer(header, limited, endPoint - startPoint)
-                    SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
-                        if (!reader.seek(startPoint)) return@use null
-                        var remaining = endPoint - startPoint
-                        var batch = 0
-                        while (remaining > 0L && reader.read_point()) {
-                            if (cancelled.get() || !shouldContinue()) {
-                                rasterizer.markTruncated()
-                                cancelled.set(true)
+            repeat(workers) {
+                pool.execute {
+                    val reader = runCatching { SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) }.getOrNull()
+                    try {
+                        while (!cancelled.get()) {
+                            window.acquire()
+                            val chunk = nextChunk.getAndIncrement()
+                            if (chunk >= totalChunks) {
+                                window.release()
                                 break
                             }
-                            rasterizer.addPoint(
-                                x = reader.get_x(),
-                                y = reader.get_y(),
-                                z = reader.get_z().toFloat(),
-                                classification = reader.point.get_classification().toInt(),
-                                isKeyPoint = reader.point.get_keypoint_flag().toInt() != 0,
-                            )
-                            remaining--
-                            batch++
-                            if (batch >= DECODE_BATCH_POINTS) {
-                                decoded.addAndGet(batch.toLong())
-                                batch = 0
-                                onProgress?.invoke(decoded.get(), pointCount)
+                            val future = results[chunk]
+                            try {
+                                checkNotNull(reader) { "Could not open ${file.name}" }
+                                val start = chunk.toLong() * chunkSize
+                                val count = min(chunkSize.toLong(), pointCount - start).toInt()
+                                check(reader.seek(start)) { "Seek to point $start failed" }
+                                future.complete(DecodedChunk.decode(reader, count))
+                            } catch (error: Throwable) {
+                                future.completeExceptionally(error)
                             }
                         }
-                        if (batch > 0) decoded.addAndGet(batch.toLong())
-                        rasterizer
+                    } catch (_: InterruptedException) {
+                        // Pool shut down: the binner already stopped waiting.
+                    } finally {
+                        reader?.close()
                     }
                 }
             }
-            val parts = TerrainStageProfiler.stage("decode_parallel", file.name) {
-                tasks.map { pool.submit(it) }.map { it.get() }
+            TerrainStageProfiler.stage("decode_parallel", file.name) {
+                var decoded = 0L
+                for (chunk in 0 until totalChunks) {
+                    if (!shouldContinue()) {
+                        cancelled.set(true)
+                        rasterizer.markTruncated()
+                        break
+                    }
+                    val points = try {
+                        results[chunk].get()
+                    } catch (error: java.util.concurrent.ExecutionException) {
+                        throw error.cause ?: error
+                    }
+                    results[chunk] = DecodedChunk.CONSUMED
+                    points.addTo(rasterizer)
+                    window.release()
+                    decoded += points.count
+                    onProgress?.invoke(decoded, pointCount)
+                    if (points.count < min(chunkSize.toLong(), pointCount - chunk.toLong() * chunkSize)) {
+                        // Short chunk = reader hit EOF early; the sequential path would stop here too.
+                        rasterizer.markTruncated()
+                        break
+                    }
+                }
             }
-            val merged = parts.filterNotNull()
-            if (merged.isEmpty()) return null
-            val primary = merged.first()
-            for (extra in merged.drop(1)) primary.mergeFrom(extra)
-            if (cancelled.get()) primary.markTruncated()
-            onProgress?.invoke(primary.pointsDecoded, pointCount)
-            finish(primary, header, "parallel chunk decode ($workers cores)")
+            finish(rasterizer, header, "parallel chunk decode ($workers cores)")
         } finally {
+            cancelled.set(true)
             pool.shutdownNow()
+        }
+    }
+
+    /** One decoded compressed chunk, kept compact until the binner adds it in file order. */
+    private class DecodedChunk(
+        val count: Int,
+        private val xs: DoubleArray,
+        private val ys: DoubleArray,
+        private val zs: FloatArray,
+        private val classes: ByteArray,
+        private val keyPoints: BooleanArray,
+    ) {
+        fun addTo(rasterizer: LidarRasterizer) {
+            for (i in 0 until count) {
+                rasterizer.addPoint(
+                    x = xs[i],
+                    y = ys[i],
+                    z = zs[i],
+                    classification = classes[i].toInt() and 0xFF,
+                    isKeyPoint = keyPoints[i],
+                )
+            }
+        }
+
+        companion object {
+            val CONSUMED = java.util.concurrent.CompletableFuture.completedFuture(
+                DecodedChunk(0, DoubleArray(0), DoubleArray(0), FloatArray(0), ByteArray(0), BooleanArray(0)),
+            )
+
+            fun decode(reader: LASreaderLAS, wanted: Int): DecodedChunk {
+                val xs = DoubleArray(wanted)
+                val ys = DoubleArray(wanted)
+                val zs = FloatArray(wanted)
+                val classes = ByteArray(wanted)
+                val keys = BooleanArray(wanted)
+                var n = 0
+                while (n < wanted && reader.read_point()) {
+                    xs[n] = reader.get_x()
+                    ys[n] = reader.get_y()
+                    zs[n] = reader.get_z().toFloat()
+                    classes[n] = reader.point.get_classification().toByte()
+                    keys[n] = reader.point.get_keypoint_flag().toInt() != 0
+                    n++
+                }
+                return DecodedChunk(n, xs, ys, zs, classes, keys)
+            }
         }
     }
 
@@ -820,18 +877,6 @@ internal object LazTerrainReader {
     )
 }
 
-/**
- * Each parallel worker owns a full private raster (8 per-cell arrays = 32 B/cell). At 1536² that
- * is ~75 MB per worker, so 8 cores could ask for ~600 MB and OOM a 256–512 MB app heap. Keep the
- * worker rasters within ~40% of the heap; output is identical for any worker count.
- */
-internal fun parallelDecodeWorkers(cores: Int, maxHeapBytes: Long, rasterCells: Long): Int {
-    val perWorker = (rasterCells * RASTER_BYTES_PER_CELL).coerceAtLeast(1L)
-    val byMemory = ((maxHeapBytes * 0.4) / perWorker).toLong().coerceIn(1L, 8L).toInt()
-    return minOf(cores.coerceIn(1, 8), byMemory)
-}
-
-internal const val RASTER_BYTES_PER_CELL = 32L
 
 /**
  * Largest refine resolution whose cell is at least [cellToSpacing]× the point spacing of

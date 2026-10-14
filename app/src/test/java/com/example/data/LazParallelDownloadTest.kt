@@ -28,7 +28,9 @@ class LazParallelDownloadTest {
             ?: "https://github.com/PDAL/data/raw/main/autzen/autzen-classified.laz").split(",")
         for (url in urls) {
             val results = HashMap<Int, Pair<String, Double>>()
-            for (connections in listOf(1, LazDownloadManager.DEFAULT_PARALLEL_CONNECTIONS)) {
+            val counts = System.getenv("FINDIT_DL_CONNS")?.split(",")?.map { it.trim().toInt() }
+                ?: listOf(1, LazDownloadManager.DEFAULT_PARALLEL_CONNECTIONS)
+            for (connections in counts) {
                 val dir = Files.createTempDirectory("dl$connections").toFile()
                 try {
                     val t0 = System.nanoTime()
@@ -41,7 +43,7 @@ class LazParallelDownloadTest {
                     dir.deleteRecursively()
                 }
             }
-            assertEquals(results[1]!!.first, results[LazDownloadManager.DEFAULT_PARALLEL_CONNECTIONS]!!.first)
+            assertEquals("all connection counts must produce identical bytes", 1, results.values.map { it.first }.distinct().size)
         }
     }
 }
