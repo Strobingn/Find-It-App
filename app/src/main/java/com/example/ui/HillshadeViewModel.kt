@@ -147,6 +147,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     private val surveyBoundaryDao = AppDatabase.get(application).surveyBoundaryDao()
     private val pendingSyncDao = AppDatabase.get(application).pendingSyncDao()
     private val refinementMemoryCache = LazTerrainMemoryCache()
+    private val terrainTileCache = com.example.data.TerrainTileCache(File(application.cacheDir, "terrain-tiles"))
+    private val _gpuTerrainFrame = MutableStateFlow<com.example.data.GpuTerrainFrame?>(null)
+    val gpuTerrainFrame = _gpuTerrainFrame.asStateFlow()
+    private var gpuHeightData: com.example.data.GpuHeightData? = null
     private val refinementDiskCache = AppTerrainStorage.decodedTerrainCache(application)
     private val terrainSessionStore = TerrainSessionStore(application)
     // Shares its directory with AiTerrainViewModel so layers analyzed on the AI tab
@@ -972,6 +976,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                             maxOf(liveGrid.width, liveGrid.height),
                         ),
                     )
+                    if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                        com.example.data.GpuTerrainFrame.supported(mode, liveKey.overlayType, liveKey.contourIntervalMeters)) {
+                        val data = gpuHeightData?.takeIf { it.gridIdentity === liveGrid && it.vegetation == liveKey.vegetationFilter }
+                            ?: withContext(Dispatchers.Default) {
+                                com.example.data.GpuHeightData.build(liveGrid, liveKey.vegetationFilter) { generation == renderGeneration }
+                            }.also { gpuHeightData = it }
+                        if (generation == renderGeneration) _gpuTerrainFrame.value = com.example.data.GpuTerrainFrame(
+                            data, liveKey.sunAzimuth, liveKey.sunAltitude, liveKey.contrast, liveKey.zScale, mode, liveKey.palette)
+                        // CPU snapshots remain available for exports, AI, Google Maps and older devices.
+                        // Settled controls get one snapshot; dragging updates only shader uniforms.
+                        if (_hillshadeBitmap.value != null) delay(180)
+                    } else _gpuTerrainFrame.value = null
                     val bitmap = withContext(Dispatchers.Default) {
                         val renderGrid = gridForHillshadePreview(liveGrid, liveKey.previewMaxSide)
                         renderGrid.renderHillshade(
@@ -1063,7 +1079,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
         // 2D hillshade updates immediately; rebuild the GPU mesh so 3D refine matches it.
         viewModelScope.launch(Dispatchers.Default) {
-            val scene = TerrainGpuSceneBuilder.build(grid)
+            val scene = TerrainGpuSceneBuilder.buildHeightfield(grid)
             TerrainPerformanceSession.publish(scene)
         }
     }
@@ -1131,45 +1147,18 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         _terrainDetailMessage.value =
             "Opening ${options.rasterResolution} px source detail for this viewport…"
         viewModelScope.launch(Dispatchers.IO) {
+            var resolvedBounds = absoluteBounds
             var decodedNow = false
             var loadedFromCache = false
             val result = runCatching {
                 sourceFile?.let { file ->
-                    refinementMemoryCache.get(file, options)?.also { loadedFromCache = true }
-                        ?: refinementDiskCache.get(file, options)?.also {
-                            refinementMemoryCache.put(file, options, it)
-                            loadedFromCache = true
-                        }
-                        ?: run {
-                            _terrainRefinementProgress.value = TerrainRefinementProgress(
-                                fraction = 0.04f,
-                                message = "Preparing source chunks for this viewport…",
-                            )
-                            LazChunkIndex.ensure(file, onProgress = { indexed, totalPoints ->
-                                val fraction = if (totalPoints > 0) indexed.toFloat() / totalPoints else 0f
-                                _terrainRefinementProgress.value = TerrainRefinementProgress(
-                                    fraction = 0.04f + fraction.coerceIn(0f, 1f) * 0.04f,
-                                    message = "Building source chunk index (one-time) · ${(fraction * 100).toInt()}%",
-                                )
-                            })
-                            LazTerrainReader.read(file, options) { decoded, total ->
-                                val decodedFraction = if (total > 0L) decoded.toFloat() / total.toFloat() else 0f
-                                _terrainRefinementProgress.value = TerrainRefinementProgress(
-                                    fraction = 0.08f + decodedFraction.coerceIn(0f, 1f) * 0.82f,
-                                    message = "Decoding viewport source chunks · " +
-                                        "${(decodedFraction * 100f).toInt().coerceIn(0, 100)}%",
-                                )
-                            }?.let { laz ->
-                                DemGenerator.TerrainLoadResult(
-                                    grid = laz.grid,
-                                    summary = laz.note,
-                                    isBareEarth = laz.appliedGroundMode != GroundSurfaceMode.SURFACE_MODEL,
-                                )
-                            }?.also {
-                                refinementMemoryCache.put(file, options, it)
-                                decodedNow = true
-                            }
-                        }
+                    val outcome = terrainTileCache.refine(file, options, progress = { fraction, message ->
+                        _terrainRefinementProgress.value = TerrainRefinementProgress(0.04f + fraction * .86f, message)
+                    })
+                    outcome?.also {
+                        resolvedBounds = it.bounds
+                        loadedFromCache = it.misses == 0
+                    }?.terrain
                 } ?: getApplication<Application>().contentResolver.openInputStream(sourceUri)?.buffered()?.use { input ->
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                             fraction = 0.08f,
@@ -1214,7 +1203,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                         fraction = if (loadedFromCache) 0.96f else 0.92f,
                         message = if (loadedFromCache) "Opening cached detail…" else "Rendering refined terrain…",
                     )
-                    currentSourceBounds = absoluteBounds
+                    currentSourceBounds = resolvedBounds
                     _isDetailedTerrain.value = true
                     _terrainDetailMessage.value = if (loadedFromCache) {
                         "${options.rasterResolution} px detailed viewport opened from cache."

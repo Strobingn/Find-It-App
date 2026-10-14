@@ -38,7 +38,7 @@ object TerrainMemoryMonitor {
     var lastDemCells: Int = 0
 
     fun noteGpuScene(scene: TerrainGpuScene) {
-        var bytes = 0L
+        var bytes = scene.heightmap?.floats?.size?.toLong()?.times(4L) ?: 0L
         for (level in scene.levels) {
             for (batch in level.batches) {
                 bytes += batch.vertices.size.toLong() * 4L

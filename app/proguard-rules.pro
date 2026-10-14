@@ -19,3 +19,6 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# JNI ABI names must remain stable in the signed release.
+-keep class com.example.data.LazRsNativeDecoder { *; }

@@ -103,6 +103,8 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  sourceSets.getByName("androidTest").assets.srcDir("src/test/resources")
+
   signingConfigs {
     if (hasReleaseSigning) {
       create("release") {

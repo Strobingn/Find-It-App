@@ -30,7 +30,7 @@ data class DecoderBenchmarkResult(
         } else {
             appendLine("  laz-rs native       not loaded (laszip4j stays default)")
         }
-        appendLine(String.format(Locale.US, "  rasterize/grid      %.2f ms", rasterizeMs))
+        appendLine(String.format(Locale.US, "  Java decode+grid    %.2f ms", rasterizeMs))
         appendLine(String.format(Locale.US, "  GPU mesh            %.2f ms", meshMs))
         appendLine(String.format(Locale.US, "  CDLOD select        %.2f ms", cdlodMs))
         if (hillshadeMs != null) {
@@ -44,6 +44,14 @@ data class DecoderBenchmarkResult(
 }
 
 object TerrainDecoderBenchmark {
+    internal fun equivalent(a: DemGenerator.LasLoadResult, b: DemGenerator.LasLoadResult): Boolean =
+        a.grid.width == b.grid.width && a.grid.height == b.grid.height &&
+            a.sampledPoints == b.sampledPoints && a.groundPointsUsed == b.groundPointsUsed &&
+            a.appliedGroundMode == b.appliedGroundMode &&
+            a.grid.cellSizeXMeters == b.grid.cellSizeXMeters && a.grid.cellSizeYMeters == b.grid.cellSizeYMeters &&
+            a.grid.bareEarth.contentEquals(b.grid.bareEarth) && a.grid.canopySpikes.contentEquals(b.grid.canopySpikes) &&
+            a.grid.validData.contentEquals(b.grid.validData) && a.grid.interpolatedData.contentEquals(b.grid.interpolatedData)
+
     fun run(
         file: File,
         options: LidarImportOptions = LidarImportOptions(),
@@ -54,14 +62,11 @@ object TerrainDecoderBenchmark {
         val sanitized = options.sanitized()
 
         var rasterizeMs = 0.0
-        val previousPreferred = LazDecoderSettings.preferred
-        val javaResult = try {
-            // Force the Java backend so a native preference cannot contaminate the laszip4j timing.
-            LazDecoderSettings.preferred = LazDecoderBackend.LASZIP4J
+        val javaResult = run {
             TerrainStageProfiler.stage("decode_laszip4j", file.name) {
                 val start = System.nanoTime()
                 val decoded = if (file.extension.equals("laz", ignoreCase = true)) {
-                    LazTerrainReader.read(file, sanitized, shouldContinue)
+                    LazTerrainReader.readForBenchmark(file, sanitized, LazDecoderBackend.LASZIP4J, shouldContinue)
                 } else {
                     file.inputStream().buffered(256 * 1024).use { input ->
                         DemGenerator.parseLasStreamDetailed(input, sanitized, shouldContinue)
@@ -70,55 +75,26 @@ object TerrainDecoderBenchmark {
                 rasterizeMs = (System.nanoTime() - start) / 1_000_000.0
                 decoded
             }
-        } finally {
-            LazDecoderSettings.preferred = previousPreferred
         }
         requireNotNull(javaResult) { "laszip4j produced no terrain for ${file.name}" }
 
         var nativeMs: Double? = null
         val nativeAvailable = LazRsNativeDecoder.isAvailable
         if (nativeAvailable) {
-            val headerPoints = javaResult.totalPointsRead.coerceAtLeast(1)
-            nativeMs = runCatching {
-            TerrainStageProfiler.stage("decode_lazrs", file.name) {
-                val packed = PackedPointRasterizer.allocate(headerPoints)
-                val origins = DoubleArray(3)
-                val nanos = measureNanoTime {
-                    val decoded = LazRsNativeDecoder.decodePacked(file, packed, origins)
-                    require(decoded > 0) { "laz-rs decode failed (count=$decoded)" }
-                    val rasterizer = LidarRasterizer(
-                        minX = -1.0e9,
-                        maxX = 1.0e9,
-                        minY = -1.0e9,
-                        maxY = 1.0e9,
-                        options = sanitized,
-                        declaredPointCount = decoded.toLong(),
-                    )
-                    PackedPointRasterizer.addAll(
-                        rasterizer,
-                        packed,
-                        decoded,
-                        originX = origins[0],
-                        originY = origins[1],
-                        originZ = origins[2],
-                    )
-                    requireNotNull(rasterizer.finish(0, "laz-rs benchmark"))
-                }
-                nanos / 1_000_000.0
-            }
-            }.getOrElse { error ->
-                TerrainStageProfiler.emit("laz-rs benchmark failed: ${error.message}")
-                null
+            try {
+                val start = System.nanoTime()
+                val native = requireNotNull(LazTerrainReader.readForBenchmark(file, sanitized, LazDecoderBackend.NATIVE_LAZ_RS, shouldContinue))
+                val elapsed = (System.nanoTime() - start) / 1_000_000.0
+                check(native.note.contains("native integer")) { "Native decoder fell back to Java" }
+                check(equivalent(javaResult, native)) { "Native terrain differs from Java reference" }
+                nativeMs = elapsed
+            } catch (error: Exception) {
+                TerrainStageProfiler.emit("Native benchmark rejected: ${error.message}")
             }
         }
 
-        val mesh = TerrainStageProfiler.stage("mesh_build", "${javaResult.grid.width}x${javaResult.grid.height}") {
-            TerrainGpuSceneBuilder.build(
-                source = javaResult.grid,
-                maxFinestDimension = maxOf(javaResult.grid.width, javaResult.grid.height, 64),
-                tileSize = TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE,
-                attachHeightmap = true,
-            )
+        val mesh = TerrainStageProfiler.stage("heightfield_prepare", "${javaResult.grid.width}x${javaResult.grid.height}") {
+            TerrainGpuSceneBuilder.buildHeightfield(javaResult.grid)
         }
         TerrainMemoryMonitor.noteGpuScene(mesh)
 
@@ -171,7 +147,7 @@ object TerrainDecoderBenchmark {
             cacheWriteMs = writeMs,
             cacheReadMs = readMs,
             rasterizeMs = rasterizeMs,
-            meshMs = TerrainStageProfiler.snapshot().firstOrNull { it.name == "mesh_build" }?.millis ?: 0.0,
+            meshMs = TerrainStageProfiler.snapshot().firstOrNull { it.name == "heightfield_prepare" }?.millis ?: 0.0,
             hillshadeMs = hillshadeMs,
             cdlodMs = cdlodTimed,
             memory = TerrainMemoryMonitor.snapshot(),

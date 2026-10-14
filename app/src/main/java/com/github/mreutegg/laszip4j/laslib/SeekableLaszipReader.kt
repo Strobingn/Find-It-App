@@ -29,6 +29,26 @@ object SeekableLaszipReader {
         }
     }
 
+    fun isCopc(file: File): Boolean = runCatching {
+        RandomAccessFile(file, "r").use { source ->
+            if (source.length() < 589) return@use false
+            source.seek(375); val h=ByteArray(54); source.readFully(h)
+            String(h,2,16,Charsets.US_ASCII).trimEnd('\u0000',' ') == "copc" && h.uint16Le(18)==1
+        }
+    }.getOrDefault(false)
+
+    fun openLocalCopc(file: File, selectiveFields: Int, focus: NormalizedCopcBounds): CopcSelection? {
+        if (!isCopc(file)) return null
+        val source=RandomAccessFile(file,"r")
+        try {
+            val ranges=CopcHierarchyReader(source).selectedPointRanges(focus)
+            source.seek(0)
+            val reader=LASreaderLAS()
+            if (reader.open(source,false,selectiveFields)) return CopcSelection(reader,ranges)
+            source.close(); return null
+        } catch (error: Throwable) { source.close(); throw error }
+    }
+
     /**
      * Opens a remote COPC through an on-demand, persistent HTTP byte-range cache and resolves only
      * the octree chunks that intersect [focus]. The returned point offsets are LAS point indexes;
@@ -95,6 +115,7 @@ private data class CopcInfo(
     val halfSize: Double,
     val rootHierarchyOffset: Long,
     val rootHierarchySize: Int,
+    val minX: Double, val maxX: Double, val minY: Double, val maxY: Double,
 )
 
 private data class CopcEntry(
@@ -147,7 +168,13 @@ internal class CopcHierarchyReader(private val source: RandomAccessFile) {
         ) {
             throw IOException("COPC info VLR contains invalid hierarchy metadata")
         }
-        return CopcInfo(centerX, centerY, halfSize, hierarchyOffset, hierarchySize.toInt())
+        source.seek(179); val extent=ByteArray(32); source.readFully(extent)
+        val headerMaxX=extent.doubleLe(0); val headerMinX=extent.doubleLe(8)
+        val headerMaxY=extent.doubleLe(16); val headerMinY=extent.doubleLe(24)
+        val validExtent=listOf(headerMaxX,headerMinX,headerMaxY,headerMinY).all { it.isFinite() } && headerMaxX>headerMinX && headerMaxY>headerMinY
+        return CopcInfo(centerX, centerY, halfSize, hierarchyOffset, hierarchySize.toInt(),
+            if(validExtent) headerMinX else centerX-halfSize, if(validExtent) headerMaxX else centerX+halfSize,
+            if(validExtent) headerMinY else centerY-halfSize, if(validExtent) headerMaxY else centerY+halfSize)
     }
 
     private fun readAllEntries(info: CopcInfo): List<CopcEntry> {
@@ -206,10 +233,10 @@ internal class CopcHierarchyReader(private val source: RandomAccessFile) {
         val nodeMaxX = nodeMinX + nodeSize
         val nodeMinY = rootMinY + entry.y * nodeSize
         val nodeMaxY = nodeMinY + nodeSize
-        val cropMinX = rootMinX + focus.left * rootSize
-        val cropMaxX = rootMinX + focus.right * rootSize
-        val cropMinY = rootMinY + (1.0 - focus.bottom) * rootSize
-        val cropMaxY = rootMinY + (1.0 - focus.top) * rootSize
+        val cropMinX = info.minX + focus.left * (info.maxX-info.minX)
+        val cropMaxX = info.minX + focus.right * (info.maxX-info.minX)
+        val cropMinY = info.minY + (1.0-focus.bottom) * (info.maxY-info.minY)
+        val cropMaxY = info.minY + (1.0-focus.top) * (info.maxY-info.minY)
         return nodeMaxX >= cropMinX && nodeMinX <= cropMaxX &&
             nodeMaxY >= cropMinY && nodeMinY <= cropMaxY
     }

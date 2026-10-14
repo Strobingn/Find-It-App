@@ -1,231 +1,137 @@
-use jni::objects::{JByteBuffer, JClass, JDoubleArray, JString};
-use jni::sys::{jboolean, jint, JNI_TRUE};
+//! ABI 2: bounded selected ranges; integer XYZ preserves LAS quantization until gridding.
+use jni::objects::{JByteBuffer, JClass, JString};
+use jni::sys::{jint, jlong};
 use jni::JNIEnv;
 use las::{Read as LasRead, Reader};
 use laz::{LazVlr, ParLasZipDecompressor};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
-use std::path::Path;
+use std::sync::{atomic::{AtomicI64, Ordering}, Mutex, OnceLock};
 
-/// Packed record: f32 dx, f32 dy, f32 dz relative to origin, u8 class, u8 flags, u16 pad.
 const RECORD_BYTES: usize = 16;
-/// Decompress this many LAS records at a time so a large cloud never sits fully in RAM.
-const CHUNK_POINTS: usize = 50_000;
-const LASZIP_USER_ID: &str = "laszip encoded";
-const LASZIP_RECORD_ID: u16 = 22204;
-
-#[no_mangle]
-pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeAvailable(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jboolean {
-    JNI_TRUE
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeDecode<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    path: JString<'local>,
-    destination: JByteBuffer<'local>,
-    origins: JDoubleArray<'local>,
-) -> jint {
-    let path: String = match env.get_string(&path) {
-        Ok(s) => s.into(),
-        Err(_) => return -1,
-    };
-    match decode_file(Path::new(&path), &mut env, destination, &origins) {
-        Ok(count) => count as jint,
-        Err(_) => -1,
-    }
-}
-
-fn decode_file(
-    path: &Path,
-    env: &mut JNIEnv,
-    destination: JByteBuffer,
-    origins: &JDoubleArray,
-) -> Result<usize, ()> {
-    let addr = env.get_direct_buffer_address(&destination).map_err(|_| ())?;
-    let cap = env.get_direct_buffer_capacity(&destination).map_err(|_| ())?;
-    let out = unsafe { std::slice::from_raw_parts_mut(addr, cap) };
-
-    if let Ok(count) = decode_laz_parallel(path, env, out, origins) {
-        return Ok(count);
-    }
-    decode_with_las_reader(path, env, out, origins)
-}
-
-fn write_origins(env: &mut JNIEnv, origins: &JDoubleArray, x: f64, y: f64, z: f64) {
-    let _ = env.set_double_array_region(origins, 0, &[x, y, z]);
-}
-
-fn is_cancelled(env: &mut JNIEnv) -> bool {
-    let class = match env.find_class("com/example/data/LazRsNativeDecoder") {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    match env.call_static_method(class, "isCancelled", "()Z", &[]) {
-        Ok(value) => value.z().unwrap_or(false),
-        Err(_) => {
-            let _ = env.exception_clear();
-            false
-        }
-    }
-}
-
-/// Parallel per-chunk LAZ decompression. Packs each chunk immediately so the
-/// decompressed LAS record buffer never holds the whole cloud.
-fn decode_laz_parallel(
-    path: &Path,
-    env: &mut JNIEnv,
-    out: &mut [u8],
-    origins: &JDoubleArray,
-) -> Result<usize, ()> {
-    let reader = Reader::from_path(path).map_err(|_| ())?;
-    let header = reader.header();
-    let vlr_bytes = header
-        .vlrs()
-        .iter()
-        .chain(header.evlrs())
-        .find(|vlr| vlr.user_id == LASZIP_USER_ID && vlr.record_id == LASZIP_RECORD_ID)
-        .map(|vlr| vlr.data.clone())
-        .ok_or(())?;
-    let laz_vlr = LazVlr::from_buffer(&vlr_bytes).map_err(|_| ())?;
-    let point_count = header.number_of_points() as usize;
-    let transforms = header.transforms();
-    let bounds = header.bounds();
-    let raw = header.clone().into_raw().map_err(|_| ())?;
-    let record_len = raw.point_data_record_length as usize;
-    if point_count == 0 || record_len < 15 {
-        return Err(());
-    }
-    let point_format = raw.point_data_record_format & 0x3F;
-    let origin_x = bounds.min.x;
-    let origin_y = bounds.min.y;
-    let origin_z = bounds.min.z;
-    write_origins(env, origins, origin_x, origin_y, origin_z);
-
-    let mut source = File::open(path).map_err(|_| ())?;
-    source
-        .seek(SeekFrom::Start(u64::from(raw.offset_to_point_data)))
-        .map_err(|_| ())?;
-    let mut decompressor = ParLasZipDecompressor::new(source, laz_vlr).map_err(|_| ())?;
-    let chunk_bytes = CHUNK_POINTS.saturating_mul(record_len);
-    let mut scratch = vec![0u8; chunk_bytes];
-    let mut remaining = point_count;
-    let mut written = 0usize;
-    while remaining > 0 {
-        if is_cancelled(env) {
-            break;
-        }
-        let n = remaining.min(CHUNK_POINTS);
-        let bytes = n * record_len;
-        decompressor
-            .decompress_many(&mut scratch[..bytes])
-            .map_err(|_| ())?;
-        written += pack_raw_records(
-            &scratch[..bytes],
-            record_len,
-            point_format,
-            transforms.x.scale,
-            transforms.y.scale,
-            transforms.z.scale,
-            transforms.x.offset,
-            transforms.y.offset,
-            transforms.z.offset,
-            origin_x,
-            origin_y,
-            origin_z,
-            &mut out[written * RECORD_BYTES..],
-        );
-        remaining -= n;
-    }
-    Ok(written)
-}
-
-fn decode_with_las_reader(
-    path: &Path,
-    env: &mut JNIEnv,
-    out: &mut [u8],
-    origins: &JDoubleArray,
-) -> Result<usize, ()> {
-    let mut reader = Reader::from_path(path).map_err(|_| ())?;
-    let bounds = reader.header().bounds();
-    let origin_x = bounds.min.x;
-    let origin_y = bounds.min.y;
-    let origin_z = bounds.min.z;
-    write_origins(env, origins, origin_x, origin_y, origin_z);
-    let mut written = 0usize;
-    for (index, next) in reader.points().enumerate() {
-        if index % CHUNK_POINTS == 0 && is_cancelled(env) {
-            break;
-        }
-        let point = next.map_err(|_| ())?;
-        let start = written * RECORD_BYTES;
-        if start + RECORD_BYTES > out.len() {
-            break;
-        }
-        let dest = &mut out[start..start + RECORD_BYTES];
-        dest[0..4].copy_from_slice(&((point.x - origin_x) as f32).to_le_bytes());
-        dest[4..8].copy_from_slice(&((point.y - origin_y) as f32).to_le_bytes());
-        dest[8..12].copy_from_slice(&((point.z - origin_z) as f32).to_le_bytes());
-        dest[12] = u8::from(point.classification);
-        dest[13] = (if point.is_key_point { 1 } else { 0 })
-            | (if point.is_withheld { 2 } else { 0 });
-        dest[14] = 0;
-        dest[15] = 0;
-        written += 1;
-    }
-    Ok(written)
-}
-
-fn pack_raw_records(
-    raw: &[u8],
+const MAX_SCRATCH: usize = 16 * 1024 * 1024;
+struct Decoder {
+    reader: ParLasZipDecompressor<File>,
+    pool: rayon::ThreadPool,
     record_len: usize,
-    point_format: u8,
-    scale_x: f64,
-    scale_y: f64,
-    scale_z: f64,
-    offset_x: f64,
-    offset_y: f64,
-    offset_z: f64,
-    origin_x: f64,
-    origin_y: f64,
-    origin_z: f64,
-    out: &mut [u8],
-) -> usize {
-    let class_at = if point_format >= 6 { 16 } else { 15 };
-    let mut written = 0usize;
-    let mut offset = 0usize;
-    while offset + record_len <= raw.len() {
-        let start = written * RECORD_BYTES;
-        if start + RECORD_BYTES > out.len() {
-            break;
-        }
-        let rec = &raw[offset..offset + record_len];
-        if rec.len() < class_at + 1 {
-            break;
-        }
-        let x = i32::from_le_bytes(rec[0..4].try_into().unwrap()) as f64 * scale_x + offset_x;
-        let y = i32::from_le_bytes(rec[4..8].try_into().unwrap()) as f64 * scale_y + offset_y;
-        let z = i32::from_le_bytes(rec[8..12].try_into().unwrap()) as f64 * scale_z + offset_z;
-        let (class, key) = if point_format >= 6 {
-            (rec[16], rec[15] & 0x02 != 0)
-        } else {
-            (rec[15] & 0x1F, rec[15] & 0x40 != 0)
-        };
-        let dest = &mut out[start..start + RECORD_BYTES];
-        dest[0..4].copy_from_slice(&((x - origin_x) as f32).to_le_bytes());
-        dest[4..8].copy_from_slice(&((y - origin_y) as f32).to_le_bytes());
-        dest[8..12].copy_from_slice(&((z - origin_z) as f32).to_le_bytes());
-        dest[12] = class;
-        let withheld = if point_format >= 6 { rec[15] & 0x04 != 0 } else { rec[15] & 0x80 != 0 };
-        dest[13] = (if key { 1 } else { 0 }) | (if withheld { 2 } else { 0 });
-        dest[14] = 0;
-        dest[15] = 0;
-        written += 1;
-        offset += record_len;
+    format: u8,
+    points: u64,
+    position: u64,
+    scratch: Vec<u8>,
+}
+static NEXT: AtomicI64 = AtomicI64::new(1);
+static READERS: OnceLock<Mutex<HashMap<i64, Decoder>>> = OnceLock::new();
+fn readers() -> &'static Mutex<HashMap<i64, Decoder>> { READERS.get_or_init(|| Mutex::new(HashMap::new())) }
+fn open(path: &str, workers: usize) -> Result<Decoder, ()> {
+    let source = Reader::from_path(path).map_err(|_| ())?;
+    let h = source.header();
+    let data = h.vlrs().iter().chain(h.evlrs()).find(|v| v.user_id == "laszip encoded" && v.record_id == 22204).ok_or(())?;
+    let vlr = LazVlr::from_buffer(&data.data).map_err(|_| ())?;
+    let raw = h.clone().into_raw().map_err(|_| ())?;
+    let len = raw.point_data_record_length as usize;
+    let format = raw.point_data_record_format & 0x3f;
+    let minimum = [20,28,26,34,57,63,30,36,38,59,67];
+    if format > 10 || len < minimum[format as usize] || len > 4096 { return Err(()); }
+    let points = h.number_of_points();
+    drop(source);
+    let mut file = File::open(path).map_err(|_| ())?;
+    file.seek(SeekFrom::Start(raw.offset_to_point_data as u64)).map_err(|_| ())?;
+    Ok(Decoder {
+        reader: ParLasZipDecompressor::new(file, vlr).map_err(|_| ())?,
+        pool: rayon::ThreadPoolBuilder::new().num_threads(workers.clamp(1,8)).build().map_err(|_| ())?,
+        record_len: len, format, points, position: 0, scratch: Vec::new(),
+    })
+}
+fn pack(raw: &[u8], len: usize, format: u8, out: &mut [u8]) -> Result<usize, ()> {
+    if raw.len() % len != 0 || out.len() < raw.len() / len * RECORD_BYTES { return Err(()); }
+    let mut n = 0;
+    for (record, destination) in raw.chunks_exact(len).zip(out.chunks_exact_mut(RECORD_BYTES)) {
+        destination[..12].copy_from_slice(&record[..12]);
+        let (class, key, withheld) = if format >= 6 {
+            (record[16], record[15] & 2 != 0, record[15] & 4 != 0)
+        } else { (record[15] & 31, record[15] & 64 != 0, record[15] & 128 != 0) };
+        destination[12] = class;
+        destination[13] = u8::from(key) | (u8::from(withheld) << 1);
+        destination[14] = 0; destination[15] = 0;
+        n += 1;
     }
-    written
+    Ok(n)
+}
+impl Decoder {
+    fn read(&mut self, start: u64, count: usize, out: &mut [u8]) -> Result<usize, ()> {
+        if count == 0 || count > self.max_batch() || start.checked_add(count as u64).filter(|end| *end <= self.points).is_none() || out.len() < count * RECORD_BYTES { return Err(()); }
+        if self.position != start { self.reader.seek(start).map_err(|_| ())?; }
+        self.scratch.resize(count * self.record_len, 0);
+        let reader = &mut self.reader;
+        let scratch = &mut self.scratch;
+        self.pool.install(|| reader.decompress_many(scratch)).map_err(|_| ())?;
+        self.position = start + count as u64;
+        pack(&self.scratch, self.record_len, self.format, out)
+    }
+    fn max_batch(&self) -> usize { (MAX_SCRATCH / self.record_len).min(200_000) }
+}
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeAbi(_env: JNIEnv, _class: JClass) -> jint { 2 }
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeOpen(mut env: JNIEnv, _class: JClass, path: JString, workers: jint) -> jlong {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path: String = env.get_string(&path).map_err(|_| ())?.into();
+        let decoder = open(&path, workers.max(1) as usize)?;
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        readers().lock().map_err(|_| ())?.insert(id, decoder);
+        Ok::<_, ()>(id)
+    }));
+    result.ok().and_then(Result::ok).unwrap_or(0)
+}
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeMaxBatch(_env: JNIEnv, _class: JClass, id: jlong) -> jint {
+    readers().lock().ok().and_then(|r| r.get(&id).map(|d| d.max_batch() as jint)).unwrap_or(0)
+}
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeRead(env: JNIEnv, _class: JClass, id: jlong, start: jlong, count: jint, destination: JByteBuffer) -> jint {
+    if start < 0 || count <= 0 { return -1; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let addr = env.get_direct_buffer_address(&destination).map_err(|_| ())?;
+        let cap = env.get_direct_buffer_capacity(&destination).map_err(|_| ())?;
+        // JVM owns the direct buffer throughout this synchronous JNI invocation.
+        let out = unsafe { std::slice::from_raw_parts_mut(addr, cap) };
+        let mut guard = readers().lock().map_err(|_| ())?;
+        let decoder = guard.get_mut(&id).ok_or(())?;
+        decoder.read(start as u64, count as usize, out).map(|n| n as jint)
+    })).ok().and_then(Result::ok).unwrap_or(-1)
+}
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeClose(_env: JNIEnv, _class: JClass, id: jlong) {
+    if let Ok(mut r) = readers().lock() { r.remove(&id); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn raw_integer_flags_and_capacity() {
+        for format in [0,6] {
+            let len = if format == 0 { 20 } else { 30 };
+            let mut raw = vec![0; len];
+            raw[..4].copy_from_slice(&i32::MIN.to_le_bytes());
+            raw[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
+            if format == 0 { raw[15] = 2 | 64 | 128; } else { raw[16] = 2; raw[15] = 2 | 4; }
+            let mut out = [0;16];
+            assert_eq!(pack(&raw,len,format,&mut out),Ok(1));
+            assert_eq!(&out[..8],&raw[..8]); assert_eq!(out[12],2); assert_eq!(out[13],3);
+            assert!(pack(&raw,len,format,&mut out[..15]).is_err());
+        }
+    }
+    #[test] fn chunk_seeks_keep_exact_integers_and_short_tail() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"),"/../../app/src/test/resources/laz/viewport-chunks.laz");
+        let mut d = open(path,2).unwrap();
+        let mut out = vec![0;200_000*16];
+        assert_eq!(d.read(0,200_000,&mut out),Ok(200_000));
+        assert_eq!(d.read(250_000,123,&mut out),Ok(123));
+        assert_eq!(i32::from_le_bytes(out[..4].try_into().unwrap()),0);
+        assert_eq!(i32::from_le_bytes(out[4..8].try_into().unwrap()),1_500_000);
+        assert_eq!(d.read(50_000,50_000,&mut out),Ok(50_000));
+        assert_eq!(out[10*16+12],7); assert_eq!(out[11*16+13]&2,2);
+        assert!(d.read(250_000,124,&mut out).is_err());
+    }
 }

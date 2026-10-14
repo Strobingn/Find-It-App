@@ -152,6 +152,10 @@ object TerrainGpuSceneBuilder {
         return TerrainGpuScene(levels, source.width, source.height, heightmap, nodes)
     }
 
+    fun buildHeightfield(source: ElevationGrid): TerrainGpuScene = TerrainGpuScene(
+        listOf(TerrainGpuLevel(1, source.width, source.height, emptyList())), source.width, source.height,
+        HeightmapCdlod.pack(source))
+
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
         val bounds = elevationBounds(grid)
         return buildBatch(grid, tile, bounds.first, bounds.second, useIntIndices = false)

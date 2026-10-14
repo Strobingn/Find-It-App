@@ -163,6 +163,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         val usesIntIndices: Boolean,
     )
 
+    private val heightfield = HeightfieldGlRenderer()
     private var program = 0
     private var positionAttribute = -1
     private var normalAttribute = -1
@@ -230,6 +231,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         GLES20.glEnable(GLES20.GL_CULL_FACE)
         GLES20.glCullFace(GLES20.GL_BACK)
+        heightfield.contextLost()
         program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         positionAttribute = GLES20.glGetAttribLocation(program, "aPosition")
         normalAttribute = GLES20.glGetAttribLocation(program, "aNormal")
@@ -255,6 +257,11 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
     override fun onDrawFrame(gl: GL10?) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         val activeScene = scene ?: return
+        activeScene.heightmap?.let {
+            buildMvpMatrix()
+            heightfield.draw(it, mvpMatrix, viewportWidth, viewportHeight, zoom)
+            return
+        }
         val level = activeScene.selectForZoom(zoom)
         val batches = uploadedLevels[level.reductionFactor] ?: upload(level)
         if (batches.isEmpty()) return
@@ -379,6 +386,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
     }
 
     private fun deleteAllLevels() {
+        heightfield.release()
         if (uploadedLevels.isEmpty()) return
         val ids = uploadedLevels.values.flatten().flatMap { listOf(it.vertexBufferId, it.indexBufferId) }
         if (ids.isNotEmpty()) {

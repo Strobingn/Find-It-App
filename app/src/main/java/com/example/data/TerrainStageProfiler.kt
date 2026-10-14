@@ -31,7 +31,10 @@ object TerrainStageProfiler {
 
     fun <T> stage(name: String, detail: String = "", block: () -> T): T {
         var result: T
-        val nanos = measureNanoTime { result = block() }
+        val nanos = measureNanoTime {
+            runCatching { android.os.Trace.beginSection("FindIt:$name".take(127)) }
+            try { result = block() } finally { runCatching { android.os.Trace.endSection() } }
+        }
         record(name, nanos / 1_000_000.0, detail)
         return result
     }

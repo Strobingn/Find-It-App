@@ -195,12 +195,13 @@ class LazTerrainDiskCache(
         val sanitized = options.sanitized()
         val key = buildString {
             append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
-            append("|terrainPrecision7")
+            append("|terrainPrecision8")
             append('|').append(file.length())
             append('|').append(file.lastModified())
             append('|').append(sanitized.groundMode.name)
             append('|').append(sanitized.rasterResolution)
             append('|').append(sanitized.smoothingRadius)
+            append('|').append(sanitized.fixedWidth).append('x').append(sanitized.fixedHeight)
             append('|').append(sanitized.focusBounds)
             // Refines cached before the ground-spacing clamp were over-fine (stair-steps).
             if (sanitized.focusBounds != null) append("|groundSpacingClamp1")

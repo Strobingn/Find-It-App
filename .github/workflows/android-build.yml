@@ -55,6 +55,33 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache native toolchain artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            native/lazrs-jni/target
+          key: native-laz-${{ runner.os }}-${{ hashFiles('native/lazrs-jni/Cargo.lock', 'native/lazrs-jni/Cargo.toml') }}-v2
+
+      - name: Build and test native LAZ decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native/lazrs-jni
+          cargo test --locked
+          command -v cargo-ndk >/dev/null || cargo install cargo-ndk --version 4.1.2 --locked
+          sdkmanager 'ndk;28.2.13676358'
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          cargo ndk -p 24 -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release --locked
+          test -s ../../app/src/main/jniLibs/arm64-v8a/liblazrs_jni.so
+
       - name: Require Gradle wrapper
         run: |
           test -f gradlew || { echo "gradlew missing on this branch"; ls -la; exit 1; }
@@ -80,6 +107,24 @@ jobs:
           set -o pipefail
           ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
 
+      - name: Enable emulator acceleration
+        if: github.event_name != 'pull_request'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Validate native and GPU paths on Android
+        if: github.event_name != 'pull_request'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
+          script: ./gradlew connectedDebugAndroidTest --no-configuration-cache -Pandroid.testInstrumentationRunnerArguments.class=com.example.data.TerrainGpuInstrumentedTest
+
       - name: Build branch APK
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref != 'refs/heads/main')
         env:
@@ -98,6 +143,7 @@ jobs:
             export STORE_PASSWORD=android KEY_ALIAS=androiddebugkey KEY_PASSWORD=android
           fi
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          unzip -l app/build/outputs/apk/release/app-release.apk | grep 'lib/arm64-v8a/liblazrs_jni.so'
           (cd app/build/outputs/apk/release && sha256sum *.apk > SHA256SUMS.txt)
 
       - name: Upload branch APK
@@ -120,6 +166,8 @@ jobs:
             unit-test.log
             app/build/test-results/testDebugUnitTest/
             app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
           if-no-files-found: warn
           retention-days: 14
 
@@ -229,6 +277,7 @@ jobs:
           fi
           chmod +x ./gradlew
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          unzip -l app/build/outputs/apk/release/app-release.apk | grep 'lib/arm64-v8a/liblazrs_jni.so'
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
           test -n "$APK"
           DEST="$GITHUB_WORKSPACE/findit-${{ steps.version.outputs.code }}.apk"

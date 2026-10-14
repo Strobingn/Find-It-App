@@ -225,13 +225,7 @@ class TerrainDecodeCoordinator(
     private suspend fun buildGpuScene(grid: ElevationGrid): TerrainGpuScene =
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            val scene = TerrainGpuSceneBuilder.build(
-                source = grid,
-                maxFinestDimension = maxOf(grid.width, grid.height, 64),
-                tileSize = GPU_PREVIEW_TILE_SIZE,
-                useIntIndices = false,
-                attachHeightmap = true,
-            )
+            val scene = TerrainGpuSceneBuilder.buildHeightfield(grid)
             TerrainMemoryMonitor.noteGpuScene(scene)
             scene
         }

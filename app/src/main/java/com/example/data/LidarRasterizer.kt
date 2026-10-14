@@ -109,7 +109,10 @@ internal class LidarRasterizer(
     var truncatedByReader: Boolean = false
 
     init {
-        if (rangeX >= rangeY) {
+        if (this.options.fixedWidth != null && this.options.fixedHeight != null) {
+            width = this.options.fixedWidth
+            height = this.options.fixedHeight
+        } else if (rangeX >= rangeY) {
             width = longSide
             height = (longSide * rangeY / rangeX).roundToInt().coerceIn(MIN_SHORT_SIDE, longSide)
         } else {
