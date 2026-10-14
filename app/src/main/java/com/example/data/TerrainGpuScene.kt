@@ -277,9 +277,9 @@ object TerrainGpuSceneBuilder {
         }
 
         val dx = (elevationAt(x + 1, y) - elevationAt(x - 1, y)) /
-            max(2f * grid.cellSizeMeters, 0.001f)
+            max(2f * grid.cellSizeXMeters, 0.001f)
         val dy = (elevationAt(x, y + 1) - elevationAt(x, y - 1)) /
-            max(2f * grid.cellSizeMeters, 0.001f)
+            max(2f * grid.cellSizeYMeters, 0.001f)
         var nx = -dx
         var ny = dy
         var nz = 1f

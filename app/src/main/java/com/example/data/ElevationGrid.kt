@@ -39,8 +39,11 @@ class ElevationGrid(
      * a field measurement; analysis code may ignore them when honesty matters.
      */
     val interpolatedData: BooleanArray = BooleanArray(width * height) { false },
+    val cellSizeXMeters: Float = cellSizeMeters,
+    val cellSizeYMeters: Float = cellSizeMeters,
 ) {
     init {
+        require(cellSizeXMeters.isFinite() && cellSizeXMeters > 0f && cellSizeYMeters.isFinite() && cellSizeYMeters > 0f)
         require(width > 0 && height > 0) { "Grid dimensions must be positive" }
         require(bareEarth.size == width * height) { "bareEarth size must be width * height" }
         require(canopySpikes.size == width * height) { "canopySpikes size must be width * height" }
@@ -191,7 +194,8 @@ class ElevationGrid(
         val needsPrimaryShade = needsMultiShade || boundedMode == 0
         val needsSlope = boundedMode == 2 || boundedMode == 6
         val needsGradient = needsPrimaryShade || needsSlope
-        val gradientDivisor = 8f * cellDistance
+        val gradientDivisorX = 8f * cellSizeXMeters
+        val gradientDivisorY = 8f * cellSizeYMeters
         val lastX = width - 1
         val lastY = height - 1
 
@@ -239,9 +243,9 @@ class ElevationGrid(
                         z22 = hornSampleAt(elevations, validData, x + 1, y + 1, centerZ)
                     }
                     gradientX = ((z02 + 2f * z12 + z22) - (z00 + 2f * z10 + z20)) /
-                        gradientDivisor * zMultiplier
+                        gradientDivisorX * zMultiplier
                     gradientY = ((z20 + 2f * z21 + z22) - (z00 + 2f * z01 + z02)) /
-                        gradientDivisor * zMultiplier
+                        gradientDivisorY * zMultiplier
                     if (!gradientX.isFinite() || !gradientY.isFinite()) {
                         gradientX = 0f
                         gradientY = 0f
@@ -488,7 +492,8 @@ class ElevationGrid(
         // Laplacian; a missing (NaN/invalid) neighbour takes the centre value, invalid centres
         // yield 0 (they are rendered transparent anyway).
         val output = FloatArray(elevations.size)
-        val divisor = cellDistance * cellDistance
+        val divisorX = cellSizeXMeters * cellSizeXMeters
+        val divisorY = cellSizeYMeters * cellSizeYMeters
         forEachRowInParallel { y ->
             for (x in 0 until width) {
                 val i = y * width + x
@@ -498,7 +503,8 @@ class ElevationGrid(
                     val j = index(nx, ny)
                     return if (isUsable(elevations, j)) elevations[j] else c
                 }
-                val v = (n(x - 1, y) + n(x + 1, y) + n(x, y - 1) + n(x, y + 1) - 4f * c) / divisor
+                val v = (n(x - 1, y) + n(x + 1, y) - 2f * c) / divisorX +
+                    (n(x, y - 1) + n(x, y + 1) - 2f * c) / divisorY
                 output[i] = if (v.isFinite()) v else 0f
             }
         }
@@ -582,7 +588,7 @@ class ElevationGrid(
 
     private fun aspectColor(dx: Float, dy: Float, slopeRadians: Float, shade: Float): Int {
         if (slopeRadians < Math.toRadians(1.0).toFloat()) return Color.rgb(148, 148, 148)
-        val degrees = ((Math.toDegrees(kotlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
+        val degrees = terrainAspectDegrees(dx, dy)
         val vivid = Color.HSVToColor(floatArrayOf(degrees, 0.82f, 0.95f))
         return shadePalette(vivid, 0.35f + shade * 0.65f, 0.72f)
     }
@@ -672,3 +678,7 @@ class ElevationGrid(
     private class LightVector(val lx: Float, val ly: Float, val lz: Float)
     private data class LocalStatistics(val residual: FloatArray, val roughness: FloatArray)
 }
+
+/** Downslope direction clockwise from north; grid Y grows south. */
+internal fun terrainAspectDegrees(gradientX: Float, gradientY: Float): Float =
+    ((Math.toDegrees(kotlin.math.atan2(-gradientX, gradientY).toDouble()).toFloat() + 360f) % 360f)

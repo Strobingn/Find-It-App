@@ -464,7 +464,7 @@ internal object LazTerrainReader {
         val estimatedPoints = estimatedPoints(header.pointCount, focus)
         return rasterizeLowLevel(
             reader = reader,
-            header = header,
+            header = header.withUnits(indexSource),
             options = densityLimitedOptions(header, options),
             progressTotal = estimatedPoints,
             shouldContinue = shouldContinue,
@@ -511,7 +511,7 @@ internal object LazTerrainReader {
         constrained.getCloseablePoints().use { points ->
             rasterizeHighLevel(
                 points = points,
-                header = header,
+                header = header.withUnits(file),
                 options = densityLimitedOptions(header, options),
                 progressTotal = estimatedPoints(header.pointCount, focus),
                 shouldContinue = shouldContinue,
@@ -544,7 +544,7 @@ internal object LazTerrainReader {
                     z = reader.get_z().toFloat(),
                     classification = reader.point.get_classification().toInt(),
                     isKeyPoint = reader.point.get_keypoint_flag().toInt() != 0,
-                            isWithheld = reader.point.get_withheld_flag().toInt() != 0,
+                    isWithheld = reader.point.get_withheld_flag().toInt() != 0,
                 )
             }
             pointsInBatch++
@@ -618,6 +618,8 @@ internal object LazTerrainReader {
         lasVersionMajor = header.versionMajor,
         lasVersionMinor = header.versionMinor,
         pointFormat = header.pointFormat,
+        horizontalUnitToMeters = header.units.horizontal,
+        verticalUnitToMeters = header.units.vertical,
     )
 
     /**
@@ -669,7 +671,7 @@ internal object LazTerrainReader {
         // file order. Memory is bounded by the in-flight window (2 chunks per worker, ~14 MB at
         // 8 workers) instead of a full private raster per worker (75 MB each at 1536²), so all
         // cores can be used, and the result is identical to the sequential decoder.
-        val rasterizer = newRasterizer(header, limited, pointCount)
+        val rasterizer = newRasterizer(header.withUnits(file), limited, pointCount)
         val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
         val windowSize = workers * 2
         val results = Array(windowSize) { java.util.concurrent.CompletableFuture<DecodedChunk>() }
@@ -779,10 +781,6 @@ internal object LazTerrainReader {
         }
 
         companion object {
-            val CONSUMED = java.util.concurrent.CompletableFuture.completedFuture(
-                DecodedChunk(0, DoubleArray(0), DoubleArray(0), FloatArray(0), ByteArray(0), ByteArray(0)),
-            )
-
             fun decode(reader: LASreaderLAS, wanted: Int): DecodedChunk {
                 val xs = DoubleArray(wanted)
                 val ys = DoubleArray(wanted)
@@ -860,8 +858,8 @@ internal object LazTerrainReader {
         val decoded = TerrainStageProfiler.stage("decode_lazrs", file.name) {
             LazRsNativeDecoder.decodePacked(file, packed, origins, shouldContinue)
         }
-        if (decoded <= 0 || !shouldContinue()) return null
-        val rasterizer = newRasterizer(header, options, pointCount)
+        if (decoded.toLong() != pointCount || !shouldContinue()) return null
+        val rasterizer = newRasterizer(header.withUnits(file), densityLimitedOptions(header, options), pointCount)
         if (!PackedPointRasterizer.addAll(
             rasterizer,
             packed,
@@ -923,7 +921,10 @@ internal object LazTerrainReader {
         val minX: Double,
         val maxY: Double,
         val minY: Double,
-    )
+        val units: LasTerrainUnits = LasTerrainUnits(),
+    ) {
+        fun withUnits(file: File?): Header = copy(units = LasTerrainUnits.read(file))
+    }
 }
 
 

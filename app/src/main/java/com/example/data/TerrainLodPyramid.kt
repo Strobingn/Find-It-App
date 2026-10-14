@@ -132,6 +132,8 @@ class TerrainLodPyramid private constructor(
                 cellSizeMeters = source.cellSizeMeters * 2f,
                 validData = valid,
                 interpolatedData = interpolated,
+                cellSizeXMeters = source.cellSizeXMeters * 2f,
+                cellSizeYMeters = source.cellSizeYMeters * 2f,
             )
         }
     }

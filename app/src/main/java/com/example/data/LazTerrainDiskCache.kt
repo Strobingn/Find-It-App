@@ -44,6 +44,8 @@ class LazTerrainDiskCache(
                 val cells = width.toLong() * height.toLong()
                 require(width > 0 && height > 0 && cells <= MAX_CELLS) { "Invalid cached grid size" }
                 val cellSize = input.readFloat()
+                val cellX = input.readFloat()
+                val cellY = input.readFloat()
                 val isBareEarth = input.readBoolean()
                 val summary = input.readUTF()
                 val bare = FloatArray(cells.toInt()) { input.readFloat() }
@@ -52,7 +54,7 @@ class LazTerrainDiskCache(
                 val interpolated = BooleanArray(cells.toInt()) { input.readBoolean() }
                 val geoMetadata = readGeoMetadata(input, width, height, cellSize)
                 DemGenerator.TerrainLoadResult(
-                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid, interpolated),
+                    grid = ElevationGrid(width, height, bare, canopy, cellSize, valid, interpolated, cellX, cellY),
                     summary = summary,
                     isBareEarth = isBareEarth,
                     geoMetadata = geoMetadata,
@@ -78,6 +80,8 @@ class LazTerrainDiskCache(
                 output.writeInt(result.grid.width)
                 output.writeInt(result.grid.height)
                 output.writeFloat(result.grid.cellSizeMeters)
+                output.writeFloat(result.grid.cellSizeXMeters)
+                output.writeFloat(result.grid.cellSizeYMeters)
                 output.writeBoolean(result.isBareEarth)
                 output.writeUTF(result.summary.take(MAX_SUMMARY_CHARS))
                 result.grid.bareEarth.forEach(output::writeFloat)
@@ -191,7 +195,7 @@ class LazTerrainDiskCache(
         val sanitized = options.sanitized()
         val key = buildString {
             append(runCatching { file.canonicalPath }.getOrDefault(file.absolutePath))
-            append("|terrainPrecision4")
+            append("|terrainPrecision5")
             append('|').append(file.length())
             append('|').append(file.lastModified())
             append('|').append(sanitized.groundMode.name)
@@ -223,7 +227,7 @@ class LazTerrainDiskCache(
 
     companion object {
         // V2: validData mask from full raster. V3: same + optional georeference metadata.
-        private const val MAGIC_V4 = "FINDIT_DEM_CACHE_V4"
+        private const val MAGIC_V4 = "FINDIT_DEM_CACHE_V5"
         private const val CACHE_EXTENSION = "fitdem"
         private const val BUFFER_BYTES = 256 * 1024
         private const val MAX_CELLS = 2_048L * 2_048L

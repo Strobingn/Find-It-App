@@ -311,6 +311,8 @@ object DemGenerator {
         inputStream: java.io.InputStream,
         options: LidarImportOptions,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+        horizontalUnitToMeters: Double = 1.0,
+        verticalUnitToMeters: Double = 1.0,
     ): LasLoadResult? {
         return try {
             val buffered = if (inputStream is java.io.BufferedInputStream) {
@@ -375,6 +377,8 @@ object DemGenerator {
                 lasVersionMajor = versionMajor,
                 lasVersionMinor = versionMinor,
                 pointFormat = pointFormat,
+                horizontalUnitToMeters = horizontalUnitToMeters,
+                verticalUnitToMeters = verticalUnitToMeters,
             )
             val classOffset = if (pointFormat >= 6) 16 else 15
             val classMask = if (pointFormat >= 6) 0xFF else 0x1F
@@ -434,6 +438,7 @@ object DemGenerator {
         options: LidarImportOptions,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
     ): LasLoadResult? = TerrainStageProfiler.stage("decode_mapped_las", file.name) {
+        val units = LasTerrainUnits.read(file)
         runCatching {
             java.io.RandomAccessFile(file, "r").use { raf ->
                 val mapped = raf.channel.map(
@@ -453,10 +458,10 @@ object DemGenerator {
                         mapped.limit(limit)
                         return n
                     }
-                }).buffered(256 * 1024), options, shouldContinue)
+                }).buffered(256 * 1024), options, shouldContinue, units.horizontal, units.vertical)
             }
         }.getOrElse {
-            file.inputStream().buffered(256 * 1024).use { parseLasStreamDetailed(it, options, shouldContinue) }
+            file.inputStream().buffered(256 * 1024).use { parseLasStreamDetailed(it, options, shouldContinue, units.horizontal, units.vertical) }
         }
     }
 

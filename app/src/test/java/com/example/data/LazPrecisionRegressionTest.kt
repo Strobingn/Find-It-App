@@ -1,5 +1,7 @@
 package com.example.data
 
+import com.github.mreutegg.laszip4j.LASReader
+import com.github.mreutegg.laszip4j.LASWriter
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -20,7 +22,7 @@ class LazPrecisionRegressionTest {
             rasterizer.addPoint(64.0, 64.0, 1000f, 18)
             val result = rasterizer.finish(0, "fixture")!!
             assertEquals(mode, result.appliedGroundMode)
-            assertEquals(40f, result.grid.bareEarth[64 * 128 + 64], 0f)
+            assertEquals(40f, result.grid.bareEarth[63 * 128 + 64], 0f)
             assertEquals(0f, result.grid.canopySpikes[64 * 128 + 64], 0f)
             assertEquals(128 * 128, result.sampledPoints)
             assertEquals(128 * 128 + 3, result.totalPointsRead)
@@ -35,7 +37,7 @@ class LazPrecisionRegressionTest {
         }
         val result = rasterizer.finish(0, "fixture")!!
         assertEquals(GroundSurfaceMode.SOURCE_CLASSIFIED, result.appliedGroundMode)
-        assertEquals(30f, result.grid.bareEarth[64 * 128 + 64], 0f)
+        assertEquals(30f, result.grid.bareEarth[63 * 128 + 64], 0f)
     }
 
     @Test fun las14LegacyFormatDoesNotTurnReservedClass8IntoGround() {
@@ -105,11 +107,13 @@ class LazPrecisionRegressionTest {
             val size = 2048 * 2048
             val interpolated = BooleanArray(size) { it % 2 == 0 }
             val grid = ElevationGrid(2048, 2048, FloatArray(size) { 40f }, FloatArray(size),
-                interpolatedData = interpolated)
+                interpolatedData = interpolated, cellSizeXMeters = 0.5f, cellSizeYMeters = 0.75f)
             cache.put(source, options, DemGenerator.TerrainLoadResult(grid, "fixture", true))
             val restored = cache.get(source, options)!!.grid
             assertArrayEquals(interpolated, restored.interpolatedData)
             assertEquals(2048, restored.width)
+            assertEquals(0.5f, restored.cellSizeXMeters, 0f)
+            assertEquals(0.75f, restored.cellSizeYMeters, 0f)
         } finally { root.deleteRecursively() }
     }
 
@@ -121,15 +125,21 @@ class LazPrecisionRegressionTest {
             val file = LasFixture.write(File(root, "points.las"), 450_123)
             val options = LidarImportOptions(rasterResolution = 128)
             AppMemoryBudget.lowMemoryOverride = true // 2 workers, a four-slot ring wraps twice.
-            LazTerrainReader.parallelDecodeEnabled = false
-            val sequential = LazTerrainReader.read(file, options)!!
-            LazTerrainReader.parallelDecodeEnabled = true
-            val parallel = LazTerrainReader.read(file, options)!!
-            assertEquals(sequential.totalPointsRead, parallel.totalPointsRead)
-            assertArrayEquals(sequential.grid.bareEarth, parallel.grid.bareEarth, 0f)
-            assertArrayEquals(sequential.grid.validData, parallel.grid.validData)
-            assertArrayEquals(sequential.grid.interpolatedData, parallel.grid.interpolatedData)
-            assertNull(LazTerrainReader.read(file, options, shouldContinue = { false }))
+            val compressed = File(root, "points.laz")
+            LASWriter(LASReader(file)).write(compressed)
+            for (source in listOf(file, compressed)) {
+                LazTerrainReader.parallelDecodeEnabled = false
+                val sequential = LazTerrainReader.read(source, options)!!
+                LazTerrainReader.parallelDecodeEnabled = true
+                val parallel = LazTerrainReader.read(source, options)!!
+                assertEquals(450_123, parallel.totalPointsRead)
+                if (Runtime.getRuntime().availableProcessors() > 1) assertTrue(parallel.note.contains("parallel chunk decode"))
+                assertEquals(sequential.totalPointsRead, parallel.totalPointsRead)
+                assertArrayEquals(sequential.grid.bareEarth, parallel.grid.bareEarth, 0f)
+                assertArrayEquals(sequential.grid.validData, parallel.grid.validData)
+                assertArrayEquals(sequential.grid.interpolatedData, parallel.grid.interpolatedData)
+                assertNull(LazTerrainReader.read(source, options, shouldContinue = { false }))
+            }
         } finally {
             LazTerrainReader.parallelDecodeEnabled = oldParallel
             AppMemoryBudget.lowMemoryOverride = oldLowMemory

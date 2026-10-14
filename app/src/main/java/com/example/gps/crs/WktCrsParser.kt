@@ -51,6 +51,12 @@ object WktCrsParser {
         return runCatching { node() }.getOrNull()
     }
 
+    /** Read only the vertical CRS unit; horizontal feet do not imply vertical feet. */
+    fun verticalUnitToMeters(wkt: String): Double? {
+        val vertical = parse(wkt.trim().trimEnd('\u0000'))?.find("VERT_CS", "VERTCRS", "VERTICALCRS") ?: return null
+        return vertical.find("LENGTHUNIT", "UNIT")?.num(1)?.takeIf { it.isFinite() && it > 0.0 }
+    }
+
     fun parseProjected(wkt: String): ProjectedCrs? {
         val root = parse(wkt.trim().trimEnd('\u0000')) ?: return null
         val projcs = root.find("PROJCS") ?: return root.find("PROJCRS")?.let(::fromWkt2Id)

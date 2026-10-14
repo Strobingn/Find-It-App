@@ -181,11 +181,14 @@ internal fun interpolateBareEarth(
             val bx1 = (x1 + bufferCells).coerceAtMost(width)
             val by1 = (y1 + bufferCells).coerceAtMost(height)
             val vertices = ArrayList<TinVertex>(64)
-            for (y in by0 until by1) {
+            collectVertices@ for (y in by0 until by1) {
                 for (x in bx0 until bx1) {
                     val index = y * width + x
-                    if (!valid[index]) continue
-                    vertices += TinVertex(x.toDouble(), y.toDouble(), elevations[index], index)
+                    // Interpolated cells from earlier tiles are not source measurements.
+                    if (!measuredMask[index] || !measuredElevations[index].isFinite()) continue
+                    vertices += TinVertex(x.toDouble(), y.toDouble(), measuredElevations[index], index)
+                    // Above this cap we use IDW. Do not allocate thousands of unused objects.
+                    if (vertices.size > MAX_TIN_VERTICES_PER_TILE) break@collectVertices
                 }
             }
             val useTin = vertices.size in 3..MAX_TIN_VERTICES_PER_TILE && emptyInterior >= 8
@@ -213,14 +216,14 @@ internal fun interpolateBareEarth(
                     tilesIdw++
                     fillBoundedIdw(
                         elevations, valid, interpolated, hull, width, height,
-                        x0, y0, x1, y1, maxEdgeCells.roundToInt(),
+                        x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask,
                     )
                 }
             } else if (vertices.size >= 3) {
                 tilesIdw++
                 fillBoundedIdw(
                     elevations, valid, interpolated, hull, width, height,
-                    x0, y0, x1, y1, maxEdgeCells.roundToInt(),
+                    x0, y0, x1, y1, maxEdgeCells.roundToInt(), sampleMask = measuredMask,
                 )
             }
         }
@@ -331,6 +334,8 @@ internal fun ElevationGrid.ensureBareEarthCoverage(): ElevationGrid {
         cellSizeMeters = cellSizeMeters,
         validData = filled.validData,
         interpolatedData = filled.interpolatedData,
+        cellSizeXMeters = cellSizeXMeters,
+        cellSizeYMeters = cellSizeYMeters,
     )
 }
 
@@ -618,12 +623,17 @@ private fun fillBoundedIdw(
     y1: Int,
     radiusCells: Int,
     passes: Int = 1,
+    sampleMask: BooleanArray? = null,
 ) {
     val radius = radiusCells.coerceIn(1, 16)
     val radiusSq = radius * radius
     repeat(passes) {
-        val updates = ArrayList<Int>(16)
-        val values = ArrayList<Float>(16)
+        // Jacobi pass: only the snapshot is sampled; commit updates after all cells are visited.
+        // Tile passes explicitly supply measuredMask, so traversal cannot grow artificial ridges.
+        val eligible = sampleMask ?: valid.copyOf()
+        var updates = IntArray(256)
+        var values = FloatArray(256)
+        var updateCount = 0
         for (y in y0 until y1) {
             for (x in x0 until x1) {
                 val index = y * width + x
@@ -642,7 +652,7 @@ private fun fillBoundedIdw(
                         val distSq = dx * dx + dy * dy
                         if (distSq == 0 || distSq > radiusSq) continue
                         val neighbor = ny * width + nx
-                        if (!valid[neighbor]) continue
+                        if (!eligible[neighbor]) continue
                         val z = elevations[neighbor]
                         if (!z.isFinite()) continue
                         val weight = 1.0 / distSq
@@ -652,12 +662,17 @@ private fun fillBoundedIdw(
                     }
                 }
                 if (samples >= 3 && weightSum > 0.0) {
-                    updates += index
-                    values += (valueSum / weightSum).toFloat()
+                    if (updateCount == updates.size) {
+                        updates = updates.copyOf(updates.size * 2)
+                        values = values.copyOf(values.size * 2)
+                    }
+                    updates[updateCount] = index
+                    values[updateCount] = (valueSum / weightSum).toFloat()
+                    updateCount++
                 }
             }
         }
-        for (i in updates.indices) {
+        for (i in 0 until updateCount) {
             val index = updates[i]
             elevations[index] = values[i]
             valid[index] = true
