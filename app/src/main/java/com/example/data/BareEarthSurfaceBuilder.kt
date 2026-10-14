@@ -150,80 +150,92 @@ internal fun interpolateBareEarth(
     val maxEdgeCells = (maxEdgeMeters / cellSizeMeters.coerceAtLeast(0.001f)).coerceIn(2f, 48f)
     val hull = buildDataHull(valid, width, height, maxEdgeCells)
 
+    // One global Delaunay over every measured cell. The previous per-tile TIN left a seam at
+    // every 32-cell boundary (shared edges were triangulated twice with different neighbours),
+    // which showed as straight lines under hillshade. Integer grid coordinates keep orientation
+    // and in-circle exact, so this is stable at million-cell refine sizes.
     var tilesTriangulated = 0
     var trianglesKept = 0
     var trianglesKilled = 0
     var tilesIdw = 0
-
-    val tileSize = TIN_TILE_CELLS
-    val bufferCells = ceil((TIN_BUFFER_METERS / cellSizeMeters.coerceAtLeast(0.25f)).toDouble())
-        .toInt()
-        .coerceIn(4, 24)
-    val tilesX = (width + tileSize - 1) / tileSize
-    val tilesY = (height + tileSize - 1) / tileSize
-    for (tileY in 0 until tilesY) {
-        for (tileX in 0 until tilesX) {
-            val x0 = tileX * tileSize
-            val y0 = tileY * tileSize
-            val x1 = min(width, x0 + tileSize)
-            val y1 = min(height, y0 + tileSize)
-            var emptyInterior = 0
-            for (y in y0 until y1) {
-                for (x in x0 until x1) {
-                    val index = y * width + x
-                    if (!valid[index] && hull[index]) emptyInterior++
+    // Only rim cells (measured, touching an empty in-hull cell) can be corners of a triangle
+    // that covers an empty cell, so the mesh is built from those alone: a dense refine keeps
+    // memory to a fraction of the raster instead of ~80 B per cell.
+    val rim = BooleanArray(width * height)
+    var measuredCount = 0
+    for (y in 0 until height) {
+        for (x in 0 until width) {
+            val index = y * width + x
+            if (!valid[index]) continue
+            var touches = false
+            var dy = -1
+            while (dy <= 1 && !touches) {
+                val ny = y + dy
+                if (ny in 0 until height) {
+                    for (dx in -1..1) {
+                        val nx = x + dx
+                        if (nx !in 0 until width) continue
+                        val ni = ny * width + nx
+                        if (!valid[ni] && hull[ni]) { touches = true; break }
+                    }
                 }
+                dy++
             }
-            if (emptyInterior == 0) continue
-
-            val bx0 = (x0 - bufferCells).coerceAtLeast(0)
-            val by0 = (y0 - bufferCells).coerceAtLeast(0)
-            val bx1 = (x1 + bufferCells).coerceAtMost(width)
-            val by1 = (y1 + bufferCells).coerceAtMost(height)
-            val vertices = ArrayList<TinVertex>(64)
-            for (y in by0 until by1) {
-                for (x in bx0 until bx1) {
-                    val index = y * width + x
-                    if (!valid[index]) continue
-                    vertices += TinVertex(x.toDouble(), y.toDouble(), elevations[index], index)
-                }
-            }
-            val useTin = vertices.size in 3..MAX_TIN_VERTICES_PER_TILE && emptyInterior >= 8
-            if (useTin) {
-                val mesh = delaunay(vertices)
-                if (mesh != null) {
-                    tilesTriangulated++
-                    val rasterized = rasterizeTin(
-                        triangles = mesh,
-                        vertices = vertices,
-                        elevations = elevations,
-                        valid = valid,
-                        interpolated = interpolated,
-                        hull = hull,
-                        width = width,
-                        x0 = x0,
-                        y0 = y0,
-                        x1 = x1,
-                        y1 = y1,
-                        maxEdgeCells = maxEdgeCells.toDouble(),
-                    )
-                    trianglesKept += rasterized.first
-                    trianglesKilled += rasterized.second
-                } else {
-                    tilesIdw++
-                    fillBoundedIdw(
-                        elevations, valid, interpolated, hull, width, height,
-                        x0, y0, x1, y1, maxEdgeCells.roundToInt(),
-                    )
-                }
-            } else if (vertices.size >= 3) {
-                tilesIdw++
-                fillBoundedIdw(
-                    elevations, valid, interpolated, hull, width, height,
-                    x0, y0, x1, y1, maxEdgeCells.roundToInt(),
-                )
+            if (touches) { rim[index] = true; measuredCount++ }
+        }
+    }
+    if (measuredCount in 3..MAX_GLOBAL_TIN_VERTICES) {
+        val xs = IntArray(measuredCount)
+        val ys = IntArray(measuredCount)
+        val zs = FloatArray(measuredCount)
+        var n = 0
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val index = y * width + x
+                if (!rim[index]) continue
+                xs[n] = x; ys[n] = y; zs[n] = elevations[index]; n++
             }
         }
+        val coords = DoubleArray(n * 2)
+        for (i in 0 until n) { coords[2 * i] = xs[i].toDouble(); coords[2 * i + 1] = ys[i].toDouble() }
+        val mesh = GridDelaunay(coords)
+        tilesTriangulated = 1
+        val maxEdge = maxEdgeCells.toDouble()
+        val maxEdge2 = maxEdge * maxEdge
+        for (t in 0 until mesh.triangleCount) {
+            val ia = mesh.triangles[3 * t]; val ib = mesh.triangles[3 * t + 1]; val ic = mesh.triangles[3 * t + 2]
+            val ax = xs[ia].toDouble(); val ay = ys[ia].toDouble()
+            val bx = xs[ib].toDouble(); val by = ys[ib].toDouble()
+            val cx = xs[ic].toDouble(); val cy = ys[ic].toDouble()
+            val ab2 = (ax - bx) * (ax - bx) + (ay - by) * (ay - by)
+            val bc2 = (bx - cx) * (bx - cx) + (by - cy) * (by - cy)
+            val ca2 = (cx - ax) * (cx - ax) + (cy - ay) * (cy - ay)
+            if (max(ab2, max(bc2, ca2)) > maxEdge2) { trianglesKilled++; continue }
+            trianglesKept++
+            val za = zs[ia]; val zb = zs[ib]; val zc = zs[ic]
+            val minX = floorToInt(min(ax, min(bx, cx))).coerceAtLeast(0)
+            val maxX = ceilToInt(max(ax, max(bx, cx))).coerceAtMost(width - 1)
+            val minY = floorToInt(min(ay, min(by, cy))).coerceAtLeast(0)
+            val maxY = ceilToInt(max(ay, max(by, cy))).coerceAtMost(height - 1)
+            for (y in minY..maxY) {
+                for (x in minX..maxX) {
+                    val index = y * width + x
+                    if (valid[index] || !hull[index]) continue
+                    val bary = barycentric(x.toDouble(), y.toDouble(), ax, ay, bx, by, cx, cy) ?: continue
+                    val z = (bary[0] * za + bary[1] * zb + bary[2] * zc).toFloat()
+                    if (!z.isFinite()) continue
+                    elevations[index] = z
+                    valid[index] = true
+                    interpolated[index] = true
+                }
+            }
+        }
+    } else if (measuredCount >= 3) {
+        tilesIdw = 1
+        fillBoundedIdw(
+            elevations, valid, interpolated, hull, width, height,
+            0, 0, width, height, maxEdgeCells.roundToInt(),
+        )
     }
 
     // Pinholes the TIN/IDW window left behind, still inside the hull (gdal_fillnodata -md ~5–10).
@@ -372,12 +384,10 @@ internal object TerrainCoverageLog {
 
 internal const val DEFAULT_CELL_TO_SPACING = 1.75
 internal const val CONTINUOUS_HULL_EMPTY_SHARE = 0.05f
-private const val TIN_TILE_CELLS = 32
-private const val TIN_BUFFER_METERS = 25.0
 private const val MAX_TRIANGLE_EDGE_METERS = 15.0
 private const val MIN_TRIANGLE_EDGE_METERS = 10.0
 private const val HOLE_FILL_RADIUS_CELLS = 8
-private const val MAX_TIN_VERTICES_PER_TILE = 800
+private const val MAX_GLOBAL_TIN_VERTICES = 2_500_000
 
 internal fun maxEdgeMeters(cellSizeMeters: Float, meanSpacingMeters: Float): Float {
     val fromSpacing = (meanSpacingMeters * 3f).coerceAtLeast(MIN_TRIANGLE_EDGE_METERS.toFloat())
@@ -431,153 +441,6 @@ private fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: In
         }
     }
     return BooleanArray(source.size) { distance[it] <= radius }
-}
-
-private data class TinVertex(val x: Double, val y: Double, val z: Float, val cellIndex: Int)
-
-private data class TinTriangle(val a: Int, val b: Int, val c: Int)
-
-private fun delaunay(vertices: List<TinVertex>): List<TinTriangle>? {
-    if (vertices.size < 3) return null
-    var minX = Double.POSITIVE_INFINITY
-    var minY = Double.POSITIVE_INFINITY
-    var maxX = Double.NEGATIVE_INFINITY
-    var maxY = Double.NEGATIVE_INFINITY
-    for (vertex in vertices) {
-        if (vertex.x < minX) minX = vertex.x
-        if (vertex.y < minY) minY = vertex.y
-        if (vertex.x > maxX) maxX = vertex.x
-        if (vertex.y > maxY) maxY = vertex.y
-    }
-    val dx = (maxX - minX).coerceAtLeast(1.0)
-    val dy = (maxY - minY).coerceAtLeast(1.0)
-    val d = max(dx, dy)
-    val cx = (minX + maxX) * 0.5
-    val cy = (minY + maxY) * 0.5
-    val superA = TinVertex(cx, cy + 20.0 * d, 0f, -1)
-    val superB = TinVertex(cx - 20.0 * d, cy - 10.0 * d, 0f, -1)
-    val superC = TinVertex(cx + 20.0 * d, cy - 10.0 * d, 0f, -1)
-    val points = ArrayList<TinVertex>(vertices.size + 3)
-    points.addAll(vertices)
-    val ia = points.size
-    points += superA
-    val ib = points.size
-    points += superB
-    val ic = points.size
-    points += superC
-
-    val triangles = ArrayList<TinTriangle>(vertices.size * 2)
-    triangles += TinTriangle(ia, ib, ic)
-
-    for (p in vertices.indices) {
-        val bad = ArrayList<TinTriangle>()
-        val px = points[p].x
-        val py = points[p].y
-        for (triangle in triangles) {
-            if (circumcircleContains(points, triangle, px, py)) bad += triangle
-        }
-        if (bad.isEmpty()) continue
-        val edges = LinkedHashMap<Long, Int>()
-        fun edgeKey(a: Int, b: Int): Long {
-            val lo = min(a, b)
-            val hi = max(a, b)
-            return (lo.toLong() shl 32) or (hi.toLong() and 0xFFFFFFFFL)
-        }
-        for (triangle in bad) {
-            val e = intArrayOf(triangle.a, triangle.b, triangle.b, triangle.c, triangle.c, triangle.a)
-            var i = 0
-            while (i < e.size) {
-                val key = edgeKey(e[i], e[i + 1])
-                edges[key] = (edges[key] ?: 0) + 1
-                i += 2
-            }
-        }
-        triangles.removeAll(bad.toSet())
-        for ((key, count) in edges) {
-            if (count != 1) continue
-            val a = (key ushr 32).toInt()
-            val b = (key and 0xFFFFFFFFL).toInt()
-            triangles += TinTriangle(a, b, p)
-        }
-    }
-
-    val kept = triangles.filter { triangle ->
-        triangle.a < vertices.size && triangle.b < vertices.size && triangle.c < vertices.size
-    }
-    return kept.takeIf { it.isNotEmpty() }
-}
-
-private fun circumcircleContains(
-    points: List<TinVertex>,
-    triangle: TinTriangle,
-    px: Double,
-    py: Double,
-): Boolean {
-    val ax = points[triangle.a].x
-    val ay = points[triangle.a].y
-    val bx = points[triangle.b].x
-    val by = points[triangle.b].y
-    val cx = points[triangle.c].x
-    val cy = points[triangle.c].y
-    val d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if (abs(d) < 1e-12) return false
-    val a2 = ax * ax + ay * ay
-    val b2 = bx * bx + by * by
-    val c2 = cx * cx + cy * cy
-    val ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
-    val uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
-    val r2 = (ax - ux) * (ax - ux) + (ay - uy) * (ay - uy)
-    val p2 = (px - ux) * (px - ux) + (py - uy) * (py - uy)
-    return p2 <= r2 + 1e-8
-}
-
-private fun rasterizeTin(
-    triangles: List<TinTriangle>,
-    vertices: List<TinVertex>,
-    elevations: FloatArray,
-    valid: BooleanArray,
-    interpolated: BooleanArray,
-    hull: BooleanArray,
-    width: Int,
-    x0: Int,
-    y0: Int,
-    x1: Int,
-    y1: Int,
-    maxEdgeCells: Double,
-): Pair<Int, Int> {
-    var kept = 0
-    var killed = 0
-    for (triangle in triangles) {
-        val a = vertices[triangle.a]
-        val b = vertices[triangle.b]
-        val c = vertices[triangle.c]
-        val ab = hypot(a.x - b.x, a.y - b.y)
-        val bc = hypot(b.x - c.x, b.y - c.y)
-        val ca = hypot(c.x - a.x, c.y - a.y)
-        if (max(ab, max(bc, ca)) > maxEdgeCells) {
-            killed++
-            continue
-        }
-        kept++
-        val minX = floorToInt(min(a.x, min(b.x, c.x))).coerceAtLeast(x0)
-        val maxX = ceilToInt(max(a.x, max(b.x, c.x))).coerceAtMost(x1 - 1)
-        val minY = floorToInt(min(a.y, min(b.y, c.y))).coerceAtLeast(y0)
-        val maxY = ceilToInt(max(a.y, max(b.y, c.y))).coerceAtMost(y1 - 1)
-        for (y in minY..maxY) {
-            for (x in minX..maxX) {
-                val index = y * width + x
-                if (valid[index] || !hull[index]) continue
-                val bary = barycentric(x.toDouble(), y.toDouble(), a.x, a.y, b.x, b.y, c.x, c.y)
-                    ?: continue
-                val z = (bary[0] * a.z + bary[1] * b.z + bary[2] * c.z).toFloat()
-                if (!z.isFinite()) continue
-                elevations[index] = z
-                valid[index] = true
-                interpolated[index] = true
-            }
-        }
-    }
-    return kept to killed
 }
 
 private fun barycentric(

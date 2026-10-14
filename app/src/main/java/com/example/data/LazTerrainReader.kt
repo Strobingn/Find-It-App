@@ -69,6 +69,17 @@ internal object LazTerrainReader {
         // then fills most cells from a few points and the hillshade shows facets/stair-steps.
         val focusX = extent.first * (focus.right - focus.left)
         val focusY = extent.second * (focus.bottom - focus.top)
+        indexedFocusPlan(file, sanitized)?.let { plan ->
+            // Sized once from the persisted density histogram: one pass over only the chunks
+            // that touch the viewport, never a corrective second decode.
+            val sized = sanitized.copy(
+                rasterResolution = focusResolutionForPointSpacing(
+                    focusX, focusY, plan.groundPoints, sanitized.rasterResolution,
+                ),
+            ).sanitized()
+            return readParallelChunks(file, sized, shouldContinue, onProgress, pointStride = plan.stride)
+                ?: readUnclamped(file, sized, shouldContinue, onProgress)
+        }
         val known = GroundDensityMemo.pointsPerArea(memoKey)
         val first = if (known != null) {
             sanitized.copy(
@@ -89,6 +100,39 @@ internal object LazTerrainReader {
         return readUnclamped(file, first.copy(rasterResolution = ideal).sanitized(), shouldContinue, onProgress)
             ?: result
     }
+
+    internal data class FocusPlan(val groundPoints: Long, val allPoints: Long, val stride: Int)
+
+    /**
+     * Ground/all points expected in a focused refine (from the chunk index histogram) and the
+     * point stride that keeps one refine under [refinePointBudget] returns. Null when the file
+     * has no index yet or a class filter makes the histogram unrepresentative.
+     */
+    internal fun indexedFocusPlan(file: File, options: LidarImportOptions): FocusPlan? {
+        val focus = options.focusBounds ?: return null
+        if (options.allowedClasses != null) return null
+        val (header, chunkSize) = openHeader(file) ?: return null
+        val index = LazChunkIndex.load(file, header.pointCount, chunkSize) ?: return null
+        val rangeX = header.maxX - header.minX
+        val rangeY = header.maxY - header.minY
+        val x0 = header.minX + focus.left * rangeX
+        val x1 = header.minX + focus.right * rangeX
+        val y0 = header.minY + (1.0 - focus.bottom) * rangeY
+        val y1 = header.minY + (1.0 - focus.top) * rangeY
+        val all = index.estimate(x0, y0, x1, y1, ground = false)
+        val stride = kotlin.math.ceil(all / refinePointBudget).toInt().coerceAtLeast(1)
+        val groundTotal = index.groundHist.sum()
+        val ground = if (options.groundMode == GroundSurfaceMode.SOURCE_CLASSIFIED && groundTotal > 0) {
+            index.estimate(x0, y0, x1, y1, ground = true)
+        } else {
+            val r = FOCUS_CELL_TO_GROUND_SPACING / DEFAULT_CELL_TO_SPACING
+            all * r * r
+        }
+        return FocusPlan((ground / stride).toLong(), all.toLong(), stride)
+    }
+
+    /** Max returns decoded for one refined screen; denser viewports are thinned uniformly. */
+    @Volatile internal var refinePointBudget: Long = 6_000_000L
 
     /**
      * Classified ground uses 1.25× its spacing; unclassified modes count every return, so scale
@@ -233,6 +277,7 @@ internal object LazTerrainReader {
                             z = reader.get_z().toFloat(),
                             classification = reader.point.get_classification().toInt(),
                             isKeyPoint = reader.point.get_keypoint_flag().toInt() != 0,
+                            withheld = reader.point.get_withheld_flag().toInt() != 0,
                         )
                         readInChunk++
                         sampled++
@@ -343,6 +388,7 @@ internal object LazTerrainReader {
                         z = reader.get_z().toFloat(),
                         classification = reader.point.get_classification().toInt(),
                         isKeyPoint = reader.point.get_keypoint_flag().toInt() != 0,
+                        withheld = reader.point.get_withheld_flag().toInt() != 0,
                     )
                 }
                 decoded++
@@ -430,6 +476,8 @@ internal object LazTerrainReader {
             minY = sourceHeader.min_y,
         )
         val focus = options.sanitized().focusBounds
+        val estimatedPoints = estimatedPoints(header.pointCount, focus)
+        val rasterizer = newRasterizer(header, densityLimitedOptions(header, options), estimatedPoints)
         if (focus != null) {
             // Attach the spatial index before the rectangle: with one, the reader seeks past whole
             // compressed chunks that cannot intersect the viewport instead of decompressing every
@@ -437,9 +485,8 @@ internal object LazTerrainReader {
             indexSource?.let { file ->
                 LazSpatialIndex.load(file)?.let(reader::set_index)
             }
-            applyFocus(reader, header, focus)
+            applyFocus(reader, header, focus, rasterizer.padSourceUnitsX(), rasterizer.padSourceUnitsY())
         }
-        val estimatedPoints = estimatedPoints(header.pointCount, focus)
         return rasterizeLowLevel(
             reader = reader,
             header = header,
@@ -447,6 +494,7 @@ internal object LazTerrainReader {
             progressTotal = estimatedPoints,
             shouldContinue = shouldContinue,
             onProgress = onProgress,
+            prepared = rasterizer,
         )
     }
 
@@ -508,8 +556,9 @@ internal object LazTerrainReader {
         progressTotal: Long,
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+        prepared: LidarRasterizer? = null,
     ): DemGenerator.LasLoadResult? {
-        val rasterizer = newRasterizer(header, options, progressTotal)
+        val rasterizer = prepared ?: newRasterizer(header, options, progressTotal)
         var pointsInBatch = 0
         onProgress?.invoke(0L, progressTotal)
         while (reader.read_point()) {
@@ -522,6 +571,7 @@ internal object LazTerrainReader {
                     z = reader.get_z().toFloat(),
                     classification = reader.point.get_classification().toInt(),
                     isKeyPoint = reader.point.get_keypoint_flag().toInt() != 0,
+                    withheld = reader.point.get_withheld_flag().toInt() != 0,
                 )
             }
             pointsInBatch++
@@ -595,24 +645,154 @@ internal object LazTerrainReader {
     )
 
     /**
-     * One seekable reader per core, each owning a disjoint compressed-chunk range.
-     * Workers fill private rasters that are merged on the calling thread.
+     * One seekable reader per core. Workers claim compressed chunks, decode them into compact
+     * buffers, and a single binner adds chunks strictly in file order (output identical to the
+     * sequential decoder).
+     *
+     * Focused refines use the persisted [LazChunkIndex]: only chunks whose XY bounds touch the
+     * viewport (plus the rasterizer's pad ring) are decoded, filtered with laslib's own
+     * inside_rectangle predicate (min ≤ x < max), so the grid matches the seekable
+     * inside_rectangle path bit for bit while reading a fraction of the file. Any pass that
+     * reads every chunk records the index for later refines.
      */
     private fun readParallelChunks(
         file: File,
         options: LidarImportOptions,
         shouldContinue: () -> Boolean,
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
+        pointStride: Int = 1,
     ): DemGenerator.LasLoadResult? {
-        val probe = SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) ?: return null
-        val header: Header
-        val chunkSize: Int
-        val pointCount: Long
-        probe.use { reader ->
+        val opened = openHeader(file) ?: return null
+        val header = opened.first
+        val chunkSize = opened.second
+        val pointCount = header.pointCount
+        if (pointCount <= 0L) return null
+        val limited = densityLimitedOptions(header, options)
+        val focus = limited.focusBounds
+        if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
+        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+        if (workers == 1) return null
+
+        val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
+        val existingIndex = LazChunkIndex.load(file, pointCount, chunkSize)
+        val rasterizer = newRasterizer(
+            header,
+            limited,
+            if (focus != null) estimatedPoints(header.pointCount, focus) else pointCount,
+        )
+        val rect: DoubleArray? = focus?.let {
+            val rangeX = header.maxX - header.minX
+            val rangeY = header.maxY - header.minY
+            val padX = rasterizer.padSourceUnitsX()
+            val padY = rasterizer.padSourceUnitsY()
+            doubleArrayOf(
+                header.minX + it.left * rangeX - padX,
+                header.minY + (1.0 - it.bottom) * rangeY - padY,
+                header.minX + it.right * rangeX + padX,
+                header.minY + (1.0 - it.top) * rangeY + padY,
+            )
+        }
+        val selected: IntArray = if (rect != null && existingIndex != null) {
+            existingIndex.chunksOverlapping(rect[0], rect[1], rect[2], rect[3])
+        } else {
+            IntArray(totalChunks) { it }
+        }
+        val builder = if (existingIndex == null && selected.size == totalChunks) {
+            LazChunkIndex.Builder(pointCount, chunkSize, header.minX, header.maxX, header.minY, header.maxY, totalChunks)
+        } else {
+            null
+        }
+        val groundFlags = intArrayOf(header.versionMajor, header.versionMinor, header.pointFormat)
+        val results = Array(selected.size) { java.util.concurrent.CompletableFuture<DecodedChunk>() }
+        val window = java.util.concurrent.Semaphore(workers * 2)
+        val nextChunk = java.util.concurrent.atomic.AtomicInteger(0)
+        val cancelled = AtomicBoolean(false)
+        val pool = Executors.newFixedThreadPool(workers) { task ->
+            Thread(task, "laz-chunk").apply { isDaemon = true }
+        }
+        val selectedPoints = selected.sumOf { min(chunkSize.toLong(), pointCount - it.toLong() * chunkSize) }
+        return try {
+            repeat(workers) {
+                pool.execute {
+                    val reader = runCatching { SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) }.getOrNull()
+                    try {
+                        while (!cancelled.get()) {
+                            window.acquire()
+                            val slot = nextChunk.getAndIncrement()
+                            if (slot >= selected.size) {
+                                window.release()
+                                break
+                            }
+                            val chunk = selected[slot]
+                            val future = results[slot]
+                            try {
+                                checkNotNull(reader) { "Could not open ${file.name}" }
+                                val start = chunk.toLong() * chunkSize
+                                val count = min(chunkSize.toLong(), pointCount - start).toInt()
+                                check(reader.seek(start)) { "Seek to point $start failed" }
+                                future.complete(
+                                    DecodedChunk.decode(reader, count, start, rect, pointStride, builder?.Chunk(chunk), groundFlags),
+                                )
+                            } catch (error: Throwable) {
+                                future.completeExceptionally(error)
+                            }
+                        }
+                    } catch (_: InterruptedException) {
+                        // Pool shut down: the binner already stopped waiting.
+                    } finally {
+                        reader?.close()
+                    }
+                }
+            }
+            var complete = true
+            TerrainStageProfiler.stage("decode_parallel", file.name) {
+                var decoded = 0L
+                for (slot in selected.indices) {
+                    if (!shouldContinue()) {
+                        cancelled.set(true)
+                        rasterizer.markTruncated()
+                        complete = false
+                        break
+                    }
+                    val points = try {
+                        results[slot].get()
+                    } catch (error: java.util.concurrent.ExecutionException) {
+                        throw error.cause ?: error
+                    }
+                    results[slot] = DecodedChunk.CONSUMED
+                    points.addTo(rasterizer)
+                    window.release()
+                    decoded += points.rawCount
+                    onProgress?.invoke(decoded, selectedPoints)
+                    val chunk = selected[slot]
+                    if (points.rawCount < min(chunkSize.toLong(), pointCount - chunk.toLong() * chunkSize)) {
+                        // Short chunk = reader hit EOF early; the sequential path would stop here too.
+                        rasterizer.markTruncated()
+                        complete = false
+                        break
+                    }
+                }
+            }
+            if (complete && builder != null) builder.build()?.let { runCatching { LazChunkIndex.store(file, it) } }
+            val label = if (rect != null) {
+                "chunk-index refine (${selected.size}/$totalChunks chunks, $workers cores" +
+                    (if (pointStride > 1) ", 1/$pointStride point budget" else "") + ")"
+            } else {
+                "parallel chunk decode ($workers cores)"
+            }
+            finish(rasterizer, header, label)
+        } finally {
+            cancelled.set(true)
+            pool.shutdownNow()
+        }
+    }
+
+    private fun openHeader(file: File): Pair<Header, Int>? =
+        SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
             val sourceHeader = reader.header
-            pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
+            val pointCount = sourceHeader.extended_number_of_point_records.takeIf { it > 0L }
                 ?: (sourceHeader.number_of_point_records.toLong() and 0xFFFFFFFFL)
-            header = Header(
+            Header(
                 versionMajor = sourceHeader.version_major.toInt() and 0xFF,
                 versionMinor = sourceHeader.version_minor.toInt() and 0xFF,
                 pointFormat = sourceHeader.point_data_format.toInt() and 0x3F,
@@ -627,101 +807,20 @@ internal object LazTerrainReader {
                 minX = sourceHeader.min_x,
                 maxY = sourceHeader.max_y,
                 minY = sourceHeader.min_y,
-            )
-            chunkSize = sourceHeader.laszip?.chunk_size?.takeIf { it in 1..5_000_000 } ?: DEFAULT_CHUNK_POINTS
+            ) to (sourceHeader.laszip?.chunk_size?.takeIf { it in 1..5_000_000 } ?: DEFAULT_CHUNK_POINTS)
         }
-        if (pointCount <= 0L) return null
-        val limited = densityLimitedOptions(header, options)
-        val focus = limited.focusBounds
-        if (focus != null) return null
-        if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
-        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
-        if (workers == 1) return null
-
-        // One shared raster; workers only decode. Each claims the next compressed chunk, decodes
-        // it into a compact buffer (~17 B/point), and a single binner adds chunks strictly in
-        // file order. Memory is bounded by the in-flight window (2 chunks per worker, ~14 MB at
-        // 8 workers) instead of a full private raster per worker (75 MB each at 1536²), so all
-        // cores can be used, and the result is identical to the sequential decoder.
-        val rasterizer = newRasterizer(header, limited, pointCount)
-        val totalChunks = ((pointCount + chunkSize - 1L) / chunkSize).toInt().coerceAtLeast(1)
-        val results = Array(totalChunks) { java.util.concurrent.CompletableFuture<DecodedChunk>() }
-        val window = java.util.concurrent.Semaphore(workers * 2)
-        val nextChunk = java.util.concurrent.atomic.AtomicInteger(0)
-        val cancelled = AtomicBoolean(false)
-        val pool = Executors.newFixedThreadPool(workers) { task ->
-            Thread(task, "laz-chunk").apply { isDaemon = true }
-        }
-        return try {
-            repeat(workers) {
-                pool.execute {
-                    val reader = runCatching { SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS) }.getOrNull()
-                    try {
-                        while (!cancelled.get()) {
-                            window.acquire()
-                            val chunk = nextChunk.getAndIncrement()
-                            if (chunk >= totalChunks) {
-                                window.release()
-                                break
-                            }
-                            val future = results[chunk]
-                            try {
-                                checkNotNull(reader) { "Could not open ${file.name}" }
-                                val start = chunk.toLong() * chunkSize
-                                val count = min(chunkSize.toLong(), pointCount - start).toInt()
-                                check(reader.seek(start)) { "Seek to point $start failed" }
-                                future.complete(DecodedChunk.decode(reader, count))
-                            } catch (error: Throwable) {
-                                future.completeExceptionally(error)
-                            }
-                        }
-                    } catch (_: InterruptedException) {
-                        // Pool shut down: the binner already stopped waiting.
-                    } finally {
-                        reader?.close()
-                    }
-                }
-            }
-            TerrainStageProfiler.stage("decode_parallel", file.name) {
-                var decoded = 0L
-                for (chunk in 0 until totalChunks) {
-                    if (!shouldContinue()) {
-                        cancelled.set(true)
-                        rasterizer.markTruncated()
-                        break
-                    }
-                    val points = try {
-                        results[chunk].get()
-                    } catch (error: java.util.concurrent.ExecutionException) {
-                        throw error.cause ?: error
-                    }
-                    results[chunk] = DecodedChunk.CONSUMED
-                    points.addTo(rasterizer)
-                    window.release()
-                    decoded += points.count
-                    onProgress?.invoke(decoded, pointCount)
-                    if (points.count < min(chunkSize.toLong(), pointCount - chunk.toLong() * chunkSize)) {
-                        // Short chunk = reader hit EOF early; the sequential path would stop here too.
-                        rasterizer.markTruncated()
-                        break
-                    }
-                }
-            }
-            finish(rasterizer, header, "parallel chunk decode ($workers cores)")
-        } finally {
-            cancelled.set(true)
-            pool.shutdownNow()
-        }
-    }
 
     /** One decoded compressed chunk, kept compact until the binner adds it in file order. */
     private class DecodedChunk(
         val count: Int,
+        /** Points read from the file for this chunk, before the viewport filter. */
+        val rawCount: Int,
         private val xs: DoubleArray,
         private val ys: DoubleArray,
         private val zs: FloatArray,
         private val classes: ByteArray,
         private val keyPoints: BooleanArray,
+        private val withheld: BooleanArray,
     ) {
         fun addTo(rasterizer: LidarRasterizer) {
             for (i in 0 until count) {
@@ -731,31 +830,60 @@ internal object LazTerrainReader {
                     z = zs[i],
                     classification = classes[i].toInt() and 0xFF,
                     isKeyPoint = keyPoints[i],
+                    withheld = withheld[i],
                 )
             }
         }
 
         companion object {
             val CONSUMED = java.util.concurrent.CompletableFuture.completedFuture(
-                DecodedChunk(0, DoubleArray(0), DoubleArray(0), FloatArray(0), ByteArray(0), BooleanArray(0)),
+                DecodedChunk(0, 0, DoubleArray(0), DoubleArray(0), FloatArray(0), ByteArray(0), BooleanArray(0), BooleanArray(0)),
             )
 
-            fun decode(reader: LASreaderLAS, wanted: Int): DecodedChunk {
-                val xs = DoubleArray(wanted)
-                val ys = DoubleArray(wanted)
-                val zs = FloatArray(wanted)
-                val classes = ByteArray(wanted)
-                val keys = BooleanArray(wanted)
+            fun decode(
+                reader: LASreaderLAS,
+                wanted: Int,
+                firstPoint: Long,
+                rect: DoubleArray?,
+                stride: Int,
+                index: LazChunkIndex.Builder.Chunk?,
+                groundFlags: IntArray,
+            ): DecodedChunk {
+                // Filtered chunks keep only the viewport share; size buffers lazily for those.
+                var capacity = if (rect == null) wanted else min(wanted, 4_096)
+                var xs = DoubleArray(capacity)
+                var ys = DoubleArray(capacity)
+                var zs = FloatArray(capacity)
+                var classes = ByteArray(capacity)
+                var keys = BooleanArray(capacity)
+                var held = BooleanArray(capacity)
                 var n = 0
-                while (n < wanted && reader.read_point()) {
-                    xs[n] = reader.get_x()
-                    ys[n] = reader.get_y()
+                var raw = 0
+                while (raw < wanted && reader.read_point()) {
+                    val x = reader.get_x()
+                    val y = reader.get_y()
+                    val cls = reader.point.get_classification().toInt() and 0xFF
+                    val key = reader.point.get_keypoint_flag().toInt() != 0
+                    index?.add(x, y, isSourceGround(cls, key, groundFlags[0], groundFlags[1], groundFlags[2]))
+                    val global = firstPoint + raw
+                    raw++
+                    if (rect != null && (x < rect[0] || x >= rect[2] || y < rect[1] || y >= rect[3])) continue
+                    if (stride > 1 && global % stride != 0L) continue
+                    if (n == capacity) {
+                        capacity = min(wanted, capacity * 2)
+                        xs = xs.copyOf(capacity); ys = ys.copyOf(capacity); zs = zs.copyOf(capacity)
+                        classes = classes.copyOf(capacity); keys = keys.copyOf(capacity); held = held.copyOf(capacity)
+                    }
+                    xs[n] = x
+                    ys[n] = y
                     zs[n] = reader.get_z().toFloat()
-                    classes[n] = reader.point.get_classification().toByte()
-                    keys[n] = reader.point.get_keypoint_flag().toInt() != 0
+                    classes[n] = cls.toByte()
+                    keys[n] = key
+                    held[n] = reader.point.get_withheld_flag().toInt() != 0
                     n++
                 }
-                return DecodedChunk(n, xs, ys, zs, classes, keys)
+                index?.commit()
+                return DecodedChunk(n, raw, xs, ys, zs, classes, keys, held)
             }
         }
     }
@@ -825,14 +953,20 @@ internal object LazTerrainReader {
         return finish(rasterizer, header, "laz-rs packed JNI")
     }
 
-    private fun applyFocus(reader: LASreaderLAS, header: Header, focus: NormalizedRasterBounds) {
+    private fun applyFocus(
+        reader: LASreaderLAS,
+        header: Header,
+        focus: NormalizedRasterBounds,
+        padX: Double = 0.0,
+        padY: Double = 0.0,
+    ) {
         val rangeX = header.maxX - header.minX
         val rangeY = header.maxY - header.minY
         reader.inside_rectangle(
-            header.minX + focus.left * rangeX,
-            header.minY + (1.0 - focus.bottom) * rangeY,
-            header.minX + focus.right * rangeX,
-            header.minY + (1.0 - focus.top) * rangeY,
+            header.minX + focus.left * rangeX - padX,
+            header.minY + (1.0 - focus.bottom) * rangeY - padY,
+            header.minX + focus.right * rangeX + padX,
+            header.minY + (1.0 - focus.top) * rangeY + padY,
         )
     }
 
