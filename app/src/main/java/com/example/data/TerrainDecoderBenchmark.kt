@@ -119,9 +119,13 @@ object TerrainDecoderBenchmark {
         val trials=cases.filter { it !in rejected && timings.getValue(it).size==repeats }.map {
             DecoderTrial(it.first,it.second,actual.getValue(it),timings.getValue(it).toList())
         }
-        val javaTrial=trials.filter { it.backend==LazDecoderBackend.LASZIP4J }.minByOrNull { it.medianMs }
-            ?: error("No correct Java benchmark trial completed")
-        val native=trials.filter { it.backend==LazDecoderBackend.NATIVE_LAZ_RS }.minByOrNull { it.medianMs }
+        fun choose(backend: LazDecoderBackend): DecoderTrial? {
+            val candidates=trials.filter { it.backend==backend }
+            val fastest=candidates.minOfOrNull { it.medianMs } ?: return null
+            return candidates.filter { it.medianMs<=fastest*1.05 }.minWithOrNull(compareBy<DecoderTrial> { it.actualWorkers }.thenBy { it.medianMs })
+        }
+        val javaTrial=choose(LazDecoderBackend.LASZIP4J) ?: error("No correct Java benchmark trial completed")
+        val native=choose(LazDecoderBackend.NATIVE_LAZ_RS)
         // Prefer Java when medians are within 5%; a small noisy difference does not justify changing the backend.
         val best=if(native!=null && native.medianMs<javaTrial.medianMs*.95) native else javaTrial
         fun timed(block: () -> Unit): Double { val n=System.nanoTime(); block(); return (System.nanoTime()-n)/1_000_000.0 }
@@ -179,7 +183,12 @@ object TerrainDecoderBenchmark {
             }
         } finally { tileRoot.deleteRecursively() }
         return DecoderBenchmarkResult(file.name,reference.decodedPoints,javaTrial.medianMs,native?.medianMs,nativeAvailable,
-            writeMs,readMs,javaTrial.medianMs,heightMs,hillshade,lodMs,TerrainMemoryMonitor.snapshot(),best.backend.name,
+            writeMs,readMs,javaTrial.medianMs,heightMs,hillshade,lodMs,TerrainMemoryMonitor.snapshot(),when {
+                best.backend==LazDecoderBackend.NATIVE_LAZ_RS -> "laz-rs"
+                !nativeAvailable -> "laszip4j (native unavailable)"
+                native==null -> "laszip4j (laz-rs failed)"
+                else -> "laszip4j"
+            },
             firstMs,trials,best.backend,best.actualWorkers,tileTrials).also { TerrainStageProfiler.emit(it.format()); onProgress("Benchmark complete") }
     }
 }

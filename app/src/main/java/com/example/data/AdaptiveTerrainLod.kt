@@ -12,15 +12,37 @@ internal object AdaptiveTerrainLod {
     }
     data class Plan(val patches: List<Patch>, val maxLevel: Int, val triangles: Long)
 
+    data class Coverage(val columns: Int,val rows: Int,val missing: BooleanArray,val valid: BooleanArray)
+    fun coverage(height: HeightmapTexture): Coverage {
+        val cols=((height.width-1+CELLS-1)/CELLS).coerceAtLeast(1)
+        val rows=((height.height-1+CELLS-1)/CELLS).coerceAtLeast(1)
+        val missing=BooleanArray(cols*rows);val valid=BooleanArray(cols*rows)
+        for(i in height.floats.indices) {
+            val x=i%height.width;val y=i/height.width
+            val bx=(x/CELLS).coerceAtMost(cols-1);val by=(y/CELLS).coerceAtMost(rows-1)
+            val x0=if(x>0 && x%CELLS==0) x/CELLS-1 else bx
+            val y0=if(y>0 && y%CELLS==0) y/CELLS-1 else by
+            for(yy in y0.coerceAtLeast(0)..by) for(xx in x0.coerceAtLeast(0)..bx)
+                (if(height.floats[i].isFinite()) valid else missing)[yy*cols+xx]=true
+        }
+        return Coverage(cols,rows,missing,valid)
+    }
+
     fun select(height: HeightmapTexture, mvp: FloatArray, viewWidth: Int, viewHeight: Int,
-               minZ: Float, maxZ: Float, targetPixels: Float = TARGET_PIXELS): Plan {
+               minZ: Float, maxZ: Float, targetPixels: Float = TARGET_PIXELS, coverage: Coverage = coverage(height)): Plan {
         require(mvp.size == 16 && mvp.all { it.isFinite() } && targetPixels > 0)
         val extent = max(height.width-1,height.height-1).coerceAtLeast(1)
         val level = ceil(log2(extent.toDouble()/CELLS)).toInt().coerceIn(0,8)
         val span = max((height.width-1)*height.cellSizeXMeters,(height.height-1)*height.cellSizeYMeters).coerceAtLeast(.001f)
         val planes = TerrainFrustumCuller.extractPlanes(mvp)
+        fun anyBlock(p: Patch,values: BooleanArray): Boolean {
+            val x1=min(coverage.columns-1,(p.x+p.size-1)/CELLS)
+            val y1=min(coverage.rows-1,(p.y+p.size-1)/CELLS)
+            for(y in p.y/CELLS..y1) for(x in p.x/CELLS..x1) if(values[y*coverage.columns+x]) return true
+            return false
+        }
         fun visible(p: Patch): Boolean {
-            if(p.x >= height.width-1 || p.y >= height.height-1) return false
+            if(p.x >= height.width-1 || p.y >= height.height-1 || !anyBlock(p,coverage.valid)) return false
             val x1=min(p.x+p.size,height.width-1); val y1=min(p.y+p.size,height.height-1)
             return TerrainFrustumCuller.isVisible(TerrainFrustumCuller.Aabb(
                 (2*p.x-(height.width-1))*height.cellSizeXMeters/span,
@@ -40,7 +62,7 @@ internal object AdaptiveTerrainLod {
         val selected=ArrayList<Patch>()
         fun visit(p: Patch) {
             if(!visible(p)) return
-            if(p.level > 0 && error(p) > targetPixels) children(p).forEach(::visit) else selected.add(p)
+            if(p.level > 0 && (anyBlock(p,coverage.missing) || error(p) > targetPixels)) children(p).forEach(::visit) else selected.add(p)
         }
         visit(Patch(0,0,level))
         // Balance corners as well as edges so every seam/corner has a common parent lattice.
@@ -96,14 +118,14 @@ internal object AdaptiveTerrainLod {
             val step=1 shl level
             val px=if(x==h.width-1) x else x/step*step; val py=if(y==h.height-1) y else y/step*step
             val z=h.floats[py*h.width+px].takeIf { it.isFinite() } ?: minZ
-            return floatArrayOf(px.toFloat(),py.toFloat(),z)
+            return floatArrayOf(px.toFloat(),py.toFloat(),z,if(h.floats[py*h.width+px].isFinite()) 1f else 0f)
         }
         var out=point(maxLevel+1)
         for(level in maxLevel downTo p.level+(if(edge) 1 else 0)) {
             val fine=point(level)
             val alpha=(2-2*projectedStep(h,m,w,v,fine[0],fine[1],fine[2],minZ,1 shl level)/TARGET_PIXELS).coerceIn(0f,1f)
-            out=FloatArray(3) { fine[it]+(out[it]-fine[it])*alpha }
+            out=if(fine[3]==0f || out[3]==0f) fine else FloatArray(4) { if(it==3) 1f else fine[it]+(out[it]-fine[it])*alpha }
         }
-        return out
+        return out.copyOf(3)
     }
 }

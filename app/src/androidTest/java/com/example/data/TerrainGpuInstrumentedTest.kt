@@ -103,6 +103,13 @@ class TerrainGpuInstrumentedTest {
             val pixels=java.nio.ByteBuffer.allocateDirect(96*96*4)
             GLES30.glReadPixels(0,0,96,96,GLES30.GL_RGBA,GLES30.GL_UNSIGNED_BYTE,pixels)
             assertTrue("Heightfield draw produced no terrain pixels",(0 until 96*96).any { (pixels.get(it*4).toInt() and 255)>0 })
+            val gap=FloatArray(128*96){40f}.apply { for(y in 35..45) for(x in 35..45) this[y*128+x]=Float.NaN }
+            val masked=ElevationGrid(128,96,gap,FloatArray(gap.size),3f,BooleanArray(gap.size){gap[it].isFinite()},cellSizeXMeters=2f,cellSizeYMeters=3f)
+            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
+            renderer.draw(HeightmapCdlod.pack(masked),m,96,96,1f)
+            GLES30.glReadPixels(0,0,96,96,GLES30.GL_RGBA,GLES30.GL_UNSIGNED_BYTE,pixels)
+            assertEquals("No-data was painted as terrain",0,pixels.get((55*96+32)*4).toInt() and 255)
+            assertEquals(GLES30.GL_NO_ERROR,GLES30.glGetError())
             renderer.release()
         } finally {
             EGL14.eglMakeCurrent(display,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_CONTEXT)

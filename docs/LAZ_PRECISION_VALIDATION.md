@@ -184,3 +184,11 @@ these checks. Emulator checks do not establish real-phone frame times or peak me
 - No Android device was connected for sustained field trials. Run the benchmark and
   reset/show frame timings separately on each target phone/tablet. COPC conversion
   remains a source-preparation operation; local/remote COPC spatial reading is present.
+
+Nodata blocks force fine 3D coverage; fully empty blocks are culled. Geomorphing
+never blends valid source vertices toward missing parent elevations. Coverage
+metadata is prepared once per source upload, rather than scanning the DEM during
+each camera change. Unit and Android render checks cover a missing-data hole.
+Worker recommendations prefer fewer configured workers within 5% of the fastest
+median; this margin is a conservative selection rule, not a statistical confidence
+interval.

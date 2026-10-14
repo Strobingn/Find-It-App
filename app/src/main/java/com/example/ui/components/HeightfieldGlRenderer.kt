@@ -16,6 +16,7 @@ internal class HeightfieldGlRenderer {
     private var indices = 0
     private var source: HeightmapTexture? = null
     private val uniforms = HashMap<String, Int>()
+    private var coverage: AdaptiveTerrainLod.Coverage? = null
     private var plan: AdaptiveTerrainLod.Plan? = null
     private var planSource: HeightmapTexture? = null
     private var planMatrix = FloatArray(16)
@@ -23,7 +24,7 @@ internal class HeightfieldGlRenderer {
     private var planHeight = 0
     private var minZ = 0f
     private var maxZ = 1f
-    fun contextLost() { program = 0; texture = 0; vertices = 0; indices = 0; source = null; plan = null; planSource = null; uniforms.clear() }
+    fun contextLost() { program = 0; texture = 0; vertices = 0; indices = 0; source = null; coverage = null; plan = null; planSource = null; uniforms.clear() }
     fun release() {
         if (texture != 0) GL.glDeleteTextures(1,intArrayOf(texture),0)
         if (vertices != 0) GL.glDeleteBuffers(2,intArrayOf(vertices,indices),0)
@@ -47,6 +48,7 @@ internal class HeightfieldGlRenderer {
             minZ = Float.POSITIVE_INFINITY; maxZ = Float.NEGATIVE_INFINITY
             for (z in height.floats) if (z.isFinite()) { minZ = min(minZ,z); maxZ = max(maxZ,z) }
             if (!minZ.isFinite()) { minZ=0f; maxZ=0f }
+            coverage=AdaptiveTerrainLod.coverage(height)
             source = height
         }
         GL.glUseProgram(program)
@@ -61,7 +63,7 @@ internal class HeightfieldGlRenderer {
         GL.glUniform1f(uniform("uTargetPixels"),AdaptiveTerrainLod.TARGET_PIXELS)
         if(plan==null || planSource!==height || !planMatrix.contentEquals(mvp) || planWidth!=viewWidth || planHeight!=viewHeight) {
             plan=TerrainStageProfiler.stage("adaptive_lod", "${viewWidth}x${viewHeight}") {
-                AdaptiveTerrainLod.select(height,mvp,viewWidth,viewHeight,minZ,maxZ)
+                AdaptiveTerrainLod.select(height,mvp,viewWidth,viewHeight,minZ,maxZ,coverage=checkNotNull(coverage))
             }
             planSource=height; mvp.copyInto(planMatrix); planWidth=viewWidth; planHeight=viewHeight
         }
@@ -124,12 +126,14 @@ internal class HeightfieldGlRenderer {
                 vec2 xy=(grid.xy*uCell*2.0-extent)/uSpan; xy.y=-xy.y;
                 return vec4(xy,(grid.z-uMinZ)*2.0/uSpan,1.0);
             }
-            vec3 lattice(ivec2 raw,int level) {
+            vec4 lattice(ivec2 raw,int level) {
                 int step=1<<level;
                 ivec2 p=raw/step*step;
                 if(raw.x==uSize.x-1) p.x=raw.x;
                 if(raw.y==uSize.y-1) p.y=raw.y;
-                return vec3(vec2(p),zAt(p,uMinZ));
+                float rawZ=texelFetch(uHeight,p,0).r;
+                bool valid=!(isnan(rawZ)||isinf(rawZ));
+                return vec4(vec2(p),valid?rawZ:uMinZ,valid?1.0:0.0);
             }
             float morph(vec3 grid,int step) {
                 vec4 p=uMvp*world(grid);
@@ -144,11 +148,12 @@ internal class HeightfieldGlRenderer {
                 bool coarseEdge=(aGrid.x==0.0 && (uEdges&1)!=0)||(aGrid.x==64.0 && (uEdges&2)!=0)||
                     (aGrid.y==0.0 && (uEdges&4)!=0)||(aGrid.y==64.0 && (uEdges&8)!=0);
                 int first=uLevel+(coarseEdge?1:0);
-                vec3 grid=lattice(raw,uMaxLevel+1);
+                vec4 grid=lattice(raw,uMaxLevel+1);
                 for(int level=8;level>=0;level--) {
                     if(level>uMaxLevel || level<first) continue;
-                    vec3 fine=lattice(raw,level);
-                    grid=mix(fine,grid,morph(fine,1<<level));
+                    vec4 fine=lattice(raw,level);
+                    if(fine.w<0.5 || grid.w<0.5) grid=fine;
+                    else grid=vec4(mix(fine.xyz,grid.xyz,morph(fine.xyz,1<<level)),1.0);
                 }
                 ivec2 p=clamp(ivec2(round(grid.xy)),ivec2(0),uSize-1);
                 float z=zAt(p,uMinZ);
@@ -156,7 +161,7 @@ internal class HeightfieldGlRenderer {
                 float gy=(zAt(p+ivec2(0,1),z)-zAt(p-ivec2(0,1),z))/(2.0*uCell.y);
                 vec3 n=normalize(vec3(-gx,gy,1.0));
                 vLight=0.28+0.72*max(dot(n,normalize(vec3(-0.45,0.65,0.8))),0.0);
-                gl_Position=uMvp*world(grid);
+                gl_Position=uMvp*world(grid.xyz);
                 vGrid=grid.xy;
             }
         """

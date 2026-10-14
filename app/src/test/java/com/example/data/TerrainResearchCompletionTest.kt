@@ -53,6 +53,18 @@ class TerrainResearchCompletionTest {
             assertFalse(maxOf(a.x,b.x)<minOf(a.x+a.size,b.x+b.size) && maxOf(a.y,b.y)<minOf(a.y+a.size,b.y+b.size))
         }
     }
+    @Test fun nodataForcesFineCoverageAndNeverCreatesParentHeights() {
+        val w=513;val values=FloatArray(w*w){40f}.apply { this[100*w+100]=Float.NaN }
+        val h=HeightmapTexture(w,w,values,1f)
+        val m=matrix()
+        val plan=AdaptiveTerrainLod.select(h,m,128,128,40f,40f)
+        assertEquals(0,plan.patches.single { 100 in it.x until it.x+it.size && 100 in it.y until it.y+it.size }.level)
+        val p=AdaptiveTerrainLod.Patch(64,64,0)
+        // The first parent (100,100) is missing; (101,101) must remain a real height.
+        val vertex=AdaptiveTerrainLod.vertex(h,p,37,37,3,m,128,128,0f)
+        assertEquals(40f,vertex[2],0f)
+        assertTrue(AdaptiveTerrainLod.select(h.copy(floats=FloatArray(w*w){Float.NaN}),m,128,128,0f,0f).patches.isEmpty())
+    }
     @Test fun geomorphedFineEdgesMatchCoarseVerticesExactlyAtEveryTransition() {
         val w=513;val h=HeightmapTexture(w,w,FloatArray(w*w){40f+sin((it%w)*.07f)+sin((it/w)*.06f)},1f)
         for(scale in listOf(.3f,1f,3f,8f)) {
