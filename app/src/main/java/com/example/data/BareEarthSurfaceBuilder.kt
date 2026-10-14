@@ -125,12 +125,13 @@ internal fun pointCountHistogram(counts: IntArray): IntArray {
  * Ground samples to a smooth bare-earth surface.
  *
  * The previous per-tile TIN filled holes with flat triangles. Tile borders landed on a 32-cell
- * grid, and triangle edges on a raster are often perfectly horizontal or vertical, so hillshade
- * showed blocky facets and straight lines that are not in the ground. This pass bins to about
- * one cell per ground spacing, IDW-fills only the small holes, and Catmull-Rom upsamples back
- * to the requested raster. Catmull-Rom is C1, so slope does not jump on a grid line. A grid
- * that is already near the point spacing only gets the short IDW fill. True voids outside the
- * data hull stay NaN. The parallel LAZ decode is unchanged.
+ * grid, and a hard clamp on the cubic fill turned real slopes into plateaus, so hillshade showed
+ * blocky facets and straight lines that are not in the ground. This pass keeps the measured
+ * minimum in each spacing-sized bin (bare earth, not whichever return sits nearest the centre)
+ * and Catmull-Rom upsamples that bin grid. Catmull-Rom is C1, so slope does not jump on a grid
+ * line, and it is not clamped back onto the control points. A grid that is already near the
+ * point spacing only gets the short IDW fill. True voids outside the data hull stay NaN.
+ * The parallel LAZ decode is unchanged.
  */
 internal fun interpolateBareEarth(
     measuredElevations: FloatArray,
@@ -372,11 +373,131 @@ private fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: In
 }
 
 /**
+ * Drops rooftop and canopy cells before the surface fill.
+ *
+ * Unclassified "lowest return" still keeps a roof or a tree when that cell never hit the
+ * ground, and those cells become the blocky blobs in the hillshade. This is the raster form
+ * of Pingel's simple morphological filter (the same idea as PDAL `filters.smrf` / lasground):
+ * open the minimum surface with a growing window, and clear a cell only when it stands more
+ * than about 5.5 m above that opening. Pits, ditches and mounds under that height stay.
+ * Cleared cells become holes so the smooth fill rebuilds them from the surrounding ground
+ * instead of painting the opened (eroded) value, which would leave a flat pad.
+ */
+internal fun rejectRaisedObjects(
+    elevations: FloatArray,
+    measured: BooleanArray,
+    width: Int,
+    height: Int,
+    cellSizeMeters: Float,
+): Int {
+    if (width < 3 || height < 3) return 0
+    val cell = cellSizeMeters.coerceAtLeast(0.05f)
+    val maxRadius = (18f / cell).toInt().coerceIn(1, 48)
+    val current = elevations.copyOf()
+    val opened = FloatArray(elevations.size)
+    val scratch = FloatArray(elevations.size)
+    val removed = BooleanArray(elevations.size)
+    var radius = 1
+    var count = 0
+    while (radius <= maxRadius) {
+        morphologicalOpenInto(current, width, height, radius, opened, scratch)
+        val thresh = 5.5f + 0.2f * radius * cell
+        for (index in current.indices) {
+            if (!measured[index] || removed[index]) continue
+            val z = current[index]
+            val low = opened[index]
+            if (!z.isFinite() || !low.isFinite()) continue
+            if (z - low > thresh) {
+                removed[index] = true
+                current[index] = low
+                count++
+            }
+        }
+        radius = if (radius < 4) radius + 1 else radius * 2
+    }
+    for (index in removed.indices) {
+        if (!removed[index]) continue
+        measured[index] = false
+        elevations[index] = Float.NaN
+    }
+    return count
+}
+
+private fun morphologicalOpenInto(
+    source: FloatArray,
+    width: Int,
+    height: Int,
+    radius: Int,
+    opened: FloatArray,
+    scratch: FloatArray,
+) {
+    slidingFilter(source, width, height, radius, wantMax = false, scratch)
+    slidingFilter(scratch, width, height, radius, wantMax = true, opened)
+}
+
+/** Separable square min/max. Non-finite samples are ignored, so holes do not spread. */
+private fun slidingFilter(
+    source: FloatArray,
+    width: Int,
+    height: Int,
+    radius: Int,
+    wantMax: Boolean,
+    dest: FloatArray,
+) {
+    val horizontal = FloatArray(source.size)
+    val line = FloatArray(max(width, height))
+    val filtered = FloatArray(line.size)
+    for (y in 0 until height) {
+        val base = y * width
+        for (x in 0 until width) line[x] = source[base + x]
+        slidingWindow(line, width, radius, wantMax, filtered)
+        for (x in 0 until width) horizontal[base + x] = filtered[x]
+    }
+    for (x in 0 until width) {
+        for (y in 0 until height) line[y] = horizontal[y * width + x]
+        slidingWindow(line, height, radius, wantMax, filtered)
+        for (y in 0 until height) dest[y * width + x] = filtered[y]
+    }
+}
+
+private fun slidingWindow(
+    source: FloatArray,
+    length: Int,
+    radius: Int,
+    wantMax: Boolean,
+    dest: FloatArray,
+) {
+    val window = ArrayDeque<Int>(radius * 2 + 1)
+    var next = 0
+    for (index in 0 until length) {
+        val addUntil = min(length - 1, index + radius)
+        while (next <= addUntil) {
+            val value = source[next]
+            if (value.isFinite()) {
+                while (window.isNotEmpty()) {
+                    val tail = source[window.last()]
+                    val dominated = if (wantMax) tail <= value else tail >= value
+                    if (!dominated) break
+                    window.removeLast()
+                }
+                window.addLast(next)
+            }
+            next++
+        }
+        val left = index - radius
+        while (window.isNotEmpty() && window.first() < left) window.removeFirst()
+        dest[index] = if (window.isEmpty()) Float.NaN else source[window.first()]
+    }
+}
+
+/**
  * Fills empty ground cells without painting flat triangles.
  *
- * Stride 1 keeps the measured grid and IDW-fills pinholes. A finer grid is reduced to about
- * one sample per point spacing, hole-filled there, then Catmull-Rom expanded. Measured cells
- * are never overwritten, so a real pit stays a pit.
+ * Stride 1 keeps the measured grid and IDW-fills pinholes. A finer grid is reduced to the
+ * minimum return in each spacing-sized bin (the bare-earth sample), hole-filled there, then
+ * Catmull-Rom expanded. Measured cells are never overwritten, so a real pit stays a pit.
+ * The cubic is not clamped to the control points — that clamp was what flattened slopes into
+ * axis-aligned blocks.
  */
 private fun fillSmoothSurface(
     elevations: FloatArray,
@@ -413,7 +534,6 @@ private fun fillSmoothSurface(
     val coarseHeight = (height + stride - 1) / stride
     val coarse = FloatArray(coarseWidth * coarseHeight) { Float.NaN }
     val coarseValid = BooleanArray(coarse.size)
-    val nearest = IntArray(coarse.size) { Int.MAX_VALUE }
     for (y in 0 until height) {
         val cy = (y / stride).coerceAtMost(coarseHeight - 1)
         for (x in 0 until width) {
@@ -421,13 +541,10 @@ private fun fillSmoothSurface(
             if (!valid[index]) continue
             val cx = (x / stride).coerceAtMost(coarseWidth - 1)
             val coarseIndex = cy * coarseWidth + cx
-            val centerX = cx * stride + stride / 2
-            val centerY = cy * stride + stride / 2
-            val distSq = (x - centerX) * (x - centerX) + (y - centerY) * (y - centerY)
-            if (!coarseValid[coarseIndex] || distSq < nearest[coarseIndex]) {
+            val z = elevations[index]
+            if (!coarseValid[coarseIndex] || z < coarse[coarseIndex]) {
                 coarseValid[coarseIndex] = true
-                coarse[coarseIndex] = elevations[index]
-                nearest[coarseIndex] = distSq
+                coarse[coarseIndex] = z
             }
         }
     }
@@ -516,16 +633,7 @@ private fun sampleCatmull(
     if (!c1.isFinite()) return c2
     val c0 = if (rows[0].isFinite()) rows[0] else c1
     val c3 = if (rows[3].isFinite()) rows[3] else c2
-    val z = catmull(c0, c1, c2, c3, gy - y1)
-    var lo = c0
-    var hi = c0
-    if (c1 < lo) lo = c1
-    if (c1 > hi) hi = c1
-    if (c2 < lo) lo = c2
-    if (c2 > hi) hi = c2
-    if (c3 < lo) lo = c3
-    if (c3 > hi) hi = c3
-    return z.coerceIn(lo, hi)
+    return catmull(c0, c1, c2, c3, gy - y1)
 }
 
 private fun catmullRow(

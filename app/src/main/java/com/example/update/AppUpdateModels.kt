@@ -35,7 +35,7 @@ sealed class UpdateCheckResult {
 }
 
 object AppUpdateParse {
-    private val tagCode = Regex("""^findit-v(\d+)$""", RegexOption.IGNORE_CASE)
+    private val tagCode = Regex("""^findit2-v(\d+)$""", RegexOption.IGNORE_CASE)
     private val shaLine = Regex("""(?im)^sha256:\s*([0-9a-f]{64})\s*$""")
     private val appIdLine = Regex("""(?im)^app-id:\s*(\S+)\s*$""")
 

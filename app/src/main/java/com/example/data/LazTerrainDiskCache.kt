@@ -198,8 +198,9 @@ class LazTerrainDiskCache(
             append('|').append(sanitized.focusBounds)
             // Refines cached before the ground-spacing clamp were over-fine (stair-steps).
             if (sanitized.focusBounds != null) append("|groundSpacingClamp1")
-            // Per-tile TIN surfaces (32-cell seams, flat facets) must not be reused.
+            // Per-tile TIN and the clamped Catmull grids must not be reused.
             append("|smoothSurface1")
+            append("|smrfGround1")
             append('|').append(
                 sanitized.allowedClasses
                     ?.sorted()

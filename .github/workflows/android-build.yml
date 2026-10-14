@@ -4,13 +4,13 @@ name: Find-it-appAPK
 # Pull requests still run unit tests. Do not add extra release branches.
 on:
   push:
-    branches: [main, fix/smooth-dem-no-facet-lines]
+    branches: [main, findit2]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 env:
-  APPLICATION_ID: com.aistudio.lidardetector.pkrxtz
+  APPLICATION_ID: com.aistudio.findit2
 
 jobs:
   test:
@@ -91,7 +91,7 @@ jobs:
           retention-days: 14
 
   release:
-    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/smooth-dem-no-facet-lines')) || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/findit2')) || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -163,7 +163,7 @@ jobs:
         run: |
           CODE=$((1000000 + ${{ github.run_number }}))
           NAME="2.0.${{ github.run_number }}"
-          TAG="findit-v${CODE}"
+          TAG="findit2-v${CODE}"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -198,7 +198,7 @@ jobs:
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
           test -n "$APK"
-          DEST="$GITHUB_WORKSPACE/findit-${{ steps.version.outputs.code }}.apk"
+          DEST="$GITHUB_WORKSPACE/findit2-${{ steps.version.outputs.code }}.apk"
           cp "$APK" "$DEST"
           echo "apk=$DEST" >> "$GITHUB_OUTPUT"
           sha256sum "$DEST" | awk '{print $1}' > "$GITHUB_WORKSPACE/findit.sha256"
@@ -219,10 +219,10 @@ jobs:
           if [ "$SIGNING_MODE" = "release-secret" ]; then
             SIGN_NOTE="Signed with the optional repository release keystore secrets."
           else
-            SIGN_NOTE="Signed with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-v* APKs use this same key."
+            SIGN_NOTE="Signed with the committed CI debug keystore (ci/findit-debug.keystore). Future findit2-v* APKs use this same key."
           fi
           NOTES=$(cat <<EOF
-          Find It Android build ${NAME} (${CODE})
+          find it 2 Android build ${NAME} (${CODE})
 
           app-id: ${APPLICATION_ID}
           version-code: ${CODE}
@@ -234,7 +234,7 @@ jobs:
           )
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "Find It $NAME" \
+            --title "find it 2 $NAME" \
             --notes "$NOTES" \
             "$APK"
           BODY=$(gh release view "$TAG" --json body --jq .body)

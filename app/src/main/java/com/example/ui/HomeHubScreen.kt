@@ -122,7 +122,7 @@ fun HomeHubScreen(
                 )
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "Find It",
+                        "find it 2",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
                     )
@@ -145,7 +145,7 @@ fun HomeHubScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Check for updates", fontWeight = FontWeight.SemiBold)
                     Text(
-                        updateController.status.ifBlank { "GitHub Releases · findit-v* builds" },
+                        updateController.status.ifBlank { "GitHub Releases · findit2-v* builds" },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

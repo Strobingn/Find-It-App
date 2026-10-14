@@ -267,13 +267,17 @@ internal class LidarRasterizer(
         val cellSize = max(rangeX / (width - 1), rangeY / (height - 1))
             .takeIf { it.isFinite() && it in 0.001..100_000.0 }
             ?.toFloat() ?: 1f
+        if (appliedMode == GroundSurfaceMode.AUTO_LOWEST) {
+            // Classified ground is already bare earth. Unclassified lowest-return still contains
+            // roofs and canopy; clear those before the fill so they are not baked into the DEM.
+            rejectRaisedObjects(surface, measuredMask, width, height, cellSize)
+        }
         val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
             groundPointsBinned
         } else {
             pointsBinned
         }
-        // Ground samples → per-tile buffered Delaunay TIN → max-edge kill → bounded hole fill.
-        // True voids outside the data hull stay NaN and are never shown as measured ground.
+        // Minimum-bin Catmull-Rom fill. True voids outside the data hull stay NaN.
         val filled = interpolateBareEarth(
             measuredElevations = surface,
             measuredMask = measuredMask,

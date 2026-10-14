@@ -25,7 +25,7 @@ enum class AppDestination(
 ) {
     HOME(
         label = "Home",
-        title = "Find It",
+        title = "find it 2",
         subtitle = "Project hub and shortcuts",
         icon = Icons.Default.Home,
         primary = true,

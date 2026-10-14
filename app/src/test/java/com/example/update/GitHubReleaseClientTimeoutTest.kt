@@ -1,5 +1,6 @@
 package com.example.update
 
+import com.example.BuildConfig
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import okhttp3.Interceptor
@@ -47,19 +48,28 @@ class GitHubReleaseClientTimeoutTest {
         val auth = mutableListOf<String?>()
         val client = fakeClient(seenAuth = auth) { page -> 200 to if (page == 1) realPage else "[]" }
         val result = AppUpdateChecker.check(installedVersionCode = 1_000_000, client = client)
-        assertTrue(result is UpdateCheckResult.Available)
-        val release = (result as UpdateCheckResult.Available).release
-        assertEquals("findit-v1000678", release.tag)
-        assertEquals(1_000_678, release.versionCode)
-        assertEquals("findit-1000678.apk", release.apkName)
-        assertEquals("com.aistudio.lidardetector.pkrxtz", release.applicationId)
+        assertTrue(result is UpdateCheckResult.Failed)
+        assertTrue((result as UpdateCheckResult.Failed).message.contains("findit2"))
         assertTrue(auth.all { it == null })
         assertEquals(1, auth.size) // short page ends pagination
     }
 
     @Test
     fun sameVersionIsUpToDate() {
-        val client = fakeClient { 200 to realPage }
+        val page = """
+            [{
+              "tag_name":"findit2-v1000678",
+              "name":"find it 2",
+              "body":"app-id: ${BuildConfig.APPLICATION_ID}\nsha256: ${"ab".repeat(32)}\n",
+              "assets":[{
+                "id":1,
+                "name":"findit2-1000678.apk",
+                "url":"https://api.github.com/repos/Strobingn/Find-It-App/releases/assets/1",
+                "browser_download_url":"https://example/findit2.apk"
+              }]
+            }]
+        """.trimIndent()
+        val client = fakeClient { 200 to page }
         assertEquals(UpdateCheckResult.UpToDate, AppUpdateChecker.check(1_000_678, client))
     }
 

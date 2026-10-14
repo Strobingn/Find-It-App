@@ -390,9 +390,9 @@ fun ToolsTab(
             ToolCard(
                 icon = Icons.Default.Sync,
                 title = "App updates",
-                status = updateController.status.ifBlank { "GitHub Releases · findit-v*" },
+                status = updateController.status.ifBlank { "GitHub Releases · findit2-v*" },
                 statusActive = updateController.available != null,
-                description = "Checks Strobingn/Find-It-App findit-v* releases, verifies sha256 and " +
+                description = "Checks Strobingn/Find-It-App findit2-v* releases, verifies sha256 and " +
                     "the signing certificate, then opens the system installer. Export a backup " +
                     "before the first release-signed install if this copy is still debug-signed.",
             ) {

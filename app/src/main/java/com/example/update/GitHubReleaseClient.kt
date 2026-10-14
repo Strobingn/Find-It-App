@@ -8,7 +8,8 @@ import okhttp3.Request
 import org.json.JSONArray
 
 /**
- * Pages `/repos/{owner}/{repo}/releases` (never `/latest`) and keeps only `findit-v*` tags.
+ * Pages `/repos/{owner}/{repo}/releases` (never `/latest`) and keeps only `findit2-v*` tags.
+ * The other Find It app publishes `findit-v*` and must not be offered as an update.
  * Public repos work with no token. [token] is optional and used only when set (private later).
  */
 class GitHubReleaseClient(
@@ -17,7 +18,7 @@ class GitHubReleaseClient(
     private val http: OkHttpClient = defaultHttpClient(),
     private val downloadHttp: OkHttpClient = downloadHttpClient(http),
 ) {
-    fun latestFinditRelease(): UpdateCheckResult {
+    fun latestFinditRelease(applicationId: String? = null): UpdateCheckResult {
         val tokenPresent = token.isNotBlank()
         val releases = ArrayList<FinditRelease>()
         var page = 1
@@ -52,8 +53,13 @@ class GitHubReleaseClient(
             }
             page += 1
         }
-        val newest = releases.maxByOrNull { it.versionCode }
-            ?: return UpdateCheckResult.Failed("No findit-v* releases yet")
+        val newest = releases
+            .filter { release ->
+                val id = release.applicationId
+                applicationId.isNullOrBlank() || id.isNullOrBlank() || id == applicationId
+            }
+            .maxByOrNull { it.versionCode }
+            ?: return UpdateCheckResult.Failed("No findit2-v* releases yet")
         return UpdateCheckResult.Available(newest)
     }
 
