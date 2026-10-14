@@ -128,23 +128,9 @@ internal fun chooseAiRefineResolution(
 /** Hillshade shows bare earth by default; the slider can still blend canopy back in. */
 /** How long a finished precise fix stays the device position while the user stays on it. */
 internal const val PRECISE_FIX_HOLD_MS = 120_000L
-private const val AUTO_REFINE_DEBOUNCE_MS = 450L
-internal const val AUTO_REFINE_MIN_ZOOM = 2.2f
 private const val FEATHER_CELLS = 6
 
 internal const val DEFAULT_VEGETATION_FILTER = 1f
-
-internal enum class AutoRefineAction { NONE, REFINE }
-
-/**
- * Debounced auto-refine decision. A successful refine resets the canvas to zoom 1 over the new
- * crop, so a low zoom while a detailed crop is shown is the normal refined state; it must never
- * snap back to the whole-file overview (that silently discarded every refine ~450 ms after it
- * landed). Returning to the overview is only done by the explicit "Show whole" action.
- */
-internal fun autoRefineAction(zoom: Float, displayed: NormalizedRasterBounds): AutoRefineAction =
-    if (zoom < AUTO_REFINE_MIN_ZOOM || isEffectivelyWholeTerrain(displayed)) AutoRefineAction.NONE
-    else AutoRefineAction.REFINE
 
 /** A refined crop is displayed in place of the viewport, so the canvas must reset to zoom 1. */
 internal const val REFINE_RESETS_VIEWPORT = true
@@ -1121,7 +1107,6 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refineTerrain(viewport: NormalizedRasterBounds, rasterResolution: Int = 1_024) {
         val source = terrainSource ?: return
-        autoRefineJob?.cancel()
         refineJob?.cancel()
         val generation = refineGeneration.incrementAndGet()
         val requestedViewport = viewport.sanitized()
@@ -1346,12 +1331,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun showWholeTerrain() {
-        autoRefineJob?.cancel()
         refineJob?.cancel()
         refineGeneration.incrementAndGet()
         val overview = overviewTerrain ?: return
         currentSourceBounds = NormalizedRasterBounds.Full
-        lastAutoRefineBounds = null
         _isDetailedTerrain.value = false
         _terrainDetailMessage.value = "Showing the complete point-cloud footprint."
         applyCustomTerrain(overview, resetViewport = true)
@@ -1685,9 +1668,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     // Update viewport zoom and pan. Persists (debounced). Hillshade only re-runs when the
-    // zoom-aware preview LOD side changes — pan never invalidates the bitmap. Auto-refine of
-    // the visible crop is scheduled separately (debounced, cancellable) so pinch-zoom feels
-    // immediate and the overview texture stays until the refined tile is ready.
+    // zoom-aware preview LOD side changes — pan never invalidates the bitmap. Zoom/pan never
+    // start a refine: refine runs only from the explicit "Refine view" button.
     fun updateViewport(zoom: Float, panX: Float, panY: Float) {
         val grid = _elevationGrid.value
         val previousSide = previewMaxSideForZoom(_viewportZoom.value, maxOf(grid.width, grid.height))
@@ -1699,28 +1681,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (nextSide != previousSide) {
             scheduleRender(immediate = false)
         }
-        scheduleAutoRefine()
     }
 
-    private var autoRefineJob: kotlinx.coroutines.Job? = null
     private var refineJob: kotlinx.coroutines.Job? = null
     private val refineGeneration = java.util.concurrent.atomic.AtomicInteger(0)
-    private var lastAutoRefineBounds: NormalizedRasterBounds? = null
-
-    private fun scheduleAutoRefine() {
-        if (!_canRefineTerrain.value || terrainSource == null) return
-        autoRefineJob?.cancel()
-        autoRefineJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(AUTO_REFINE_DEBOUNCE_MS)
-            if (!isActive) return@launch
-            val displayed = _visibleViewportBounds.value.sanitized()
-            if (autoRefineAction(_viewportZoom.value, displayed) == AutoRefineAction.NONE) return@launch
-            val absolute = displayed.inside(currentSourceBounds)
-            if (absolute == lastAutoRefineBounds) return@launch
-            lastAutoRefineBounds = absolute
-            refineTerrain(displayed, recommendedAiRefineResolution())
-        }
-    }
 
     /** Publish the canvas-visible crop (called from the terrain composable on pan/zoom settle). */
     fun publishVisibleBounds(bounds: NormalizedRasterBounds) {
