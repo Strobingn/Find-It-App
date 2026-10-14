@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -196,6 +197,8 @@ fun AiAnalysisWorkspace(
     val showHuntZones = rememberSaveable { mutableStateOf(false) }
     val showHistoricTargets = rememberSaveable { mutableStateOf(AI_HISTORIC_TARGETS_DEFAULT_VISIBLE) }
     val showCloudTargets = rememberSaveable { mutableStateOf(true) }
+    val showAiTools = rememberSaveable { mutableStateOf(false) }
+    val showAiMap = rememberSaveable { mutableStateOf(false) }
     val showDatasetComparison = rememberSaveable { mutableStateOf(false) }
     val showTwoEpochCompare = rememberSaveable { mutableStateOf(false) }
     val pendingLocalLayer = remember { mutableStateOf<TerrainDerivedLayer?>(null) }
@@ -478,6 +481,16 @@ fun AiAnalysisWorkspace(
                     }
                 }
 
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { showAiMap.value = !showAiMap.value }) {
+                        Text(if (showAiMap.value) "Hide map" else "Show map")
+                    }
+                    TextButton(onClick = { showAiTools.value = !showAiTools.value }) {
+                        Text(if (showAiTools.value) "Hide tools" else "Tools")
+                    }
+                }
+
+                if (showAiTools.value) {
                 if (aiState.localResult != null) {
                     Text(
                         "Historic silver profile: homesites, cellar holes, refuse/privy pits, wagon roads, camps and stone walls",
@@ -633,7 +646,7 @@ fun AiAnalysisWorkspace(
                 }
                 if (aiState.classifiedTargets.isNotEmpty()) {
                     LazyColumn(
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).testTag("ai_classified_targets_list"),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 96.dp).testTag("ai_classified_targets_list"),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         items(aiState.classifiedTargets) { target ->
@@ -649,7 +662,7 @@ fun AiAnalysisWorkspace(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 180.dp)
+                            .heightIn(max = 96.dp)
                             .testTag("ai_hunt_zone_list"),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
@@ -690,7 +703,7 @@ fun AiAnalysisWorkspace(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 220.dp)
+                            .heightIn(max = 120.dp)
                             .testTag("ai_target_details_list"),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
@@ -745,9 +758,11 @@ fun AiAnalysisWorkspace(
                         }
                     }
                 }
+                }
             }
         }
 
+        if (showAiMap.value) {
         LidarMapCanvas(
             bitmap = analysisBitmap,
             isRendering = isRendering || aiState.isLocalAnalyzing || localLayerPending,
@@ -772,9 +787,10 @@ fun AiAnalysisWorkspace(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .height(180.dp)
                 .testTag("ai_single_analysis_map"),
         )
+        }
 
         if (isRefining) {
             val progress = refinementProgress

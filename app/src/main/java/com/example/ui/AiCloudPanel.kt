@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -364,11 +365,19 @@ fun AiCloudPanel(
         }
     }
 
+    val chatListState = rememberLazyListState()
+    LaunchedEffect(state.messages.size, state.isSending) {
+        val last = chatListState.layoutInfo.totalItemsCount - 1
+        if (last >= 0) chatListState.animateScrollToItem(last)
+    }
+
+    Column(
+        modifier = modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
     LazyColumn(
-        modifier = modifier
-            .imePadding()
-            .fillMaxSize()
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+        state = chatListState,
+        modifier = Modifier.weight(1f).fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
@@ -970,7 +979,7 @@ fun AiCloudPanel(
                             fontWeight = FontWeight.Bold,
                         )
                         Spacer(Modifier.height(3.dp))
-                        Text(message.text)
+                        Text(message.text.replace("**", ""))
                     }
                 }
             }
@@ -1097,41 +1106,42 @@ fun AiCloudPanel(
         state.cloudError?.let { error ->
             item { Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         }
+    }
 
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding(),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it.take(4_000) },
+                label = { Text("Ask AI to analyze or mark targets") },
+                minLines = 1,
+                maxLines = 4,
+                enabled = !state.isSending,
+                modifier = Modifier.weight(1f).testTag("ai_prompt_field"),
+            )
+            Button(
+                onClick = {
+                    assistantViewModel.send(
+                        prompt = draft,
+                        terrainContext = terrainContext,
+                        viewport = viewport,
+                        attachViewportImage = attachImage && imageReady,
+                        terrainKey = terrainKey,
+                    )
+                    draft = ""
+                },
+                enabled = draft.isNotBlank() && !state.isSending && state.activeProvider != null,
+                modifier = Modifier.height(CompactButtonHeight),
+                contentPadding = CompactButtonPadding,
             ) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it.take(4_000) },
-                    label = { Text("Ask AI to analyze or mark targets") },
-                    minLines = 1,
-                    maxLines = 4,
-                    enabled = !state.isSending,
-                    modifier = Modifier.weight(1f),
-                )
-                Button(
-                    onClick = {
-                        assistantViewModel.send(
-                            prompt = draft,
-                            terrainContext = terrainContext,
-                            viewport = viewport,
-                            attachViewportImage = attachImage && imageReady,
-                            terrainKey = terrainKey,
-                        )
-                        draft = ""
-                    },
-                    enabled = draft.isNotBlank() && !state.isSending && state.activeProvider != null,
-                    modifier = Modifier.height(CompactButtonHeight),
-                    contentPadding = CompactButtonPadding,
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.height(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Send", style = MaterialTheme.typography.labelSmall)
-                }
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.height(16.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("Send", style = MaterialTheme.typography.labelSmall)
             }
         }
     }
