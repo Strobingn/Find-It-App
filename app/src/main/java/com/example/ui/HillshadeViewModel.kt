@@ -772,7 +772,445 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun startPreciseFix() {
-        if (!_gpsEnabled.value) toggle…5697 tokens truncated…     _terrainRefinementProgress.value = TerrainRefinementProgress(
+        if (!_gpsEnabled.value) toggleGpsTracking(true)
+        preciseGps.startPreciseFix()
+    }
+
+    fun cancelPreciseFix() = preciseGps.cancelPreciseFix()
+
+    fun saveGpsSettings(settings: com.example.gps.GpsSettings) {
+        preciseGps.settingsStore.save(settings)
+        if (locationJob?.isActive == true) {
+            preciseGps.restart()
+        }
+    }
+
+    private fun appendBreadcrumbFix(latitude: Double, longitude: Double, accuracyMeters: Float) {
+        val activeTrack = recordingBreadcrumbTrack ?: return
+        if (activeTrack.terrainKey != _activeTerrainKey.value || !accuracyMeters.isFinite() || accuracyMeters > 100f) return
+        val point = BreadcrumbPoint(
+            latitude = latitude,
+            longitude = longitude,
+            accuracyMeters = accuracyMeters,
+            recordedAtMillis = System.currentTimeMillis(),
+        )
+        val updated = activeTrack.withPoint(point)
+        if (updated === activeTrack) return
+        recordingBreadcrumbTrack = updated
+        viewModelScope.launch {
+            breadcrumbTrackDao.upsert(updated.toEntity())
+            // Throttle sync enqueue: only on every 10th point so high-rate GPS does not flood the queue.
+            if (updated.points.size % 10 == 0) {
+                enqueuePendingSync(
+                    entityType = SyncEntityType.BREADCRUMB_TRACK,
+                    entityId = updated.id,
+                    operation = SyncOperation.UPSERT,
+                    payload = "points=${updated.points.size};terrain=${updated.terrainKey}",
+                )
+            }
+        }
+    }
+
+    private fun stopLocationUpdates() {
+        locationJob?.cancel()
+        locationJob = null
+        preciseGps.stop()
+        heldPreciseFix = null
+        _deviceGridPosition.value = null
+        _deviceLocationAccuracyMeters.value = null
+        _deviceLatitude.value = null
+        _deviceLongitude.value = null
+        _deviceLocationRecordedAtMillis.value = null
+        _boundaryProximityAlert.value = null
+    }
+
+    private fun refreshBoundaryProximity(lat: Double?, lon: Double?) {
+        if (lat == null || lon == null) {
+            _boundaryProximityAlert.value = null
+            return
+        }
+        _boundaryProximityAlert.value = BoundaryProximity.evaluate(lat, lon, _surveyBoundaries.value)
+    }
+
+    private val _heatmapEnabled = MutableStateFlow(false)
+    val heatmapEnabled: StateFlow<Boolean> = _heatmapEnabled.asStateFlow()
+
+    fun setHeatmapEnabled(enabled: Boolean) {
+        _heatmapEnabled.value = enabled
+        viewModelScope.launch { settingsRepo.saveBoolean(SettingsRepository.Keys.HEATMAP_ENABLED, enabled) }
+    }
+
+    private val basemapTileRepository = BasemapTileRepository(application)
+    private val _basemapEnabled = MutableStateFlow(false)
+    val basemapEnabled: StateFlow<Boolean> = _basemapEnabled.asStateFlow()
+    private val _basemapOpacity = MutableStateFlow(0.6f)
+    val basemapOpacity: StateFlow<Float> = _basemapOpacity.asStateFlow()
+    private val _basemapBitmap = MutableStateFlow<Bitmap?>(null)
+    val basemapBitmap: StateFlow<Bitmap?> = _basemapBitmap.asStateFlow()
+    private val _basemapStatus = MutableStateFlow<String?>(null)
+    val basemapStatus: StateFlow<String?> = _basemapStatus.asStateFlow()
+    private var basemapJob: Job? = null
+    private val _offlineBasemapRegions = MutableStateFlow<List<OfflineBasemapRegion>>(emptyList())
+    val offlineBasemapRegions: StateFlow<List<OfflineBasemapRegion>> = _offlineBasemapRegions.asStateFlow()
+    private val _offlineBasemapPlan = MutableStateFlow<BasemapPlan?>(null)
+    val offlineBasemapPlan: StateFlow<BasemapPlan?> = _offlineBasemapPlan.asStateFlow()
+    private val _offlineBasemapProgress = MutableStateFlow<BasemapDownloadProgress?>(null)
+    val offlineBasemapProgress: StateFlow<BasemapDownloadProgress?> = _offlineBasemapProgress.asStateFlow()
+    private val _offlineBasemapMessage = MutableStateFlow<String?>(null)
+    val offlineBasemapMessage: StateFlow<String?> = _offlineBasemapMessage.asStateFlow()
+    private val _offlineBasemapDownloading = MutableStateFlow(false)
+    val offlineBasemapDownloading: StateFlow<Boolean> = _offlineBasemapDownloading.asStateFlow()
+    private var offlineBasemapRegionJob: Job? = null
+    private var offlineBasemapDownloadJob: Job? = null
+    private var activeOfflineDownloadId: String? = null
+
+    fun setBasemapEnabled(enabled: Boolean) {
+        _basemapEnabled.value = enabled
+        viewModelScope.launch { settingsRepo.saveBoolean(SettingsRepository.Keys.BASEMAP_ENABLED, enabled) }
+        if (enabled) {
+            refreshBasemapTiles()
+        } else {
+            basemapJob?.cancel()
+            _basemapBitmap.value = null
+            _basemapStatus.value = null
+        }
+    }
+
+    fun setBasemapOpacity(value: Float) {
+        _basemapOpacity.value = value.coerceIn(0.1f, 1f)
+        viewModelScope.launch { settingsRepo.saveFloat(SettingsRepository.Keys.BASEMAP_OPACITY, _basemapOpacity.value) }
+    }
+
+    private fun refreshBasemapTiles() {
+        basemapJob?.cancel()
+        basemapJob = null
+        val bounds = _activeGeoMetadata.value.bounds
+        if (bounds == null) {
+            _basemapBitmap.value = null
+            _basemapStatus.value = "This terrain has no geographic coordinates — basemap unavailable."
+            return
+        }
+        basemapJob = viewModelScope.launch {
+            val offline = _offlineBasemapRegions.value.firstOrNull {
+                it.status == OfflineBasemapStatus.READY
+            }
+            _basemapStatus.value = if (offline != null) {
+                "Opening saved offline basemap…"
+            } else {
+                "Loading basemap tiles…"
+            }
+            val result = runCatching {
+                if (offline != null) {
+                    basemapTileRepository.loadBasemap(
+                        bounds = offline.bounds,
+                        fixedZoom = offline.zoom,
+                        maxTiles = offline.tileCount,
+                        allowNetwork = false,
+                    )
+                } else {
+                    basemapTileRepository.loadBasemap(bounds)
+                }
+            }.getOrNull()
+            _basemapBitmap.value = result?.bitmap
+            _basemapStatus.value = when {
+                result?.bitmap != null && offline != null &&
+                    result.loadedTiles == result.expectedTiles -> "Saved offline basemap ready."
+                result?.bitmap != null -> null
+                result?.blockedByServer == true ->
+                    "The USGS Topo service rejected these requests — basemap unavailable here."
+                else -> "Couldn't load basemap tiles — showing terrain view only."
+            }
+        }
+    }
+
+    private fun scheduleRender(immediate: Boolean = false, currentZoom: Float? = null) {
+        // Skip render if zoom is below threshold and not immediate
+        if (currentZoom != null && currentZoom < AUTO_RENDER_ZOOM_THRESHOLD && !immediate) {
+            return
+        }
+
+        val generation = ++renderGeneration
+        saveSettings()
+        renderJob?.cancel()
+        renderJob = viewModelScope.launch {
+            val mode = _visualizationMode.value
+            val debounceMs = hillshadeDebounceMs(mode, immediate)
+            if (debounceMs > 0L) delay(debounceMs)
+
+            val grid = _elevationGrid.value
+            val zoom = _viewportZoom.value
+            val previewMaxSide = previewMaxSideForZoom(zoom, maxOf(grid.width, grid.height))
+            val cacheKey = HillshadeCacheKey(
+                gridIdentity = System.identityHashCode(grid),
+                width = grid.width,
+                height = grid.height,
+                sunAzimuth = _sunAzimuth.value,
+                sunAltitude = _sunAltitude.value,
+                vegetationFilter = _vegetationFilter.value,
+                palette = _paletteType.value,
+                contrast = _contrast.value,
+                visualizationMode = mode,
+                overlayType = _overlayType.value,
+                overlayOpacity = _overlayOpacity.value,
+                zScale = _zScale.value,
+                featureScaleMeters = _featureScaleMeters.value,
+                analysisSensitivity = _analysisSensitivity.value,
+                contourIntervalMeters = _contourIntervalMeters.value,
+                previewMaxSide = previewMaxSide,
+            )
+            // Skip work when sliders settle on the same values and the bitmap is still valid.
+            // Keep the previous bitmap on screen (do not clear it) so upgrades/refines feel instant.
+            if (cacheKey == lastHillshadeCacheKey && _hillshadeBitmap.value != null) {
+                if (generation == renderGeneration) _isRendering.value = false
+                return@launch
+            }
+
+            _isRendering.value = true
+            try {
+                renderMutex.withLock {
+                    val liveGrid = _elevationGrid.value
+                    val liveKey = cacheKey.copy(
+                        gridIdentity = System.identityHashCode(liveGrid),
+                        width = liveGrid.width,
+                        height = liveGrid.height,
+                        previewMaxSide = previewMaxSideForZoom(
+                            _viewportZoom.value,
+                            maxOf(liveGrid.width, liveGrid.height),
+                        ),
+                    )
+                    if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                        com.example.data.GpuTerrainFrame.supported(mode, liveKey.overlayType, liveKey.contourIntervalMeters)) {
+                        val data = gpuHeightData?.takeIf { it.gridIdentity === liveGrid && it.vegetation == liveKey.vegetationFilter &&
+                            it.analysisMode == (if(mode in 9..10) mode else -1) &&
+                            (mode !in 9..10 || it.featureScale == liveKey.featureScaleMeters) }
+                            ?: withContext(Dispatchers.Default) {
+                                if(mode in 9..10) {
+                                    val values=liveGrid.opennessAnalysis(liveKey.vegetationFilter,liveKey.featureScaleMeters,mode==10) { generation==renderGeneration }
+                                    val analysis=com.example.data.ElevationGrid(liveGrid.width,liveGrid.height,values,FloatArray(values.size),liveGrid.cellSizeMeters,
+                                        liveGrid.validData,liveGrid.interpolatedData,liveGrid.cellSizeXMeters,liveGrid.cellSizeYMeters)
+                                    com.example.data.GpuHeightData.build(analysis,liveKey.vegetationFilter,{generation==renderGeneration},liveGrid,mode,liveKey.featureScaleMeters)
+                                } else com.example.data.GpuHeightData.build(liveGrid,liveKey.vegetationFilter,{generation==renderGeneration})
+                            }.also { gpuHeightData = it }
+                        if (generation == renderGeneration) _gpuTerrainFrame.value = com.example.data.GpuTerrainFrame(
+                            data, liveKey.sunAzimuth, liveKey.sunAltitude,
+                            if(mode in 9..10) liveKey.analysisSensitivity else liveKey.contrast, liveKey.zScale, mode, liveKey.palette)
+                        // CPU snapshots remain available for exports, AI, Google Maps and older devices.
+                        // Settled controls get one snapshot; dragging updates only shader uniforms.
+                        if (_hillshadeBitmap.value != null) delay(180)
+                    } else _gpuTerrainFrame.value = null
+                    val bitmap = withContext(Dispatchers.Default) {
+                        val renderGrid = gridForHillshadePreview(liveGrid, liveKey.previewMaxSide)
+                        renderGrid.renderHillshade(
+                            sunAzimuth = liveKey.sunAzimuth,
+                            sunAltitude = liveKey.sunAltitude,
+                            vegetationFilter = liveKey.vegetationFilter,
+                            palette = liveKey.palette,
+                            contrast = liveKey.contrast,
+                            visualizationMode = liveKey.visualizationMode,
+                            overlayType = liveKey.overlayType,
+                            overlayOpacity = liveKey.overlayOpacity,
+                            zScale = liveKey.zScale,
+                            featureScaleMeters = liveKey.featureScaleMeters,
+                            analysisSensitivity = liveKey.analysisSensitivity,
+                            contourIntervalMeters = liveKey.contourIntervalMeters,
+                            // The render loop never suspends, so cancelling this coroutine cannot
+                            // stop it. Dragging a slider would otherwise run every superseded
+                            // frame to completion while holding renderMutex, making the frame the
+                            // user is waiting on queue behind work whose result is thrown away.
+                            shouldContinue = { generation == renderGeneration },
+                        )
+                    }
+                    if (generation == renderGeneration) {
+                        // Swap only when the new frame is ready — prior hillshade stays visible.
+                        _hillshadeBitmap.value = bitmap
+                        lastHillshadeCacheKey = liveKey
+                        lastPreviewMaxSide = liveKey.previewMaxSide
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } finally {
+                if (generation == renderGeneration) _isRendering.value = false
+            }
+        }
+    }
+
+    fun setCustomTerrain(
+        result: DemGenerator.TerrainLoadResult,
+        source: TerrainImportSource? = null,
+    ) {
+        terrainSource = source
+        setActiveTerrainKey(
+            source?.let { "lidar:${it.uri}" }
+                ?: "custom:${com.example.analysis.TerrainIntelligenceEngine.terrainSignature(result.grid)}",
+        )
+        overviewTerrain = result.takeIf { source != null }
+        currentSourceBounds = NormalizedRasterBounds.Full
+        _canRefineTerrain.value = source != null
+        _isDetailedTerrain.value = false
+        _terrainDetailMessage.value = null
+        if (source != null) {
+            _activeGroundMode.value = source.options.groundMode
+            _activeClassPreset.value = presetFromAllowedClasses(source.options.allowedClasses)
+        }
+        source?.uri?.let { uriString ->
+            val uri = Uri.parse(uriString)
+            if (uri.scheme.equals("file", ignoreCase = true)) {
+                uri.path?.let { path -> LazChunkIndex.ensureBuiltAsync(File(path)) }
+            }
+        }
+        // Durable session pointer so cold start reopens this LAZ even if the decode cache was purged.
+        source?.let(terrainSessionStore::save)
+        applyCustomTerrain(result, resetViewport = true)
+    }
+
+    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult, resetViewport: Boolean = false) {
+        siteGenerationJob?.cancel()
+        val grid = result.grid
+        customGrid = result.grid
+        _elevationGrid.value = result.grid
+        _currentSiteIndex.value = 3
+        // Invalidate hillshade memo so the new grid always repaints; the previous bitmap stays
+        // visible until the new frame is ready (no blanking).
+        lastHillshadeCacheKey = null
+        _activeGeoMetadata.value = result.geoMetadata ?: GeoSpatialLibrary.localGrid(
+            name = "Custom imported layer",
+            columns = grid.width,
+            rows = grid.height,
+            resolutionMeters = grid.cellSizeMeters.toDouble(),
+        )
+        _activeTerrainSummary.value = result.summary
+        publishTerrainQuality(grid, _activeGeoMetadata.value, result.summary)
+        updateCoordinates()
+        scheduleRender(immediate = true)
+        if (_basemapEnabled.value) refreshBasemapTiles()
+        if (resetViewport) {
+            _viewportResetKey.value = _viewportResetKey.value + 1
+        }
+        // 2D hillshade updates immediately; rebuild the GPU mesh so 3D refine matches it.
+        viewModelScope.launch(Dispatchers.Default) {
+            val scene = TerrainGpuSceneBuilder.buildHeightfield(grid)
+            TerrainPerformanceSession.publish(scene)
+        }
+    }
+
+    private fun publishTerrainQuality(
+        grid: ElevationGrid,
+        metadata: GeoSpatialMetadata,
+        summary: String,
+    ) {
+        _terrainQuality.value = if (grid.width > 2 && grid.height > 2) {
+            TerrainQuality.from(grid, metadata, summary)
+        } else {
+            null
+        }
+    }
+
+    fun recommendedAiRefineResolution(): Int {
+        val activityManager = getApplication<Application>()
+            .getSystemService(ActivityManager::class.java)
+        val memoryClass = activityManager?.memoryClass ?: 256
+        val memoryInfo = ActivityManager.MemoryInfo()
+        activityManager?.getMemoryInfo(memoryInfo)
+        val totalRamMb = (memoryInfo.totalMem / (1024L * 1024L)).toInt()
+        val processors = Runtime.getRuntime().availableProcessors()
+        return chooseAiRefineResolution(
+            memoryClassMb = memoryClass,
+            isLowRamDevice = activityManager?.isLowRamDevice == true,
+            availableProcessors = processors,
+            totalRamMb = totalRamMb,
+        )
+    }
+
+    fun refineTerrain(viewport: NormalizedRasterBounds, rasterResolution: Int = 1_024) {
+        val source = terrainSource ?: return
+        if (_isRefiningTerrain.value) return
+        val requestedViewport = viewport.sanitized()
+        if (currentSourceBounds == NormalizedRasterBounds.Full && isEffectivelyWholeTerrain(requestedViewport)) {
+            // The overview is already a raster of the entire original point cloud. Reopening a
+            // compressed LAZ at 1x scans every return but cannot reveal a smaller source area, so
+            // it only makes the user wait (and can even request a lower adaptive resolution).
+            _terrainRefinementProgress.value = TerrainRefinementProgress(
+                fraction = 1f,
+                message = "Full source hillshade is already loaded",
+            )
+            _terrainDetailMessage.value =
+                "Full source hillshade is already loaded. Zoom into an area, then Refine for extra local detail."
+            return
+        }
+        // Cropped refinement always re-reads the requested viewport from the original point cloud.
+        val absoluteBounds = requestedViewport.inside(currentSourceBounds)
+        val options = source.options.copy(
+            rasterResolution = rasterResolution,
+            focusBounds = absoluteBounds,
+        ).sanitized()
+        val sourceUri = Uri.parse(source.uri)
+        val sourceFile = sourceUri.takeIf { it.scheme.equals("file", ignoreCase = true) }
+            ?.path
+            ?.let(::File)
+            ?.takeIf(File::isFile)
+        _isRefiningTerrain.value = true
+        _terrainRefinementProgress.value = TerrainRefinementProgress(
+            fraction = 0.03f,
+            message = "Checking ${options.rasterResolution} px detail cache…",
+        )
+        _terrainDetailMessage.value =
+            "Opening ${options.rasterResolution} px source detail for this viewport…"
+        viewModelScope.launch(Dispatchers.IO) {
+            val refineContext = currentCoroutineContext()
+            var resolvedBounds = absoluteBounds
+            var decodedNow = false
+            var loadedFromCache = false
+            val result = runCatching {
+                sourceFile?.let { file ->
+                    val outcome = terrainTileCache.refine(file, options, shouldContinue = { refineContext.isActive }, progress = { fraction, message ->
+                        _terrainRefinementProgress.value = TerrainRefinementProgress(0.04f + fraction * .86f, message)
+                    })
+                    outcome?.also {
+                        resolvedBounds = it.bounds
+                        loadedFromCache = it.misses == 0
+                    }?.terrain
+                } ?: getApplication<Application>().contentResolver.openInputStream(sourceUri)?.buffered()?.use { input ->
+                    _terrainRefinementProgress.value = TerrainRefinementProgress(
+                            fraction = 0.08f,
+                            message = "Opening the original point cloud at ${options.rasterResolution} px…",
+                    )
+                    DemGenerator.parseFromStreamDetailed(
+                        fileName = source.displayName,
+                        inputStream = input,
+                        options = options,
+                        onLazProgress = { decoded, total ->
+                        val decodedFraction = if (total > 0L) {
+                            decoded.toFloat() / total.toFloat()
+                        } else {
+                            0f
+                        }
+                        _terrainRefinementProgress.value = TerrainRefinementProgress(
+                            fraction = 0.08f + decodedFraction.coerceIn(0f, 1f) * 0.82f,
+                            message = if (total > 0L) {
+                                "Decoding ${options.rasterResolution} px source detail · " +
+                                    "${(decodedFraction * 100f).toInt().coerceIn(0, 100)}%"
+                            } else {
+                                "Decoding source detail…"
+                            },
+                        )
+                        },
+                    )?.also {
+                        sourceFile?.let { file -> refinementMemoryCache.put(file, options, it) }
+                        decodedNow = true
+                    }
+                }
+            }.getOrNull()
+            withContext(Dispatchers.Main.immediate) {
+                if (result == null) {
+                    _terrainRefinementProgress.value = TerrainRefinementProgress(
+                        fraction = 1f,
+                        message = "Refinement failed",
+                    )
+                    _isRefiningTerrain.value = false
+                    _terrainDetailMessage.value = "Could not load detail from the original LAZ/LAS document."
+                } else {
+                    _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = if (loadedFromCache) 0.96f else 0.92f,
                         message = if (loadedFromCache) "Opening cached detail…" else "Rendering refined terrain…",
                     )
