@@ -11,9 +11,11 @@ internal object TerrainHeightEncoding {
     fun decode(q: Int, base: Float, range: Float): Float = (base.toDouble() + q.toDouble() / MAX * range).toFloat()
 }
 class GpuHeightData(val bitmap: Bitmap, val base: Float, val range: Float,
-                    val cellX: Float, val cellY: Float, val gridIdentity: ElevationGrid, val vegetation: Float) {
+                    val cellX: Float, val cellY: Float, val gridIdentity: ElevationGrid, val vegetation: Float,
+                    val analysisMode: Int = -1, val featureScale: Float = 0f) {
     companion object {
-        fun build(grid: ElevationGrid, vegetation: Float, shouldContinue: () -> Boolean): GpuHeightData {
+        fun build(grid: ElevationGrid, vegetation: Float, shouldContinue: () -> Boolean,
+                  identity: ElevationGrid = grid, analysisMode: Int = -1, featureScale: Float = 0f): GpuHeightData {
             val values = FloatArray(grid.bareEarth.size)
             var lo = Float.POSITIVE_INFINITY; var hi = Float.NEGATIVE_INFINITY
             for (y in 0 until grid.height) {
@@ -33,13 +35,13 @@ class GpuHeightData(val bitmap: Bitmap, val base: Float, val range: Float,
             val bitmap = Bitmap.createBitmap(grid.width, grid.height, Bitmap.Config.ARGB_8888)
             bitmap.setPremultiplied(false)
             bitmap.setPixels(pixels, 0, grid.width, 0, 0, grid.width, grid.height)
-            return GpuHeightData(bitmap, lo, range, grid.cellSizeXMeters, grid.cellSizeYMeters, grid, vegetation)
+            return GpuHeightData(bitmap, lo, range, grid.cellSizeXMeters, grid.cellSizeYMeters, identity, vegetation, analysisMode, featureScale)
         }
     }
 }
 data class GpuTerrainFrame(val data: GpuHeightData, val azimuth: Float, val altitude: Float,
                            val contrast: Float, val zScale: Float, val mode: Int, val palette: Int) {
     companion object {
-        fun supported(mode: Int, overlay: Int, contour: Float) = mode in setOf(0,1,2,6,7) && overlay == 0 && contour < .05f
+        fun supported(mode: Int, overlay: Int, contour: Float) = mode in setOf(0,1,2,6,7,9,10) && overlay == 0 && contour < .05f
     }
 }

@@ -259,6 +259,8 @@ fun LidarControlPanel(
                     Option(6, "Aspect", "Slope direction by color"),
                     Option(7, "Elevation", "Unshaded height colors"),
                     Option(8, "Canopy", "DSM minus bare earth"),
+                    Option(9, "Positive openness", "Grayscale ridges and earthworks"),
+                    Option(10, "Negative openness", "Grayscale depressions and cellar holes"),
                 ),
                 selected = visualizationMode,
                 onSelected = onVisualizationModeChanged,

@@ -54,6 +54,24 @@ class TerrainPipelineRegressionTest {
             assertTrue(File(root,"tiles").listFiles().orEmpty().isEmpty())
         } finally { root.deleteRecursively() }
     }
+    @Test fun opennessUsesMetresAndDistinguishesPitsFromRidges() {
+        val w=65; val h=65
+        val plane=ElevationGrid(w,h,FloatArray(w*h){ i -> 20f+(i%w)*.25f+(i/w)*.5f },FloatArray(w*h),
+            cellSizeXMeters=.5f,cellSizeYMeters=1f)
+        val flat=TerrainOpenness.compute(plane,1f,6f,false){true}
+        assertEquals((Math.PI/2).toFloat(),flat[32*w+32],.00001f)
+        val heights=FloatArray(w*h){30f}.apply { this[32*w+32]=28f }
+        val pit=ElevationGrid(w,h,heights,FloatArray(w*h),cellSizeXMeters=.5f,cellSizeYMeters=1f)
+        val positive=TerrainOpenness.compute(pit,1f,6f,false){true}
+        val negative=TerrainOpenness.compute(pit,1f,6f,true){true}
+        assertTrue(positive[32*w+32] < (Math.PI/2).toFloat())
+        assertTrue(negative[32*w+32] > (Math.PI/2).toFloat())
+        assertEquals(28f,pit.bareEarth[32*w+32],0f)
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            TerrainOpenness.compute(pit,1f,6f,false){false}
+        }
+    }
+
     @Test fun relativeHeightEncodingHasBoundedErrorAndNoGlobalXYRounding() {
         val base=500f; val range=100f
         for(i in 0..10000) {

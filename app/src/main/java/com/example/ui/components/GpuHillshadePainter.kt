@@ -72,6 +72,10 @@ internal class GpuHillshadePainter(private val data: com.example.data.GpuHeightD
                 float4 d=uHeight.eval(p);
                 if(d.a<0.5) return half4(0.0);
                 float c=rawHeight(d);
+                if(uMode==9 || uMode==10) {
+                    float gray=floor(clamp(0.5+(c-1.570796327)/3.141592654*uContrast,0.0,1.0)*255.0)/255.0;
+                    return half4(float3(gray),1);
+                }
                 float z00=zAt(p+float2(-1,-1),c), z01=zAt(p+float2(0,-1),c), z02=zAt(p+float2(1,-1),c);
                 float z10=zAt(p+float2(-1,0),c), z12=zAt(p+float2(1,0),c);
                 float z20=zAt(p+float2(-1,1),c), z21=zAt(p+float2(0,1),c), z22=zAt(p+float2(1,1),c);

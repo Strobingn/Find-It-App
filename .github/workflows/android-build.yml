@@ -55,6 +55,9 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,6 +84,15 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
           cargo ndk -p 24 -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release --locked
           test -s ../../app/src/main/jniLibs/arm64-v8a/liblazrs_jni.so
+
+      - name: Preserve native libraries for main release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-laz-release
+          path: app/src/main/jniLibs/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Require Gradle wrapper
         run: |
@@ -180,6 +192,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Restore native LAZ libraries
+        uses: actions/download-artifact@v7
+        with:
+          name: native-laz-release
+          path: app/src/main/jniLibs/
 
       - name: Resolve signing keystore
         id: signing

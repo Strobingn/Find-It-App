@@ -71,6 +71,17 @@ class ElevationGrid(
     // 1536x1536 grid would otherwise allocate a fresh ~9 MB int array on every drag frame.
     private var scratchPixels: IntArray? = null
 
+    private var opennessKey: Triple<Float,Float,Boolean>? = null
+    private var opennessValues: FloatArray? = null
+    internal fun opennessAnalysis(vegetation: Float, radius: Float, negative: Boolean,
+                                  shouldContinue: () -> Boolean): FloatArray {
+        val key=Triple(vegetation,radius,negative)
+        if(opennessKey==key) opennessValues?.let { return it }
+        val values=TerrainOpenness.compute(this,vegetation,radius,negative,shouldContinue)
+        opennessKey=key; opennessValues=values
+        return values
+    }
+
     /** 0 shows the full surface model; 1 shows the extracted bare-earth model. */
     fun getElevationAt(col: Int, row: Int, vegetationFilter: Float): Float {
         val c = col.coerceIn(0, width - 1)
@@ -165,6 +176,8 @@ class ElevationGrid(
         } else {
             null
         }
+        val openness = if(visualizationMode in 9..10) opennessAnalysis(vegetationFilter,
+            featureScaleMeters.coerceAtLeast(.01f),visualizationMode==10,shouldContinue) else null
         val residualScale = cachedResidualScale
         val roughnessScale = cachedRoughnessScale
         val curvatureScale = cachedCurvatureScale
@@ -178,7 +191,7 @@ class ElevationGrid(
         val contrastValue = contrast.coerceIn(0.5f, 4f)
         val zMultiplier = zScale.coerceIn(0.25f, 8f)
         val contourInterval = contourIntervalMeters.coerceAtLeast(0f)
-        val boundedMode = visualizationMode.coerceIn(0, 8)
+        val boundedMode = visualizationMode.coerceIn(0, 10)
 
         // Sun direction is constant across the raster, but shade() used to recompute
         // toRadians/sin/cos from it on every pixel - and it was called five times per pixel
@@ -308,6 +321,13 @@ class ElevationGrid(
                     }
                     6 -> aspectColor(gradientX, gradientY, slopeRadians, multiShade)
                     7 -> getPaletteColor(palette, elevationPercent)
+                    9, 10 -> {
+                        val angle=openness!![index]
+                        if(!angle.isFinite()) Color.TRANSPARENT else {
+                            val gray=((.5f+(angle-(Math.PI/2).toFloat())/Math.PI.toFloat()*analysisSensitivity)*255f).toInt().coerceIn(0,255)
+                            Color.rgb(gray,gray,gray)
+                        }
+                    }
                     8 -> canopyHeightColor(canopySpikes[index], canopyScale, multiShade)
                     else -> shadePalette(getPaletteColor(palette, elevationPercent), primaryShade, contrastValue)
                 }

@@ -77,7 +77,7 @@ class TerrainGpuInstrumentedTest {
         try {
             GLES30.glViewport(0,0,96,96)
             val grid=ElevationGrid(128,96,FloatArray(128*96){40f},FloatArray(128*96),3f,cellSizeXMeters=2f,cellSizeYMeters=3f)
-            val m=FloatArray(16); Matrix.setIdentityM(m,0)
+            val m=FloatArray(16); android.opengl.Matrix.setIdentityM(m,0)
             val renderer=HeightfieldGlRenderer()
             renderer.draw(HeightmapCdlod.pack(grid),m,96,96,1f)
             assertEquals(GLES30.GL_NO_ERROR,GLES30.glGetError())
