@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -388,6 +389,7 @@ fun LidarMapCanvas(
                     image = imageBitmap,
                     dstOffset = IntOffset(imageLeft.toInt(), imageTop.toInt()),
                     dstSize = IntSize(displayWidth.toInt(), displayHeight.toInt()),
+                    filterQuality = FilterQuality.High,
                 )
                 if (showBasemap && basemapImageBitmap != null) {
                     drawImage(

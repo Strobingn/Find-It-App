@@ -129,7 +129,9 @@ internal fun pointCountHistogram(counts: IntArray): IntArray {
  * blocky facets and straight lines that are not in the ground. This pass keeps the measured
  * minimum in each spacing-sized bin (bare earth, not whichever return sits nearest the centre)
  * and Catmull-Rom upsamples that bin grid. Catmull-Rom is C1, so slope does not jump on a grid
- * line, and it is not clamped back onto the control points. A grid that is already near the
+ * line, and it is not clamped back onto the control points. A missing coarse sample does not
+ * hold the last height out to the bin edge (that shelf is a straight line in hillshade); the
+ * span stops short and IDW blends the rest. A grid that is already near the
  * point spacing only gets the short IDW fill. True voids outside the data hull stay NaN.
  * The parallel LAZ decode is unchanged.
  */
@@ -628,12 +630,9 @@ private fun sampleCatmull(
     }
     val c1 = rows[1]
     val c2 = rows[2]
-    if (!c1.isFinite() && !c2.isFinite()) return Float.NaN
-    if (!c2.isFinite()) return c1
-    if (!c1.isFinite()) return c2
-    val c0 = if (rows[0].isFinite()) rows[0] else c1
-    val c3 = if (rows[3].isFinite()) rows[3] else c2
-    return catmull(c0, c1, c2, c3, gy - y1)
+    // A missing central tap used to return the other tap unchanged. That painted a
+    // flat shelf a full bin wide, and the shelf edge was a straight hillshade line.
+    return spanOrShortRamp(rows[0], c1, c2, rows[3], gy - y1)
 }
 
 private fun catmullRow(
@@ -653,14 +652,33 @@ private fun catmullRow(
     }
     val c1 = at(x1)
     val c2 = at(x1 + 1)
-    if (!c1.isFinite() && !c2.isFinite()) return Float.NaN
-    if (!c2.isFinite()) return c1
-    if (!c1.isFinite()) return c2
-    val c0raw = at(x1 - 1)
-    val c3raw = at(x1 + 2)
-    val c0 = if (c0raw.isFinite()) c0raw else c1
-    val c3 = if (c3raw.isFinite()) c3raw else c2
-    return catmull(c0, c1, c2, c3, tx)
+    return spanOrShortRamp(at(x1 - 1), c1, c2, at(x1 + 2), tx)
+}
+
+/**
+ * Both central samples: Catmull-Rom (outer taps mirror inward when missing).
+ * One central sample: keep sloping a short distance off that sample, then stop.
+ * A constant hold out to the bin edge is what drew the straight H/V lines.
+ * The IDW pass after this fills the rest inside the hull.
+ */
+private fun spanOrShortRamp(p0: Float, p1: Float, p2: Float, p3: Float, t: Float): Float {
+    if (p1.isFinite() && p2.isFinite()) {
+        val c0 = if (p0.isFinite()) p0 else p1
+        val c3 = if (p3.isFinite()) p3 else p2
+        return catmull(c0, p1, p2, c3, t)
+    }
+    val reach = 0.42f
+    if (p1.isFinite() && !p2.isFinite()) {
+        if (t > reach) return Float.NaN
+        val slope = if (p0.isFinite()) p1 - p0 else 0f
+        return p1 + slope * t
+    }
+    if (p2.isFinite() && !p1.isFinite()) {
+        if (t < 1f - reach) return Float.NaN
+        val slope = if (p3.isFinite()) p3 - p2 else 0f
+        return p2 + slope * (t - 1f)
+    }
+    return Float.NaN
 }
 
 /** Interpolating cubic. t = 0 returns [p1], t = 1 returns [p2]. */

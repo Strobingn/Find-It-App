@@ -201,6 +201,8 @@ class LazTerrainDiskCache(
             // Per-tile TIN and the clamped Catmull grids must not be reused.
             append("|smoothSurface1")
             append("|smrfGround1")
+            // Constant Catmull shelves (straight H/V shade lines) must not be reused.
+            append("|noShelf1")
             append('|').append(
                 sanitized.allowedClasses
                     ?.sorted()

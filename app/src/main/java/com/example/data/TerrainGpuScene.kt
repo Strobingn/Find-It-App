@@ -182,7 +182,7 @@ object TerrainGpuSceneBuilder {
                 val sourceIndex = y * grid.width + x
                 val vertexIndex = (localY * localWidth + localX) * TerrainGpuBatch.FLOATS_PER_VERTEX
                 val valid = grid.validData[sourceIndex] && grid.bareEarth[sourceIndex].isFinite()
-                val elevation = if (valid) grid.bareEarth[sourceIndex] else minElevation
+                val elevation = if (valid) displayElevation(grid, x, y) else minElevation
 
                 vertices[vertexIndex] = if (grid.width > 1) x.toFloat() / (grid.width - 1) * 2f - 1f else 0f
                 vertices[vertexIndex + 1] = if (grid.height > 1) 1f - y.toFloat() / (grid.height - 1) * 2f else 0f
@@ -270,9 +270,9 @@ object TerrainGpuSceneBuilder {
             val sy = sampleY.coerceIn(0, grid.height - 1)
             val index = sy * grid.width + sx
             return if (grid.validData[index] && grid.bareEarth[index].isFinite()) {
-                grid.bareEarth[index]
+                displayElevation(grid, sx, sy)
             } else {
-                grid.bareEarth[y * grid.width + x].takeIf { it.isFinite() } ?: 0f
+                displayElevation(grid, x, y)
             }
         }
 
@@ -290,5 +290,35 @@ object TerrainGpuSceneBuilder {
         target[offset] = nx
         target[offset + 1] = ny
         target[offset + 2] = nz
+    }
+
+    /**
+     * Display-only 3×3 binomial. Measured elevations stay in the DEM for inspection;
+     * the mesh uses this so a one-cell pin does not shade as a hard grid line.
+     * Invalid neighbours are skipped, so voids do not pull the surface down.
+     */
+    private fun displayElevation(grid: ElevationGrid, x: Int, y: Int): Float {
+        val index = y * grid.width + x
+        val center = grid.bareEarth[index]
+        if (!grid.validData[index] || !center.isFinite()) return center
+        var acc = center * 4f
+        var weight = 4f
+        fun add(nx: Int, ny: Int, w: Float) {
+            if (nx !in 0 until grid.width || ny !in 0 until grid.height) return
+            val i = ny * grid.width + nx
+            val z = grid.bareEarth[i]
+            if (!grid.validData[i] || !z.isFinite()) return
+            acc += z * w
+            weight += w
+        }
+        add(x - 1, y, 2f)
+        add(x + 1, y, 2f)
+        add(x, y - 1, 2f)
+        add(x, y + 1, 2f)
+        add(x - 1, y - 1, 1f)
+        add(x + 1, y - 1, 1f)
+        add(x - 1, y + 1, 1f)
+        add(x + 1, y + 1, 1f)
+        return acc / weight
     }
 }
