@@ -55,7 +55,6 @@ class ElevationGrid(
     // this via renderMutex) — concurrent calls would race these fields and corrupt the cache.
     private var cachedIntermediateKey: Pair<Float, Float>? = null
     private var cachedElevations: FloatArray? = null
-    private var cachedShade: FloatArray? = null
     private var cachedMinElevation = 0f
     private var cachedMaxElevation = 1f
     private var cachedLocal: LocalStatistics? = null
@@ -116,7 +115,6 @@ class ElevationGrid(
         if (cachedIntermediateKey != intermediateKey) {
             cachedIntermediateKey = intermediateKey
             cachedElevations = null
-            cachedShade = null
             cachedLocal = null
             cachedCurvature = null
         }
@@ -196,14 +194,6 @@ class ElevationGrid(
         val gradientDivisor = 8f * cellDistance
         val lastX = width - 1
         val lastY = height - 1
-        // Horn on the raw grid turns a 1-cell pin or a bin edge into a hard line.
-        // A [1,2,1] blur that does not cross no-data softens that line. Analysis
-        // modes still read the unsmoothed elevations above.
-        val shadeElevations = if (needsGradient) {
-            cachedShade ?: binomialShade(elevations, validData).also { cachedShade = it }
-        } else {
-            elevations
-        }
 
         fun renderRow(y: Int) {
             val interiorRow = y > 0 && y < lastY
@@ -218,8 +208,6 @@ class ElevationGrid(
                 var gradientX = 0f
                 var gradientY = 0f
                 if (needsGradient) {
-                    val shadeZ = shadeElevations[index]
-                    val sampleZ = if (shadeZ.isFinite()) shadeZ else centerZ
                     // Horn 3×3: a missing neighbour takes the centre value, never 0.
                     val z00: Float
                     val z01: Float
@@ -232,23 +220,23 @@ class ElevationGrid(
                     if (interiorRow && x > 0 && x < lastX) {
                         val above = index - width
                         val below = index + width
-                        z00 = hornSample(shadeElevations, validData, above - 1, sampleZ)
-                        z01 = hornSample(shadeElevations, validData, above, sampleZ)
-                        z02 = hornSample(shadeElevations, validData, above + 1, sampleZ)
-                        z10 = hornSample(shadeElevations, validData, index - 1, sampleZ)
-                        z12 = hornSample(shadeElevations, validData, index + 1, sampleZ)
-                        z20 = hornSample(shadeElevations, validData, below - 1, sampleZ)
-                        z21 = hornSample(shadeElevations, validData, below, sampleZ)
-                        z22 = hornSample(shadeElevations, validData, below + 1, sampleZ)
+                        z00 = hornSample(elevations, validData, above - 1, centerZ)
+                        z01 = hornSample(elevations, validData, above, centerZ)
+                        z02 = hornSample(elevations, validData, above + 1, centerZ)
+                        z10 = hornSample(elevations, validData, index - 1, centerZ)
+                        z12 = hornSample(elevations, validData, index + 1, centerZ)
+                        z20 = hornSample(elevations, validData, below - 1, centerZ)
+                        z21 = hornSample(elevations, validData, below, centerZ)
+                        z22 = hornSample(elevations, validData, below + 1, centerZ)
                     } else {
-                        z00 = hornSampleAt(shadeElevations, validData, x - 1, y - 1, sampleZ)
-                        z01 = hornSampleAt(shadeElevations, validData, x, y - 1, sampleZ)
-                        z02 = hornSampleAt(shadeElevations, validData, x + 1, y - 1, sampleZ)
-                        z10 = hornSampleAt(shadeElevations, validData, x - 1, y, sampleZ)
-                        z12 = hornSampleAt(shadeElevations, validData, x + 1, y, sampleZ)
-                        z20 = hornSampleAt(shadeElevations, validData, x - 1, y + 1, sampleZ)
-                        z21 = hornSampleAt(shadeElevations, validData, x, y + 1, sampleZ)
-                        z22 = hornSampleAt(shadeElevations, validData, x + 1, y + 1, sampleZ)
+                        z00 = hornSampleAt(elevations, validData, x - 1, y - 1, centerZ)
+                        z01 = hornSampleAt(elevations, validData, x, y - 1, centerZ)
+                        z02 = hornSampleAt(elevations, validData, x + 1, y - 1, centerZ)
+                        z10 = hornSampleAt(elevations, validData, x - 1, y, centerZ)
+                        z12 = hornSampleAt(elevations, validData, x + 1, y, centerZ)
+                        z20 = hornSampleAt(elevations, validData, x - 1, y + 1, centerZ)
+                        z21 = hornSampleAt(elevations, validData, x, y + 1, centerZ)
+                        z22 = hornSampleAt(elevations, validData, x + 1, y + 1, centerZ)
                     }
                     gradientX = ((z02 + 2f * z12 + z22) - (z00 + 2f * z10 + z20)) /
                         gradientDivisor * zMultiplier
@@ -653,69 +641,6 @@ class ElevationGrid(
 
     private fun index(x: Int, y: Int): Int =
         y.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)
-
-    /** Separable [1, 2, 1] blur. Invalid cells stay NaN and do not bleed into neighbours. */
-    private fun binomialShade(src: FloatArray, valid: BooleanArray): FloatArray {
-        val temp = FloatArray(src.size)
-        val out = FloatArray(src.size)
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                val index = row + x
-                val center = src[index]
-                if (!valid[index] || !center.isFinite()) {
-                    temp[index] = Float.NaN
-                    continue
-                }
-                var acc = center * 2f
-                var weight = 2f
-                if (x > 0) {
-                    val left = src[index - 1]
-                    if (valid[index - 1] && left.isFinite()) {
-                        acc += left
-                        weight += 1f
-                    }
-                }
-                if (x + 1 < width) {
-                    val right = src[index + 1]
-                    if (valid[index + 1] && right.isFinite()) {
-                        acc += right
-                        weight += 1f
-                    }
-                }
-                temp[index] = acc / weight
-            }
-        }
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                val index = row + x
-                val center = temp[index]
-                if (!center.isFinite()) {
-                    out[index] = Float.NaN
-                    continue
-                }
-                var acc = center * 2f
-                var weight = 2f
-                if (y > 0) {
-                    val up = temp[index - width]
-                    if (up.isFinite()) {
-                        acc += up
-                        weight += 1f
-                    }
-                }
-                if (y + 1 < height) {
-                    val down = temp[index + width]
-                    if (down.isFinite()) {
-                        acc += down
-                        weight += 1f
-                    }
-                }
-                out[index] = acc / weight
-            }
-        }
-        return out
-    }
 
     private fun hornSample(elevations: FloatArray, valid: BooleanArray, sampleIndex: Int, centerZ: Float): Float {
         if (sampleIndex !in elevations.indices) return centerZ
