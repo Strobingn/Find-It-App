@@ -714,6 +714,7 @@ internal object LazTerrainReader {
                     }
                     results[chunk] = DecodedChunk.CONSUMED
                     points.addTo(rasterizer)
+                    points.release()
                     window.release()
                     decoded += points.count
                     onProgress?.invoke(decoded, pointCount)
@@ -728,51 +729,82 @@ internal object LazTerrainReader {
         } finally {
             cancelled.set(true)
             pool.shutdownNow()
+            while (chunkScratchPool.poll() != null) {
+                // Drop the recycled chunk buffers once this file is done.
+            }
         }
+    }
+
+    /**
+     * Reused X/Y/Z buffers for in-flight LAZ chunks. A 50k-point chunk is ~1.6 MB; allocating a
+     * fresh set per chunk on a multi-million-point tile is pure GC time, and the binned grid
+     * does not change when the same numbers are written into a recycled buffer.
+     */
+    private class ChunkScratch(val capacity: Int) {
+        val xs = DoubleArray(capacity)
+        val ys = DoubleArray(capacity)
+        val zs = FloatArray(capacity)
+        val classes = ByteArray(capacity)
+        val keys = BooleanArray(capacity)
+    }
+
+    private val chunkScratchPool = java.util.concurrent.ConcurrentLinkedQueue<ChunkScratch>()
+
+    private fun borrowScratch(wanted: Int): ChunkScratch {
+        while (true) {
+            val existing = chunkScratchPool.poll() ?: return ChunkScratch(wanted)
+            if (existing.capacity >= wanted) return existing
+        }
+    }
+
+    private fun recycleScratch(scratch: ChunkScratch) {
+        if (chunkScratchPool.size < 16) chunkScratchPool.offer(scratch)
     }
 
     /** One decoded compressed chunk, kept compact until the binner adds it in file order. */
     private class DecodedChunk(
         val count: Int,
-        private val xs: DoubleArray,
-        private val ys: DoubleArray,
-        private val zs: FloatArray,
-        private val classes: ByteArray,
-        private val keyPoints: BooleanArray,
+        private val scratch: ChunkScratch,
     ) {
         fun addTo(rasterizer: LidarRasterizer) {
+            val xs = scratch.xs
+            val ys = scratch.ys
+            val zs = scratch.zs
+            val classes = scratch.classes
+            val keys = scratch.keys
             for (i in 0 until count) {
                 rasterizer.addPoint(
                     x = xs[i],
                     y = ys[i],
                     z = zs[i],
                     classification = classes[i].toInt() and 0xFF,
-                    isKeyPoint = keyPoints[i],
+                    isKeyPoint = keys[i],
                 )
             }
         }
 
+        fun release() {
+            if (scratch.capacity > 0) recycleScratch(scratch)
+        }
+
         companion object {
+            private val EMPTY = ChunkScratch(0)
             val CONSUMED = java.util.concurrent.CompletableFuture.completedFuture(
-                DecodedChunk(0, DoubleArray(0), DoubleArray(0), FloatArray(0), ByteArray(0), BooleanArray(0)),
+                DecodedChunk(0, EMPTY),
             )
 
             fun decode(reader: LASreaderLAS, wanted: Int): DecodedChunk {
-                val xs = DoubleArray(wanted)
-                val ys = DoubleArray(wanted)
-                val zs = FloatArray(wanted)
-                val classes = ByteArray(wanted)
-                val keys = BooleanArray(wanted)
+                val scratch = borrowScratch(wanted)
                 var n = 0
                 while (n < wanted && reader.read_point()) {
-                    xs[n] = reader.get_x()
-                    ys[n] = reader.get_y()
-                    zs[n] = reader.get_z().toFloat()
-                    classes[n] = reader.point.get_classification().toByte()
-                    keys[n] = reader.point.get_keypoint_flag().toInt() != 0
+                    scratch.xs[n] = reader.get_x()
+                    scratch.ys[n] = reader.get_y()
+                    scratch.zs[n] = reader.get_z().toFloat()
+                    scratch.classes[n] = reader.point.get_classification().toByte()
+                    scratch.keys[n] = reader.point.get_keypoint_flag().toInt() != 0
                     n++
                 }
-                return DecodedChunk(n, xs, ys, zs, classes, keys)
+                return DecodedChunk(n, scratch)
             }
         }
     }

@@ -187,8 +187,9 @@ class ElevationGrid(
         val leftLight = lightVector(azimuth + 270f, altitude)
 
         // Each mode consumes at most one of these, yet all three were computed unconditionally.
+        val needsCrossLight = boundedMode == 0
         val needsMultiShade = boundedMode == 1 || boundedMode in 3..6 || boundedMode == 8
-        val needsPrimaryShade = needsMultiShade || boundedMode == 0
+        val needsPrimaryShade = needsMultiShade || needsCrossLight
         val needsSlope = boundedMode == 2 || boundedMode == 6
         val needsGradient = needsPrimaryShade || needsSlope
         val gradientDivisor = 8f * cellDistance
@@ -207,6 +208,10 @@ class ElevationGrid(
                 val centerZ = elevations[index]
                 var gradientX = 0f
                 var gradientY = 0f
+                // 3×3 residual (simple local relief). A one-cell foundation or cellar has no
+                // slope on its flat top, so a single sun misses it when the wall runs with the
+                // light. This tints the picture only. The stored elevations are not averaged.
+                var microRelief = 0f
                 if (needsGradient) {
                     // Horn 3×3: a missing neighbour takes the centre value, never 0.
                     val z00: Float
@@ -246,6 +251,10 @@ class ElevationGrid(
                         gradientX = 0f
                         gradientY = 0f
                     }
+                    if (needsCrossLight) {
+                        val around = (z00 + z01 + z02 + z10 + z12 + z20 + z21 + z22) * 0.125f
+                        microRelief = ((centerZ - around) / cellDistance * 0.45f).coerceIn(-0.16f, 0.16f)
+                    }
                 }
                 val slopeRadians = if (needsSlope) {
                     atan(sqrt(gradientX * gradientX + gradientY * gradientY))
@@ -267,6 +276,20 @@ class ElevationGrid(
                 }
                 val primaryShade = if (needsPrimaryShade) {
                     illumination(normalX, normalY, normalZ, primaryLight)
+                } else {
+                    0f
+                }
+                // A wall parallel to one sun is invisible in a single hillshade (the usual
+                // archaeological miss). Keep most of the chosen light so the sun slider still
+                // turns the ground, and add a little light from the other three sides.
+                val crossShade = if (needsCrossLight) {
+                    (
+                        primaryShade * 0.70f +
+                            illumination(normalX, normalY, normalZ, rightLight) * 0.10f +
+                            illumination(normalX, normalY, normalZ, oppositeLight) * 0.10f +
+                            illumination(normalX, normalY, normalZ, leftLight) * 0.10f +
+                            microRelief
+                        ).coerceIn(0f, 1f)
                 } else {
                     0f
                 }
@@ -305,7 +328,7 @@ class ElevationGrid(
                     6 -> aspectColor(gradientX, gradientY, slopeRadians, multiShade)
                     7 -> getPaletteColor(palette, elevationPercent)
                     8 -> canopyHeightColor(canopySpikes[index], canopyScale, multiShade)
-                    else -> shadePalette(getPaletteColor(palette, elevationPercent), primaryShade, contrastValue)
+                    else -> shadePalette(getPaletteColor(palette, elevationPercent), crossShade, contrastValue)
                 }
 
                 if (overlayType > 0 && overlayOpacity > 0f) {

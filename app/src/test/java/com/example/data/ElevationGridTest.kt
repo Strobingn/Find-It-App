@@ -106,6 +106,23 @@ class ElevationGridTest {
         assertTrue(Color.red(center) > 20)
     }
 
+    @Test
+    fun eastWestFoundationShowsWhenTheSunRunsAlongIt() {
+        // A one-cell wall running east-west is flat on top, so light from the east
+        // (along the wall) produces the same Horn shade as undisturbed ground.
+        val flat = FloatArray(81) { 10f }
+        val wall = FloatArray(81) { 10f }
+        for (x in 0 until 9) wall[4 * 9 + x] = 10.35f
+        val flatBmp = ElevationGrid(9, 9, flat, FloatArray(81), cellSizeMeters = 1f)
+            .renderHillshade(90f, 35f, 1f, palette = 0, contrast = 1f)
+        val wallBmp = ElevationGrid(9, 9, wall, FloatArray(81), cellSizeMeters = 1f)
+            .renderHillshade(90f, 35f, 1f, palette = 0, contrast = 1f)
+
+        assertTrue(
+            Color.red(wallBmp.getPixel(4, 4)) > Color.red(flatBmp.getPixel(4, 4)),
+        )
+    }
+
     private fun nanDem(): ElevationGrid {
         val w = 24
         val h = 24
