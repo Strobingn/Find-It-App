@@ -26,6 +26,8 @@ import com.example.BuildConfig
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -42,6 +44,7 @@ fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateControl
     var showNotes by remember { mutableStateOf(false) }
     var installHelp by remember { mutableStateOf<String?>(null) }
     var installHelpUrl by remember { mutableStateOf<String?>(null) }
+    var downloading by remember { mutableStateOf(false) }
 
     val controller = remember {
         AppUpdateController(
@@ -52,6 +55,7 @@ fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateControl
             setShowNotes = { showNotes = it },
             setInstallHelp = { installHelp = it },
             setInstallHelpUrl = { installHelpUrl = it },
+            setDownloading = { downloading = it },
         )
     }
     controller.status = status
@@ -60,6 +64,7 @@ fun rememberAppUpdateController(checkOnLaunch: Boolean = true): AppUpdateControl
     controller.showNotes = showNotes
     controller.installHelp = installHelp
     controller.installHelpUrl = installHelpUrl
+    controller.downloading = downloading
 
     LaunchedEffect(checkOnLaunch) {
         if (checkOnLaunch) controller.check(scope)
@@ -75,7 +80,9 @@ class AppUpdateController(
     private val setShowNotes: (Boolean) -> Unit,
     private val setInstallHelp: (String?) -> Unit,
     private val setInstallHelpUrl: (String?) -> Unit = {},
+    private val setDownloading: (Boolean) -> Unit = {},
 ) {
+    var downloading: Boolean = false
     var status: String = ""
     var available: FinditRelease? = null
     var busy: Boolean = false
@@ -114,65 +121,98 @@ class AppUpdateController(
         }
     }
 
+    private var downloadJob: Job? = null
+
     fun downloadAndInstall(scope: kotlinx.coroutines.CoroutineScope, release: FinditRelease) {
-        scope.launch {
+        if (downloadJob?.isActive == true) return
+        downloadJob = scope.launch {
             setBusy(true)
+            setDownloading(true)
             setStatus("Downloading ${release.apkName}…")
-            val outcome = withContext(Dispatchers.IO) {
-                runCatching {
-                    val apk = AppUpdateChecker.cacheApk(context)
-                    GitHubReleaseClient(
-                        repo = BuildConfig.FINDIT_UPDATE_REPO.trim().ifBlank { "Strobingn/Find-It-App" },
-                        token = BuildConfig.FINDIT_UPDATE_TOKEN.trim(),
-                    ).downloadRelease(release, apk)
-                    val verify = ApkInstaller.verifyDownloadedApk(context, apk, release.sha256)
-                    verify to apk
-                }
-            }
-            setBusy(false)
-            outcome.onFailure { error ->
-                val message = error.message.orEmpty()
-                setStatus(
-                    if (message.contains("expired or invalid", ignoreCase = true)) {
-                        "Update token expired or invalid"
-                    } else if (message.contains("rate limit", ignoreCase = true)) {
-                        AppUpdateParse.RATE_LIMIT_MESSAGE
-                    } else {
-                        message.ifBlank { "Download failed" }
-                    },
-                )
-            }.onSuccess { (verify, apk) ->
-                if (!verify.ok) {
-                    setStatus(verify.message)
-                    if (verify.needsUninstall) {
-                        val saved = ApkInstaller.persistOutsideApp(context, apk, release.apkName)
-                        val url = release.browserDownloadUrl.ifBlank { null }
-                        setInstallHelpUrl(url)
-                        setInstallHelp(
-                            buildString {
-                                append(verify.message)
-                                if (saved != null) {
-                                    append(" The APK was also saved to ").append(saved)
-                                    append(" so it remains after uninstall.")
-                                }
-                                if (url != null) {
-                                    append(" You can also download ").append(url)
-                                    append(" after uninstall.")
-                                }
-                            },
-                        )
-                    }
-                    return@onSuccess
-                }
-                if (!ApkInstaller.canRequestInstalls(context)) {
-                    setInstallHelp("Allow Find It to install unknown apps, then tap Install again.")
-                    context.startActivity(ApkInstaller.unknownAppsSettingsIntent(context))
-                    return@onSuccess
-                }
-                setStatus("Launching system installer…")
-                context.startActivity(ApkInstaller.installIntent(context, apk))
+            try {
+                runDownload(release)
+            } catch (error: CancellationException) {
+                setStatus("Download cancelled. Tap to try again.")
+                throw error
+            } catch (error: Throwable) {
+                setStatus(downloadErrorMessage(error))
+            } finally {
+                setBusy(false)
+                setDownloading(false)
             }
         }
+    }
+
+    fun cancelDownload() {
+        downloadJob?.cancel()
+    }
+
+    private suspend fun runDownload(release: FinditRelease) {
+        val (verify, apk) = withContext(Dispatchers.IO) {
+            val job = coroutineContext[Job]
+            val apk = AppUpdateChecker.cacheApk(context)
+            var lastPercent = -1
+            var lastBytesReported = 0L
+            GitHubReleaseClient(
+                repo = BuildConfig.FINDIT_UPDATE_REPO.trim().ifBlank { "Strobingn/Find-It-App" },
+                token = BuildConfig.FINDIT_UPDATE_TOKEN.trim(),
+            ).downloadRelease(
+                release = release,
+                destination = apk,
+                onProgress = { done, total ->
+                    // Throttle UI updates: once per percent (or per MB when size is unknown).
+                    if (total > 0) {
+                        val percent = (done * 100 / total).toInt()
+                        if (percent != lastPercent) {
+                            lastPercent = percent
+                            setStatus(AppUpdateDownload.progressLabel(release.apkName, done, total))
+                        }
+                    } else if (done - lastBytesReported >= 1_048_576L || done == 0L) {
+                        lastBytesReported = done
+                        setStatus(AppUpdateDownload.progressLabel(release.apkName, done, total))
+                    }
+                },
+                isActive = { job?.isActive != false },
+            )
+            ensureActive()
+            setStatus("Verifying ${release.apkName}…")
+            ApkInstaller.verifyDownloadedApk(context, apk, release.sha256) to apk
+        }
+        if (!verify.ok) {
+            setStatus(verify.message)
+            if (verify.needsUninstall) {
+                // Copying the APK to Downloads is file IO: keep it off the main thread.
+                val saved = withContext(Dispatchers.IO) {
+                    ApkInstaller.persistOutsideApp(context, apk, release.apkName)
+                }
+                val url = release.browserDownloadUrl.ifBlank { null }
+                setInstallHelpUrl(url)
+                setInstallHelp(
+                    buildString {
+                        append(verify.message)
+                        if (saved != null) {
+                            append(" The APK was also saved to ").append(saved)
+                            append(" so it remains after uninstall.")
+                        }
+                        if (url != null) {
+                            append(" You can also download ").append(url)
+                            append(" after uninstall.")
+                        }
+                    },
+                )
+            }
+            return
+        }
+        if (!ApkInstaller.canRequestInstalls(context)) {
+            setInstallHelp("Allow Find It to install unknown apps, then tap Install again.")
+            runCatching { context.startActivity(ApkInstaller.unknownAppsSettingsIntent(context)) }
+            return
+        }
+        setStatus("Launching system installer…")
+        runCatching { context.startActivity(ApkInstaller.installIntent(context, apk)) }
+            .onFailure { error ->
+                setStatus("Could not open the installer: " + (error.message ?: error.javaClass.simpleName))
+            }
     }
 
     fun dismissNotes() = setShowNotes(false)
@@ -250,6 +290,12 @@ fun AppUpdateButtons(
                 modifier = Modifier.testTag("tool_install_update"),
             ) { Text("Download and install ${release.name}") }
         }
+        if (controller.downloading) {
+            TextButton(
+                onClick = { controller.cancelDownload() },
+                modifier = Modifier.testTag("tool_cancel_update_download"),
+            ) { Text("Cancel download") }
+        }
     }
 
     if (controller.showNotes && controller.available != null) {
@@ -306,3 +352,27 @@ fun shareBackupUri(context: Context, zip: File) =
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
+
+internal fun downloadErrorMessage(error: Throwable): String {
+    val message = error.message.orEmpty()
+    return when {
+        error is GitHubReleaseClient.DownloadCancelledException -> "Download cancelled. Tap to try again."
+        message.contains("expired or invalid", ignoreCase = true) -> "Update token expired or invalid"
+        message.contains("rate limit", ignoreCase = true) -> AppUpdateParse.RATE_LIMIT_MESSAGE
+        error is java.net.SocketTimeoutException || message.contains("timeout", ignoreCase = true) ->
+            "Download stalled (no data for ${GitHubReleaseClient.DOWNLOAD_STALL_TIMEOUT_S} s). Check your connection and try again."
+        else -> "Download failed: " + message.ifBlank { error.javaClass.simpleName }
+    }
+}
+
+object AppUpdateDownload {
+    fun progressLabel(apkName: String, downloaded: Long, total: Long): String {
+        val mb = downloaded / 1_048_576.0
+        return if (total > 0) {
+            val percent = (downloaded * 100 / total).toInt().coerceIn(0, 100)
+            String.format(java.util.Locale.US, "Downloading %s… %d%% (%.1f of %.1f MB)", apkName, percent, mb, total / 1_048_576.0)
+        } else {
+            String.format(java.util.Locale.US, "Downloading %s… %.1f MB", apkName, mb)
+        }
+    }
+}
