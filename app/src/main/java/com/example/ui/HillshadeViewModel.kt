@@ -129,10 +129,25 @@ internal fun chooseAiRefineResolution(
 /** How long a finished precise fix stays the device position while the user stays on it. */
 internal const val PRECISE_FIX_HOLD_MS = 120_000L
 private const val AUTO_REFINE_DEBOUNCE_MS = 450L
-private const val AUTO_REFINE_MIN_ZOOM = 2.2f
+internal const val AUTO_REFINE_MIN_ZOOM = 2.2f
 private const val FEATHER_CELLS = 6
 
 internal const val DEFAULT_VEGETATION_FILTER = 1f
+
+internal enum class AutoRefineAction { NONE, REFINE }
+
+/**
+ * Debounced auto-refine decision. A successful refine resets the canvas to zoom 1 over the new
+ * crop, so a low zoom while a detailed crop is shown is the normal refined state; it must never
+ * snap back to the whole-file overview (that silently discarded every refine ~450 ms after it
+ * landed). Returning to the overview is only done by the explicit "Show whole" action.
+ */
+internal fun autoRefineAction(zoom: Float, displayed: NormalizedRasterBounds): AutoRefineAction =
+    if (zoom < AUTO_REFINE_MIN_ZOOM || isEffectivelyWholeTerrain(displayed)) AutoRefineAction.NONE
+    else AutoRefineAction.REFINE
+
+/** A refined crop is displayed in place of the viewport, so the canvas must reset to zoom 1. */
+internal const val REFINE_RESETS_VIEWPORT = true
 
 internal fun isEffectivelyWholeTerrain(bounds: NormalizedRasterBounds): Boolean {
     val sanitized = bounds.sanitized()
@@ -1252,7 +1267,15 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                         "${options.rasterResolution} px detailed viewport loaded from the original point cloud."
                     }
                     val feathered = matchOverviewEdge(result, absoluteBounds)
-                    applyCustomTerrain(feathered, resetViewport = false)
+                    android.util.Log.i(
+                        "Refine",
+                        "bounds=$absoluteBounds cell ${_elevationGrid.value.cellSizeMeters} -> " +
+                            "${feathered.grid.cellSizeMeters} grid ${feathered.grid.width}x${feathered.grid.height} " +
+                            "cache=$loadedFromCache",
+                    )
+                    // The refined bitmap IS the previously visible crop; keeping the old zoom/pan
+                    // would magnify a sub-area of it (and re-trigger nested auto-refine).
+                    applyCustomTerrain(feathered, resetViewport = REFINE_RESETS_VIEWPORT)
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
                         message = "Refinement complete",
@@ -1690,16 +1713,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         autoRefineJob = viewModelScope.launch {
             kotlinx.coroutines.delay(AUTO_REFINE_DEBOUNCE_MS)
             if (!isActive) return@launch
-            val zoom = _viewportZoom.value
-            if (zoom < AUTO_REFINE_MIN_ZOOM) {
-                if (_isDetailedTerrain.value && currentSourceBounds != NormalizedRasterBounds.Full) {
-                    withContext(Dispatchers.Main.immediate) { showWholeTerrain() }
-                }
-                lastAutoRefineBounds = null
-                return@launch
-            }
             val displayed = _visibleViewportBounds.value.sanitized()
-            if (isEffectivelyWholeTerrain(displayed)) return@launch
+            if (autoRefineAction(_viewportZoom.value, displayed) == AutoRefineAction.NONE) return@launch
             val absolute = displayed.inside(currentSourceBounds)
             if (absolute == lastAutoRefineBounds) return@launch
             lastAutoRefineBounds = absolute
