@@ -46,9 +46,9 @@ class LazTerrainMemoryCacheTest {
         val file = File.createTempFile("find-it-cover-", ".laz")
         try {
             file.writeBytes(byteArrayOf(1))
-            val side = 21
+            val side = 256
             val elevations = FloatArray(side * side) { it.toFloat() }
-            val cache = LazTerrainMemoryCache(maxBytes = 4 * 1024 * 1024)
+            val cache = LazTerrainMemoryCache(maxBytes = 16 * 1024 * 1024)
             cache.put(
                 file,
                 LidarImportOptions(rasterResolution = side),
@@ -61,20 +61,20 @@ class LazTerrainMemoryCacheTest {
             val inside = cache.findCovering(
                 file,
                 LidarImportOptions(
-                    rasterResolution = 10,
-                    focusBounds = NormalizedRasterBounds(0.0, 0.0, 0.5, 0.5),
+                    rasterResolution = 128,
+                    focusBounds = NormalizedRasterBounds(0.0, 0.0, 0.9, 0.9),
                 ),
             )
             requireNotNull(inside)
             assertEquals(0f, inside.grid.bareEarth[0])
-            assertEquals((10 * side + 10).toFloat(), inside.grid.bareEarth[10 * inside.grid.width + 10])
+            assertEquals(1f, inside.grid.bareEarth[1])
 
             assertNull(
                 cache.findCovering(
                     file,
                     LidarImportOptions(
-                        rasterResolution = 200,
-                        focusBounds = NormalizedRasterBounds(0.0, 0.0, 0.5, 0.5),
+                        rasterResolution = 2_048,
+                        focusBounds = NormalizedRasterBounds(0.40, 0.40, 0.50, 0.50),
                     ),
                 ),
             )

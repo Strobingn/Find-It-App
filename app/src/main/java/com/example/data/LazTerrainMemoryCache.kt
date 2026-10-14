@@ -73,7 +73,8 @@ class LazTerrainMemoryCache(
             val parent = cachedKey.focusBounds ?: NormalizedRasterBounds.Full
             if (!contains(parent, want)) continue
             val parentSpan = max(parent.right - parent.left, parent.bottom - parent.top)
-            val parentCell = parentSpan / cachedKey.rasterResolution.coerceAtLeast(1)
+            val parentLong = max(entry.result.grid.width, entry.result.grid.height).coerceAtLeast(1)
+            val parentCell = parentSpan / parentLong
             val wantSpan = max(want.right - want.left, want.bottom - want.top)
             val wantCell = wantSpan / sanitized.rasterResolution.coerceAtLeast(1)
             if (parentCell > wantCell * 1.05) continue
