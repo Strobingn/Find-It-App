@@ -101,6 +101,7 @@ internal class HeightfieldGlRenderer {
     companion object {
         internal const val VERTEX="""#version 300 es
             precision highp float;
+            precision highp int;
             in vec2 aGrid;
             uniform highp sampler2D uHeight;
             uniform mat4 uMvp; uniform ivec2 uSize; uniform ivec2 uOrigin; uniform int uStep;
@@ -126,6 +127,7 @@ internal class HeightfieldGlRenderer {
         """
         internal const val FRAGMENT="""#version 300 es
             precision highp float;
+            precision highp int;
             uniform highp sampler2D uHeight; uniform ivec2 uSize; uniform int uStep;
             in vec2 vGrid; in float vLight; out vec4 color;
             bool bad(ivec2 p) { float z=texelFetch(uHeight,min(p,uSize-1),0).r; return isnan(z)||isinf(z); }
