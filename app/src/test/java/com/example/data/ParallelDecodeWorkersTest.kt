@@ -50,4 +50,24 @@ class ParallelDecodeMatchesSequentialTest {
         }
         assertEquals(hash(sequential), hash(parallel))
     }
+
+    @Test fun chunkIndexRefineEqualsSequentialInsideRectangle() {
+        val file = File("/workspace/lazdata/autzen-classified.laz")
+        assumeTrue("real LAZ not present", file.isFile)
+        // Full pass records the chunk index (sidecar + memory) used by every later refine.
+        LazTerrainReader.read(file, LidarImportOptions(rasterResolution = 512).sanitized())!!
+        val focus = NormalizedRasterBounds(0.31, 0.27, 0.58, 0.61)
+        val options = LidarImportOptions(rasterResolution = 1_024, focusBounds = focus).sanitized()
+        assertEquals(true, LazTerrainReader.indexedFocusPlan(file, options) != null)
+        val indexed = LazTerrainReader.read(file, options)!!
+        assertEquals(true, indexed.note.contains("chunk-index refine"))
+        val sequential = try {
+            LazTerrainReader.parallelDecodeEnabled = false
+            LazTerrainReader.read(file, options)!!
+        } finally {
+            LazTerrainReader.parallelDecodeEnabled = true
+        }
+        assertEquals(false, sequential.note.contains("chunk-index"))
+        assertEquals(hash(sequential), hash(indexed))
+    }
 }

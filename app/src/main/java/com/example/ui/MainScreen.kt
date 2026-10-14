@@ -489,6 +489,7 @@ private fun TerrainTab(
             viewportRestoreToken = vmViewportRestoreToken,
             onViewportChanged = { bounds, zoom, panX, panY ->
                 visibleBounds.value = bounds
+                viewModel.publishVisibleBounds(bounds)
                 zoomLevel.value = zoom
                 viewModel.updateViewport(zoom, panX, panY)
             },
