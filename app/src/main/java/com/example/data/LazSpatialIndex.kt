@@ -7,6 +7,8 @@ import com.github.mreutegg.laszip4j.laszip.LASquadtree
 import com.github.mreutegg.laszip4j.laszip.LASzip.LASZIP_DECOMPRESS_SELECTIVE_CHANNEL_RETURNS_XY
 import com.github.mreutegg.laszip4j.laszip.LasIndexWriter
 import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
@@ -84,7 +86,31 @@ internal object LazSpatialIndex {
     ): Boolean {
         if (exists(source)) return true
         if (!source.isFile) return false
+        val key = source.absolutePath
+        val created = CompletableFuture<Boolean>()
+        val inFlight = builds.putIfAbsent(key, created)
+        if (inFlight != null) {
+            return runCatching { inFlight.get() }.getOrDefault(exists(source))
+        }
+        return try {
+            val built = writeIndex(source, shouldContinue, onProgress)
+            created.complete(built)
+            built
+        } catch (failure: Throwable) {
+            created.complete(false)
+            System.err.println("Could not index ${source.name}: ${failure.message}")
+            false
+        } finally {
+            builds.remove(key, created)
+        }
+    }
 
+    private fun writeIndex(
+        source: File,
+        shouldContinue: () -> Boolean,
+        onProgress: (indexedPoints: Long, totalPoints: Long) -> Unit,
+    ): Boolean {
+        if (exists(source)) return true
         return runCatching {
             SeekableLaszipReader.open(source, LASZIP_DECOMPRESS_SELECTIVE_CHANNEL_RETURNS_XY)?.use { reader ->
                 buildFrom(reader, source, shouldContinue, onProgress)
@@ -153,6 +179,8 @@ internal object LazSpatialIndex {
     }
 
     private const val PROGRESS_INTERVAL = 1_000_000L
+
+    private val builds = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
 
     private val indexExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "laz-spatial-index").apply { isDaemon = true }

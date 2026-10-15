@@ -152,7 +152,10 @@ internal object LazTerrainReader {
         onProgress: ((decodedPoints: Long, totalPoints: Long) -> Unit)?,
         rethrowOom: Boolean,
     ): DemGenerator.LasLoadResult? {
-        if (LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
+        val focused = clampedOptions.focusBounds != null
+        // laz-rs unpacks the entire file into one buffer. That is fine for the first full
+        // render and wrong for Refine, which only needs the points inside the viewport.
+        if (!focused && LazDecoderSettings.resolve() == LazDecoderBackend.NATIVE_LAZ_RS) {
             val native = runCatching {
                 readNativePacked(file, clampedOptions, shouldContinue)
             }.onFailure { exception ->
@@ -161,13 +164,17 @@ internal object LazTerrainReader {
             if (native != null) return native
         }
 
-        val parallel = runCatching {
-            readParallelChunks(file, clampedOptions, shouldContinue, onProgress)
-        }.onFailure { exception ->
-            if (rethrowOom && exception is OutOfMemoryError) throw exception
-            System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
-        }.getOrNull()
-        if (parallel != null) return parallel
+        // A .lax index can seek past chunks outside the viewport. Without one, use every
+        // core. With one, the single indexed reader below is the smaller read.
+        if (!focused || !LazSpatialIndex.exists(file)) {
+            val parallel = runCatching {
+                readParallelChunks(file, clampedOptions, shouldContinue, onProgress)
+            }.onFailure { exception ->
+                if (rethrowOom && exception is OutOfMemoryError) throw exception
+                System.err.println("Parallel LAZ decode failed for ${file.name}: ${exception.message}")
+            }.getOrNull()
+            if (parallel != null) return parallel
+        }
 
         val optimized = runCatching {
             SeekableLaszipReader.open(file, TERRAIN_DECOMPRESS_FIELDS)?.use { reader ->
@@ -666,8 +673,6 @@ internal object LazTerrainReader {
         }
         if (pointCount <= 0L) return null
         val limited = densityLimitedOptions(header, options)
-        val focus = limited.focusBounds
-        if (focus != null) return null
         if (!parallelDecodeEnabled || pointCount < chunkSize.toLong() * 2L) return null
         val workers = AppMemoryBudget.decodeWorkers()
         if (workers == 1) return null
