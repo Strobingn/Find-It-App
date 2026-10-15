@@ -28,6 +28,18 @@ data class TerrainGpuLevel(
     val triangleCount: Int = batches.sumOf(TerrainGpuBatch::triangleCount)
 }
 
+/**
+ * Per-LOD resources for the ES 3.0 vertex-texture-fetch renderer (ARM geometry-clipmap
+ * pattern): each level owns an R32F heightmap texture plus the elevation window the
+ * vertex shader needs to reconstruct positions and normals entirely on the GPU.
+ */
+data class TerrainClipmapLevel(
+    val reductionFactor: Int,
+    val heightmap: HeightmapTexture,
+    val minElevation: Float,
+    val maxElevation: Float,
+)
+
 /** Immutable multi-LOD scene ready to upload to OpenGL vertex/index buffers. */
 data class TerrainGpuScene(
     val levels: List<TerrainGpuLevel>,
@@ -35,6 +47,8 @@ data class TerrainGpuScene(
     val sourceHeight: Int,
     val heightmap: HeightmapTexture? = null,
     val cdlodNodes: List<CdlodNode> = emptyList(),
+    /** One clipmap per [levels] entry; empty when the scene was built without a heightmap. */
+    val clipmaps: List<TerrainClipmapLevel> = emptyList(),
 ) {
     init {
         require(levels.isNotEmpty())
@@ -88,7 +102,7 @@ object TerrainGpuSceneBuilder {
             // extra scene RAM, and buffers that were never uploaded or drawn.
             maxLevels = 2,
         )
-        val levels = pyramid.levels.map { level ->
+        val built = pyramid.levels.map { level ->
             val index = TerrainSpatialGridIndex.build(level.grid, safeTileSize)
             val elevationBounds = elevationBounds(level.grid)
             var rendered = 0
@@ -134,14 +148,20 @@ object TerrainGpuSceneBuilder {
                 "GPU level ${level.grid.width}×${level.grid.height} tiles " +
                     "render=$rendered empty=$skippedEmpty noQuads=$skippedNoQuads",
             )
-            TerrainGpuLevel(
-                reductionFactor = level.reductionFactor,
-                gridWidth = level.grid.width,
-                gridHeight = level.grid.height,
-                batches = batches,
+            BuiltLevel(
+                level = TerrainGpuLevel(
+                    reductionFactor = level.reductionFactor,
+                    gridWidth = level.grid.width,
+                    gridHeight = level.grid.height,
+                    batches = batches,
+                ),
+                grid = level.grid,
+                minElevation = elevationBounds.first,
+                maxElevation = elevationBounds.second,
             )
-        }.filter { it.batches.isNotEmpty() }
+        }.filter { it.level.batches.isNotEmpty() }
 
+        val levels = built.map { it.level }
         require(levels.isNotEmpty()) { "Terrain contains no renderable cells" }
         val heightmap = if (attachHeightmap) HeightmapCdlod.pack(source) else null
         val nodes = if (heightmap != null) {
@@ -153,8 +173,38 @@ object TerrainGpuSceneBuilder {
         } else {
             emptyList()
         }
-        return TerrainGpuScene(levels, source.width, source.height, heightmap, nodes)
+        // One heightmap per LOD level for the ES 3.0 vertex-texture-fetch renderer. The ARM
+        // geometry-clipmap pattern backs each level with its own texture; the vertex shader
+        // reconstructs positions and normals from it, so no per-vertex buffers are uploaded.
+        val clipmaps = if (attachHeightmap) {
+            built.map { entry ->
+                TerrainClipmapLevel(
+                    reductionFactor = entry.level.reductionFactor,
+                    heightmap = HeightmapCdlod.pack(entry.grid),
+                    minElevation = entry.minElevation,
+                    maxElevation = entry.maxElevation,
+                )
+            }
+        } else {
+            emptyList()
+        }
+        return TerrainGpuScene(
+            levels = levels,
+            sourceWidth = source.width,
+            sourceHeight = source.height,
+            heightmap = heightmap,
+            cdlodNodes = nodes,
+            clipmaps = clipmaps,
+        )
     }
+
+    /** Builder-internal pairing of a GPU level with the grid it was built from. */
+    private data class BuiltLevel(
+        val level: TerrainGpuLevel,
+        val grid: ElevationGrid,
+        val minElevation: Float,
+        val maxElevation: Float,
+    )
 
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
         val bounds = elevationBounds(grid)
