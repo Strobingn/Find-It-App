@@ -130,6 +130,9 @@ class TerrainPhase2PerformanceTest {
             assertEquals(expected.grid.width, restored!!.grid.width)
             assertEquals(expected.grid.height, restored.grid.height)
             assertEquals(expected.summary, restored.summary)
+            assertTrue(expected.grid.bareEarth.contentEquals(restored.grid.bareEarth))
+            assertTrue(expected.grid.canopySpikes.contentEquals(restored.grid.canopySpikes))
+            assertTrue(expected.grid.validData.contentEquals(restored.grid.validData))
             assertTrue(cache.sizeBytes() > 0L)
 
             source.appendBytes(byteArrayOf(4))

@@ -1,3 +1,12 @@
+Lcom/example/data/LazTerrainReader;
+Lcom/example/data/LidarRasterizer;
+Lcom/example/data/BareEarthSurfaceBuilder;
+Lcom/example/data/ElevationGrid;
+Lcom/example/data/LazTerrainDiskCache;
+Lcom/example/data/LazRsNativeDecoder;
+Lcom/example/data/TerrainGpuScene;
+Lcom/example/data/TerrainGpuSceneBuilder;
+Lcom/example/data/TerrainFrustumCuller;
 HPLcom/example/data/ElevationGrid;->hornGradient$at([FLcom/example/data/ElevationGrid;II)F
 HPLcom/example/data/ElevationGrid;->hornGradient([FIIFF)Lcom/example/data/ElevationGrid$Gradient;
 HPLcom/example/data/ElevationGrid;->index(II)I

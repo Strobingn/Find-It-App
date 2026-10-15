@@ -8,6 +8,8 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
@@ -38,7 +40,7 @@ class LazTerrainDiskCache(
         return runCatching {
             DataInputStream(BufferedInputStream(FileInputStream(cacheFile), BUFFER_BYTES)).use { input ->
                 val magic = input.readUTF()
-                require(magic == MAGIC_V3 || magic == MAGIC_V2) { "Unsupported terrain cache entry" }
+                require(magic == MAGIC_V4 || magic == MAGIC_V3 || magic == MAGIC_V2) { "Unsupported terrain cache entry" }
                 val width = input.readInt()
                 val height = input.readInt()
                 val cells = width.toLong() * height.toLong()
@@ -46,9 +48,19 @@ class LazTerrainDiskCache(
                 val cellSize = input.readFloat()
                 val isBareEarth = input.readBoolean()
                 val summary = input.readUTF()
-                val bare = FloatArray(cells.toInt()) { input.readFloat() }
-                val canopy = FloatArray(cells.toInt()) { input.readFloat() }
-                val valid = BooleanArray(cells.toInt()) { input.readBoolean() }
+                val count = cells.toInt()
+                val bare: FloatArray
+                val canopy: FloatArray
+                val valid: BooleanArray
+                if (magic == MAGIC_V4) {
+                    bare = input.readFloatBlock(count)
+                    canopy = input.readFloatBlock(count)
+                    valid = input.readBitBlock(count)
+                } else {
+                    bare = FloatArray(count) { input.readFloat() }
+                    canopy = FloatArray(count) { input.readFloat() }
+                    valid = BooleanArray(count) { input.readBoolean() }
+                }
                 val geoMetadata = if (magic == MAGIC_V3) readGeoMetadata(input, width, height, cellSize) else null
                 DemGenerator.TerrainLoadResult(
                     grid = ElevationGrid(width, height, bare, canopy, cellSize, valid)
@@ -74,15 +86,15 @@ class LazTerrainDiskCache(
         partial.delete()
         runCatching {
             DataOutputStream(BufferedOutputStream(FileOutputStream(partial), BUFFER_BYTES)).use { output ->
-                output.writeUTF(MAGIC_V3)
+                output.writeUTF(MAGIC_V4)
                 output.writeInt(result.grid.width)
                 output.writeInt(result.grid.height)
                 output.writeFloat(result.grid.cellSizeMeters)
                 output.writeBoolean(result.isBareEarth)
                 output.writeUTF(result.summary.take(MAX_SUMMARY_CHARS))
-                result.grid.bareEarth.forEach(output::writeFloat)
-                result.grid.canopySpikes.forEach(output::writeFloat)
-                result.grid.validData.forEach(output::writeBoolean)
+                output.writeFloatBlock(result.grid.bareEarth)
+                output.writeFloatBlock(result.grid.canopySpikes)
+                output.writeBitBlock(result.grid.validData)
                 writeGeoMetadata(output, result.geoMetadata)
                 output.flush()
             }
@@ -225,13 +237,59 @@ class LazTerrainDiskCache(
     }
 
     companion object {
-        // V2: validData mask from full raster. V3: same + optional georeference metadata.
+        // V2: validData mask. V3: georeference. V4: same payload, bulk float blocks and a bit-packed mask.
         private const val MAGIC_V2 = "FINDIT_DEM_CACHE_V2"
         private const val MAGIC_V3 = "FINDIT_DEM_CACHE_V3"
+        private const val MAGIC_V4 = "FINDIT_DEM_CACHE_V4"
         private const val CACHE_EXTENSION = "fitdem"
         private const val BUFFER_BYTES = 256 * 1024
+        private const val FLOAT_CHUNK = 8_192
         private const val MAX_CELLS = 2_000_000L
         private const val MAX_SUMMARY_CHARS = 16_000
+
+        private fun DataOutputStream.writeFloatBlock(values: FloatArray) {
+            val raw = ByteArray(FLOAT_CHUNK * 4)
+            val buffer = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN)
+            var index = 0
+            while (index < values.size) {
+                val count = minOf(FLOAT_CHUNK, values.size - index)
+                buffer.clear()
+                buffer.asFloatBuffer().put(values, index, count)
+                write(raw, 0, count * 4)
+                index += count
+            }
+        }
+
+        private fun DataInputStream.readFloatBlock(count: Int): FloatArray {
+            val out = FloatArray(count)
+            val raw = ByteArray(FLOAT_CHUNK * 4)
+            var index = 0
+            while (index < count) {
+                val n = minOf(FLOAT_CHUNK, count - index)
+                readFully(raw, 0, n * 4)
+                ByteBuffer.wrap(raw, 0, n * 4).order(ByteOrder.BIG_ENDIAN).asFloatBuffer().get(out, index, n)
+                index += n
+            }
+            return out
+        }
+
+        private fun DataOutputStream.writeBitBlock(values: BooleanArray) {
+            val packed = ByteArray((values.size + 7) / 8)
+            for (index in values.indices) {
+                if (!values[index]) continue
+                val byteIndex = index ushr 3
+                packed[byteIndex] = (packed[byteIndex].toInt() or (1 shl (index and 7))).toByte()
+            }
+            write(packed)
+        }
+
+        private fun DataInputStream.readBitBlock(count: Int): BooleanArray {
+            val packed = ByteArray((count + 7) / 8)
+            readFully(packed)
+            return BooleanArray(count) { index ->
+                (packed[index ushr 3].toInt() shr (index and 7)) and 1 == 1
+            }
+        }
     }
 }
 

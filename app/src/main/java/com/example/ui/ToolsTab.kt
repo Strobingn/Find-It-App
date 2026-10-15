@@ -687,9 +687,9 @@ fun ToolsTab(
                 status = decoderBenchStatus
                     ?: "laszip4j vs laz-rs on the same file · native=${LazRsNativeDecoder.isAvailable} · prefer=${LazDecoderSettings.preferred}",
                 statusActive = decoderBenchStatus != null,
-                description = "Times laszip4j and laz-rs on the same file (JNI direct buffer, " +
-                    "parallel chunk decompression). Default stays laszip4j until native wins " +
-                    "on this phone. " + TerrainMemoryMonitor.snapshot().format(),
+                description = "Times laszip4j and laz-rs on the same file. The phone uses laz-rs " +
+                    "when that library is in the APK, and falls back to laszip4j otherwise. " +
+                    TerrainMemoryMonitor.snapshot().format(),
             ) {
                 TextButton(
                     onClick = { decoderPicker.launch(arrayOf("*/*")) },

@@ -156,6 +156,7 @@ private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
 
 private class TerrainGlRenderer : GLSurfaceView.Renderer {
     private data class GlBatch(
+        val vaoId: Int,
         val vertexBufferId: Int,
         val indexBufferId: Int,
         val indexCount: Int,
@@ -268,6 +269,16 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         val strideBytes = TerrainGpuBatch.FLOATS_PER_VERTEX * Float.SIZE_BYTES
         for (batch in batches) {
             if (!TerrainFrustumCuller.isVisible(batch.aabb, planes)) continue
+            if (batch.vaoId != 0) {
+                GLES30.glBindVertexArray(batch.vaoId)
+                GLES30.glDrawElements(
+                    GLES30.GL_TRIANGLES,
+                    batch.indexCount,
+                    if (batch.usesIntIndices) GLES30.GL_UNSIGNED_INT else GLES30.GL_UNSIGNED_SHORT,
+                    0,
+                )
+                continue
+            }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, batch.vertexBufferId)
             GLES20.glEnableVertexAttribArray(positionAttribute)
             GLES20.glVertexAttribPointer(positionAttribute, 3, GLES20.GL_FLOAT, false, strideBytes, 0)
@@ -288,6 +299,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
                 0,
             )
         }
+        GLES30.glBindVertexArray(0)
         GLES20.glDisableVertexAttribArray(positionAttribute)
         GLES20.glDisableVertexAttribArray(normalAttribute)
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
@@ -299,8 +311,13 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         for (batch in level.batches) {
             val ids = IntArray(2)
             GLES20.glGenBuffers(2, ids, 0)
+            val vaos = IntArray(1)
+            GLES30.glGenVertexArrays(1, vaos, 0)
+            val vaoId = vaos[0]
+            if (vaoId != 0) GLES30.glBindVertexArray(vaoId)
 
             val vertexBytes = batch.vertices.size * Float.SIZE_BYTES
+            val strideBytes = TerrainGpuBatch.FLOATS_PER_VERTEX * Float.SIZE_BYTES
             val vertexBuffer = reusableFloatStaging(vertexBytes)
             vertexBuffer.asFloatBuffer().apply {
                 clear()
@@ -342,7 +359,22 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
                 indexBuffer,
                 GLES20.GL_STATIC_DRAW,
             )
+            if (vaoId != 0) {
+                GLES20.glEnableVertexAttribArray(positionAttribute)
+                GLES20.glVertexAttribPointer(positionAttribute, 3, GLES20.GL_FLOAT, false, strideBytes, 0)
+                GLES20.glEnableVertexAttribArray(normalAttribute)
+                GLES20.glVertexAttribPointer(
+                    normalAttribute,
+                    3,
+                    GLES20.GL_FLOAT,
+                    false,
+                    strideBytes,
+                    3 * Float.SIZE_BYTES,
+                )
+                GLES30.glBindVertexArray(0)
+            }
             uploaded += GlBatch(
+                vaoId = vaoId,
                 vertexBufferId = ids[0],
                 indexBufferId = ids[1],
                 indexCount = intIdx?.size ?: batch.indices.size,
@@ -383,6 +415,10 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         val ids = uploadedLevels.values.flatten().flatMap { listOf(it.vertexBufferId, it.indexBufferId) }
         if (ids.isNotEmpty()) {
             GLES20.glDeleteBuffers(ids.size, ids.toIntArray(), 0)
+        }
+        val vaos = uploadedLevels.values.flatten().map { it.vaoId }.filter { it != 0 }
+        if (vaos.isNotEmpty()) {
+            GLES30.glDeleteVertexArrays(vaos.size, vaos.toIntArray(), 0)
         }
         uploadedLevels.clear()
         activeBatches = emptyList()

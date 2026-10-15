@@ -41,6 +41,7 @@
         android:usesCleartextTraffic="false"
         android:theme="@style/Theme.FindIt"
         tools:targetApi="36">
+        <profileable android:shell="true" />
 
         <uses-library
             android:name="org.apache.http.legacy"

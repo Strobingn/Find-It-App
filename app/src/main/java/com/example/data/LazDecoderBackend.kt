@@ -3,9 +3,9 @@ package com.example.data
 import android.content.Context
 
 /**
- * LAZ decode backend. Default stays laszip4j until the owner compares both on the same file
- * (Tools → Decoder benchmark). Native laz-rs (parallel chunk decompression via JNI direct
- * buffers) is used only when the .so is present **and** the preference is NATIVE_LAZ_RS.
+ * LAZ decode backend. When the APK includes liblazrs_jni.so and the user has not
+ * picked a backend, native laz-rs (parallel chunk decompression) is used. laszip4j
+ * stays the fallback when the .so is missing or the user selects it in Tools.
  */
 enum class LazDecoderBackend {
     LASZIP4J,
@@ -21,8 +21,12 @@ object LazDecoderSettings {
 
     fun load(context: Context) {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        preferred = runCatching { LazDecoderBackend.valueOf(raw ?: "") }
-            .getOrDefault(LazDecoderBackend.LASZIP4J)
+        preferred = if (raw == null) {
+            // No explicit choice yet: use the native parallel decoder when the APK shipped it.
+            if (LazRsNativeDecoder.isAvailable) LazDecoderBackend.NATIVE_LAZ_RS else LazDecoderBackend.LASZIP4J
+        } else {
+            runCatching { LazDecoderBackend.valueOf(raw) }.getOrDefault(LazDecoderBackend.LASZIP4J)
+        }
     }
 
     fun persist(context: Context, backend: LazDecoderBackend) {

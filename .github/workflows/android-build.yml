@@ -175,6 +175,28 @@ jobs:
           fi
           touch .env
 
+      - name: Install Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Build laz-rs native decoder
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          # laz-rs parallel chunk decoder. PDAL is not linked: its LAS reader is laszip,
+          # and this crate is the JNI path the app already calls.
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          source "$HOME/.cargo/env"
+          test -d "$ANDROID_NDK_HOME"
+          cargo install cargo-ndk --version 3.5.4
+          cd native/lazrs-jni
+          cargo ndk -t arm64-v8a -o ../../app/src/main/jniLibs build --release
+          test -s ../../app/src/main/jniLibs/arm64-v8a/liblazrs_jni.so
+
       - name: Build signed release APK
         env:
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
