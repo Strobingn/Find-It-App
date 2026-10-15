@@ -1,11 +1,8 @@
 package com.example.data
 
-import kotlin.math.abs
 import kotlin.math.ceil
-import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -28,10 +25,6 @@ data class TerrainCoverageDiagnostics(
     val interpolatedCells: Int,
     val hullCells: Int,
     val countHistogram: IntArray,
-    val tilesTriangulated: Int,
-    val trianglesKept: Int,
-    val trianglesKilledByEdge: Int,
-    val tilesIdwFilled: Int,
 )
 
 data class BareEarthInterpolationResult(
@@ -55,9 +48,10 @@ fun LidarImportOptions.withDensityLimitedResolution(
     pointCount: Long,
     cellToSpacing: Double = DEFAULT_CELL_TO_SPACING,
 ): LidarImportOptions {
+    val sanitized = sanitized()
     val recommended = recommendedRasterResolution(rangeX, rangeY, pointCount, cellToSpacing)
-        ?: return sanitized()
-    val capped = min(sanitized().rasterResolution, recommended)
+        ?: return sanitized
+    val capped = min(sanitized.rasterResolution, recommended)
     return copy(rasterResolution = capped).sanitized()
 }
 
@@ -123,8 +117,9 @@ internal fun pointCountHistogram(counts: IntArray): IntArray {
 }
 
 /**
- * Ground points (min-Z cell samples) → per-tile buffered Delaunay TIN → raster with a max-edge
- * kill → bounded IDW for leftover pinholes. True voids outside the data hull stay NaN.
+ * Ground points → round morphological-closing data hull (voids narrower than [VOID_MAX_EDGE]
+ * are interior) → smooth harmonic multigrid fill of the hull voids. True voids outside the
+ * data hull stay NaN.
  */
 internal fun interpolateBareEarth(
     measuredElevations: FloatArray,
@@ -151,10 +146,6 @@ internal fun interpolateBareEarth(
     // hull is a morphological closing, so nothing is extruded outside the real footprint.
     val maxEdgeCells = voidMaxEdgeCells(cellSizeMeters)
     val hull = buildDataHull(valid, width, height, maxEdgeCells)
-    val tilesTriangulated = 0
-    val trianglesKept = 0
-    val trianglesKilled = 0
-    val tilesIdw = 0
     fillVoidsSmooth(elevations, valid, interpolated, hull, width, height)
 
     var interpolatedCells = 0
@@ -187,10 +178,6 @@ internal fun interpolateBareEarth(
         interpolatedCells = interpolatedCells,
         hullCells = hullCells,
         countHistogram = histogram,
-        tilesTriangulated = tilesTriangulated,
-        trianglesKept = trianglesKept,
-        trianglesKilledByEdge = trianglesKilled,
-        tilesIdwFilled = tilesIdw,
     )
     TerrainCoverageLog.last = diagnostics
     logCoverageDiagnostics(diagnostics)
@@ -220,7 +207,7 @@ internal fun emptyShareInsideHull(grid: ElevationGrid): Float {
 }
 
 /**
- * Re-runs the TIN/IDW fill when a cached or preview grid is still holey inside the data hull.
+ * Re-runs the hull/harmonic fill when a cached or preview grid is still holey inside the data hull.
  * Already-continuous rasters are returned unchanged.
  */
 internal fun ElevationGrid.ensureBareEarthCoverage(): ElevationGrid {
@@ -265,10 +252,6 @@ internal fun logCoverageDiagnostics(diagnostics: TerrainCoverageDiagnostics) {
         append(" · interpolated ").append(diagnostics.interpolatedCells)
         append(" · hist[0,1,2-3,4-7,8+]=")
         append(histogram.joinToString(","))
-        append(" · tinTiles ").append(diagnostics.tilesTriangulated)
-        append(" · triKept ").append(diagnostics.trianglesKept)
-        append(" · triKilled ").append(diagnostics.trianglesKilledByEdge)
-        append(" · idwTiles ").append(diagnostics.tilesIdwFilled)
         if (diagnostics.emptyCellPercent > 30f) {
             append(" · WARN empty>30% (cell too small or points lost)")
         }
@@ -288,18 +271,6 @@ internal object TerrainCoverageLog {
 
 internal const val DEFAULT_CELL_TO_SPACING = 1.75
 internal const val CONTINUOUS_HULL_EMPTY_SHARE = 0.05f
-private const val TIN_TILE_CELLS = 32
-private const val TIN_BUFFER_METERS = 25.0
-private const val MAX_TRIANGLE_EDGE_METERS = 15.0
-private const val MIN_TRIANGLE_EDGE_METERS = 10.0
-private const val HOLE_FILL_RADIUS_CELLS = 8
-private const val MAX_TIN_VERTICES_PER_TILE = 800
-
-internal fun maxEdgeMeters(cellSizeMeters: Float, meanSpacingMeters: Float): Float {
-    val fromSpacing = (meanSpacingMeters * 3f).coerceAtLeast(MIN_TRIANGLE_EDGE_METERS.toFloat())
-    val fromCell = cellSizeMeters * 4f
-    return max(fromSpacing, fromCell).coerceAtMost(MAX_TRIANGLE_EDGE_METERS.toFloat())
-}
 
 /** blast2dem's default `-kill 100`: voids narrower than this (source units) are interpolated. */
 internal const val VOID_MAX_EDGE = 100.0
@@ -319,6 +290,9 @@ internal fun buildDataHull(
     height: Int,
     radiusCells: Float,
 ): BooleanArray {
+    // Dense data is the common refine case: the hull is the whole raster, and skipping the
+    // dilations avoids up to 2 x radius full-raster passes (radius reaches 128 on fine crops).
+    if (measured.all { it }) return measured.copyOf()
     val radius = ceil(radiusCells / 2.0).toInt().coerceIn(1, (MAX_VOID_EDGE_CELLS / 2).toInt())
     val dilated = dilateMask(measured, width, height, radius)
     val outside = BooleanArray(dilated.size) { !dilated[it] }
@@ -440,6 +414,7 @@ private fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: In
     var next = BooleanArray(source.size)
     for (step in 0 until radius) {
         val square = step % 2 == 0
+        var misses = 0
         for (y in 0 until height) {
             val row = y * width
             for (x in 0 until width) {
@@ -451,10 +426,13 @@ private fun dilateMask(source: BooleanArray, width: Int, height: Int, radius: In
                     hit = (y > 0 && ((x > 0 && cur[i - width - 1]) || (x < width - 1 && cur[i - width + 1]))) ||
                         (y < height - 1 && ((x > 0 && cur[i + width - 1]) || (x < width - 1 && cur[i + width + 1])))
                 }
+                if (!hit) misses++
                 next[i] = hit
             }
         }
         val t = cur; cur = next; next = t
+        // Saturated: remaining steps cannot add cells, so stop instead of rescanning the raster.
+        if (misses == 0) break
     }
     return cur
 }
