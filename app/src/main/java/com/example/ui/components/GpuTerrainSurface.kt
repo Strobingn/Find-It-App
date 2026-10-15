@@ -11,6 +11,8 @@ import android.view.ScaleGestureDetector
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.data.HeightmapTexture
+import com.example.data.TerrainClipmapLevel
 import com.example.data.TerrainFrustumCuller
 import com.example.data.TerrainGpuBatch
 import com.example.data.TerrainGpuLevel
@@ -156,18 +158,31 @@ private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
 
 private class TerrainGlRenderer : GLSurfaceView.Renderer {
     private data class GlBatch(
+        /** Zero in the clipmap path: the vertex shader reconstructs vertices from the heightmap. */
         val vertexBufferId: Int,
         val indexBufferId: Int,
         val indexCount: Int,
         val aabb: TerrainFrustumCuller.Aabb,
         val usesIntIndices: Boolean,
+        val tileOriginX: Int,
+        val tileOriginY: Int,
+        val tileStride: Int,
     )
 
     private var program = 0
     private var positionAttribute = -1
     private var normalAttribute = -1
     private var mvpUniform = -1
+    private var vtfProgram = 0
+    private var vtfMvpUniform = -1
+    private var vtfHeightmapUniform = -1
+    private var vtfGridSizeUniform = -1
+    private var vtfTileUniform = -1
+    private var vtfMinElevationUniform = -1
+    private var vtfElevRangeUniform = -1
+    private var vtfCellSizeUniform = -1
     private val uploadedLevels = HashMap<Int, List<GlBatch>>()
+    private val uploadedClipmapTextures = HashMap<Int, Int>()
     private var activeBatches: List<GlBatch> = emptyList()
     private var scene: TerrainGpuScene? = null
     private var stagingVertices: ByteBuffer? = null
@@ -234,12 +249,28 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         positionAttribute = GLES20.glGetAttribLocation(program, "aPosition")
         normalAttribute = GLES20.glGetAttribLocation(program, "aNormal")
         mvpUniform = GLES20.glGetUniformLocation(program, "uMvp")
+        vtfProgram = runCatching { createProgram(VTF_VERTEX_SHADER, VTF_FRAGMENT_SHADER) }
+            .getOrElse { error ->
+                com.example.data.TerrainStageProfiler.emit("VTF terrain program failed: ${error.message}")
+                0
+            }
+        if (vtfProgram != 0) {
+            vtfMvpUniform = GLES20.glGetUniformLocation(vtfProgram, "uMvp")
+            vtfHeightmapUniform = GLES20.glGetUniformLocation(vtfProgram, "uHeightmap")
+            vtfGridSizeUniform = GLES20.glGetUniformLocation(vtfProgram, "uGridSize")
+            vtfTileUniform = GLES20.glGetUniformLocation(vtfProgram, "uTile")
+            vtfMinElevationUniform = GLES20.glGetUniformLocation(vtfProgram, "uMinElevation")
+            vtfElevRangeUniform = GLES20.glGetUniformLocation(vtfProgram, "uElevRange")
+            vtfCellSizeUniform = GLES20.glGetUniformLocation(vtfProgram, "uCellSize")
+        }
         uploadedLevels.clear()
+        uploadedClipmapTextures.clear()
         activeBatches = emptyList()
         val version = runCatching { GLES20.glGetString(GLES20.GL_VERSION) }.getOrNull().orEmpty()
         val compute = version.contains("3.1") || version.contains("3.2")
         com.example.data.TerrainStageProfiler.emit(
-            "GL $version · compute=${if (compute) "available" else "cpu-fallback"} · ES3 heightmap/CDLOD ready",
+            "GL $version · compute=${if (compute) "available" else "cpu-fallback"} · " +
+                "vtf-terrain=${if (vtfProgram != 0) "enabled" else "cpu-batches-fallback"}",
         )
         com.example.data.TerrainMemoryMonitor.snapshot().let {
             com.example.data.TerrainStageProfiler.emit(it.format())
@@ -256,7 +287,66 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         val activeScene = scene ?: return
         val level = activeScene.selectForZoom(zoom)
-        val batches = uploadedLevels[level.reductionFactor] ?: upload(level)
+        val clipmap = if (vtfProgram != 0) {
+            activeScene.clipmaps.firstOrNull {
+                it.reductionFactor == level.reductionFactor &&
+                    it.heightmap.width == level.gridWidth &&
+                    it.heightmap.height == level.gridHeight
+            }
+        } else {
+            null
+        }
+        if (clipmap != null) {
+            drawClipmapLevel(level, clipmap)
+        } else {
+            drawCpuBatches(level)
+        }
+    }
+
+    /**
+     * ARM geometry-clipmap path: the heightmap is sampled in the vertex shader, so no
+     * per-vertex buffers exist on the GPU. The per-tile index buffers and per-batch
+     * frustum culling are shared with the CPU path.
+     */
+    private fun drawClipmapLevel(level: TerrainGpuLevel, clipmap: TerrainClipmapLevel) {
+        val tiles = uploadedLevels[level.reductionFactor] ?: upload(level, uploadVertexBuffers = false)
+        if (tiles.isEmpty()) return
+        activeBatches = tiles
+        val textureId = uploadedClipmapTextures[level.reductionFactor]
+            ?: uploadHeightmap(clipmap.heightmap).also {
+                uploadedClipmapTextures[level.reductionFactor] = it
+            }
+
+        GLES20.glUseProgram(vtfProgram)
+        buildMvpMatrix()
+        GLES20.glUniformMatrix4fv(vtfMvpUniform, 1, false, mvpMatrix, 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glUniform1i(vtfHeightmapUniform, 0)
+        GLES20.glUniform2i(vtfGridSizeUniform, level.gridWidth, level.gridHeight)
+        val elevationRange = (clipmap.maxElevation - clipmap.minElevation).takeIf { it > 0f } ?: 1f
+        GLES20.glUniform1f(vtfMinElevationUniform, clipmap.minElevation)
+        GLES20.glUniform1f(vtfElevRangeUniform, elevationRange)
+        GLES20.glUniform1f(vtfCellSizeUniform, clipmap.heightmap.cellSizeMeters)
+        val planes = TerrainFrustumCuller.extractPlanes(mvpMatrix)
+
+        for (tile in tiles) {
+            if (!TerrainFrustumCuller.isVisible(tile.aabb, planes)) continue
+            GLES20.glUniform3i(vtfTileUniform, tile.tileOriginX, tile.tileOriginY, tile.tileStride)
+            GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, tile.indexBufferId)
+            GLES20.glDrawElements(
+                GLES20.GL_TRIANGLES,
+                tile.indexCount,
+                if (tile.usesIntIndices) GLES30.GL_UNSIGNED_INT else GLES20.GL_UNSIGNED_SHORT,
+                0,
+            )
+        }
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+    }
+
+    private fun drawCpuBatches(level: TerrainGpuLevel) {
+        val batches = uploadedLevels[level.reductionFactor] ?: upload(level, uploadVertexBuffers = true)
         if (batches.isEmpty()) return
         activeBatches = batches
 
@@ -294,28 +384,34 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
     }
 
-    private fun upload(level: TerrainGpuLevel): List<GlBatch> {
+    private fun upload(level: TerrainGpuLevel, uploadVertexBuffers: Boolean): List<GlBatch> {
         val uploaded = ArrayList<GlBatch>(level.batches.size)
         for (batch in level.batches) {
             val ids = IntArray(2)
-            GLES20.glGenBuffers(2, ids, 0)
-
-            val vertexBytes = batch.vertices.size * Float.SIZE_BYTES
-            val vertexBuffer = reusableFloatStaging(vertexBytes)
-            vertexBuffer.asFloatBuffer().apply {
-                clear()
-                put(batch.vertices)
-                position(0)
+            GLES20.glGenBuffers(if (uploadVertexBuffers) 2 else 1, ids, 0)
+            val vertexBufferId: Int
+            if (uploadVertexBuffers) {
+                val vertexBytes = batch.vertices.size * Float.SIZE_BYTES
+                val vertexBuffer = reusableFloatStaging(vertexBytes)
+                vertexBuffer.asFloatBuffer().apply {
+                    clear()
+                    put(batch.vertices)
+                    position(0)
+                }
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, ids[0])
+                GLES20.glBufferData(
+                    GLES20.GL_ARRAY_BUFFER,
+                    vertexBytes,
+                    vertexBuffer,
+                    GLES20.GL_STATIC_DRAW,
+                )
+                vertexBufferId = ids[0]
+            } else {
+                vertexBufferId = 0
             }
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, ids[0])
-            GLES20.glBufferData(
-                GLES20.GL_ARRAY_BUFFER,
-                vertexBytes,
-                vertexBuffer,
-                GLES20.GL_STATIC_DRAW,
-            )
 
             val intIdx = batch.intIndices
+            val indexBufferId = if (uploadVertexBuffers) ids[1] else ids[0]
             val indexBytes: Int
             val indexBuffer: java.nio.ByteBuffer
             if (intIdx != null) {
@@ -335,7 +431,7 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
                     position(0)
                 }
             }
-            GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ids[1])
+            GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, indexBufferId)
             GLES20.glBufferData(
                 GLES20.GL_ELEMENT_ARRAY_BUFFER,
                 indexBytes,
@@ -343,17 +439,53 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
                 GLES20.GL_STATIC_DRAW,
             )
             uploaded += GlBatch(
-                vertexBufferId = ids[0],
-                indexBufferId = ids[1],
+                vertexBufferId = vertexBufferId,
+                indexBufferId = indexBufferId,
                 indexCount = intIdx?.size ?: batch.indices.size,
                 aabb = TerrainFrustumCuller.tileAabb(batch.tile, level.gridWidth, level.gridHeight),
                 usesIntIndices = intIdx != null,
+                tileOriginX = batch.tile.startX,
+                tileOriginY = batch.tile.startY,
+                tileStride = batch.tile.endXInclusive - batch.tile.startX + 1,
             )
         }
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
         uploadedLevels[level.reductionFactor] = uploaded
         return uploaded
+    }
+
+    /**
+     * Uploads one R32F clipmap heightmap with NEAREST filtering and CLAMP_TO_EDGE wrapping;
+     * the vertex shader texelFetches exact texels, so no filtering is ever required.
+     */
+    private fun uploadHeightmap(heightmap: HeightmapTexture): Int {
+        val ids = IntArray(1)
+        GLES30.glGenTextures(1, ids, 0)
+        GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+        GLES30.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+        GLES30.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+        GLES30.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        val staging = reusableFloatStaging(heightmap.floats.size * Float.SIZE_BYTES)
+        staging.asFloatBuffer().apply {
+            clear()
+            put(heightmap.floats)
+            position(0)
+        }
+        GLES30.glTexImage2D(
+            GLES20.GL_TEXTURE_2D,
+            0,
+            GLES30.GL_R32F,
+            heightmap.width,
+            heightmap.height,
+            0,
+            GLES30.GL_RED,
+            GLES20.GL_FLOAT,
+            staging,
+        )
+        GLES30.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        return ids[0]
     }
 
     private fun reusableFloatStaging(bytes: Int): ByteBuffer {
@@ -379,12 +511,23 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
     }
 
     private fun deleteAllLevels() {
-        if (uploadedLevels.isEmpty()) return
-        val ids = uploadedLevels.values.flatten().flatMap { listOf(it.vertexBufferId, it.indexBufferId) }
-        if (ids.isNotEmpty()) {
-            GLES20.glDeleteBuffers(ids.size, ids.toIntArray(), 0)
+        if (uploadedLevels.isEmpty() && uploadedClipmapTextures.isEmpty()) return
+        val bufferIds = uploadedLevels.values.flatten().flatMap { batch ->
+            if (batch.vertexBufferId != 0) {
+                listOf(batch.vertexBufferId, batch.indexBufferId)
+            } else {
+                listOf(batch.indexBufferId)
+            }
+        }
+        if (bufferIds.isNotEmpty()) {
+            GLES20.glDeleteBuffers(bufferIds.size, bufferIds.toIntArray(), 0)
         }
         uploadedLevels.clear()
+        val textureIds = uploadedClipmapTextures.values.toIntArray()
+        if (textureIds.isNotEmpty()) {
+            GLES20.glDeleteTextures(textureIds.size, textureIds, 0)
+        }
+        uploadedClipmapTextures.clear()
         activeBatches = emptyList()
     }
 
@@ -478,6 +621,82 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
                     ? mix(low, middle, vHeight / 0.55)
                     : mix(middle, high, (vHeight - 0.55) / 0.45);
                 gl_FragColor = vec4(base * vLight, 1.0);
+            }
+        """
+
+        /**
+         * ES 3.00 vertex-texture-fetch terrain: the vertex shader reconstructs position and
+         * normal from the clipmap heightmap (ARM geometry-clipmap pattern). texelFetch with
+         * NEAREST keeps every value identical to the CPU-built batch path, and gl_VertexID
+         * carries the tile-local vertex index from the index buffer, so no vertex buffer is
+         * ever bound. Neighbors clamp at the grid edges and no-data neighbors fall back to
+         * the center elevation, matching TerrainGpuSceneBuilder.writeNormal.
+         */
+        private const val VTF_VERTEX_SHADER = """
+            #version 300 es
+            uniform mat4 uMvp;
+            uniform sampler2D uHeightmap;
+            uniform ivec2 uGridSize;
+            uniform ivec3 uTile;
+            uniform float uMinElevation;
+            uniform float uElevRange;
+            uniform float uCellSize;
+            out float vLight;
+            out float vHeight;
+            float texel(ivec2 p) {
+                ivec2 c = clamp(p, ivec2(0), uGridSize - 1);
+                return texelFetch(uHeightmap, c, 0).r;
+            }
+            void main() {
+                int stride = uTile.z;
+                int localY = gl_VertexID / stride;
+                int localX = gl_VertexID - localY * stride;
+                int gx = uTile.x + localX;
+                int gy = uTile.y + localY;
+                float z = texelFetch(uHeightmap, ivec2(gx, gy), 0).r;
+                if (isnan(z)) {
+                    // No-data texels never belong to a drawn quad: quads with an invalid
+                    // corner are skipped in the index buffer. This only collapses strays.
+                    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+                    vLight = 0.0;
+                    vHeight = 0.0;
+                    return;
+                }
+                float px = uGridSize.x > 1 ? float(gx) / float(uGridSize.x - 1) * 2.0 - 1.0 : 0.0;
+                float py = uGridSize.y > 1 ? 1.0 - float(gy) / float(uGridSize.y - 1) * 2.0 : 0.0;
+                float pz = ((z - uMinElevation) / uElevRange - 0.5) * 0.75;
+                float zl = texel(ivec2(gx - 1, gy));
+                float zr = texel(ivec2(gx + 1, gy));
+                float zu = texel(ivec2(gx, gy - 1));
+                float zd = texel(ivec2(gx, gy + 1));
+                zl = isnan(zl) ? z : zl;
+                zr = isnan(zr) ? z : zr;
+                zu = isnan(zu) ? z : zu;
+                zd = isnan(zd) ? z : zd;
+                float dx = (zr - zl) / max(2.0 * uCellSize, 0.001);
+                float dy = (zd - zu) / max(2.0 * uCellSize, 0.001);
+                vec3 normal = normalize(vec3(-dx, dy, 1.0));
+                vec3 lightDirection = normalize(vec3(-0.45, -0.65, 0.8));
+                vLight = 0.28 + 0.72 * max(dot(normal, lightDirection), 0.0);
+                vHeight = clamp(pz / 0.75 + 0.5, 0.0, 1.0);
+                gl_Position = uMvp * vec4(px, py, pz, 1.0);
+            }
+        """
+
+        private const val VTF_FRAGMENT_SHADER = """
+            #version 300 es
+            precision highp float;
+            in float vLight;
+            in float vHeight;
+            out vec4 fragColor;
+            void main() {
+                vec3 low = vec3(0.20, 0.16, 0.10);
+                vec3 middle = vec3(0.35, 0.43, 0.25);
+                vec3 high = vec3(0.72, 0.70, 0.62);
+                vec3 base = vHeight < 0.55
+                    ? mix(low, middle, vHeight / 0.55)
+                    : mix(middle, high, (vHeight - 0.55) / 0.45);
+                fragColor = vec4(base * vLight, 1.0);
             }
         """
     }

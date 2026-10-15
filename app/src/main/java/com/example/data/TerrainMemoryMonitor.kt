@@ -46,6 +46,10 @@ object TerrainMemoryMonitor {
                 bytes += batch.intIndices?.size?.toLong()?.times(4L) ?: 0L
             }
         }
+        // Clipmap R32F heightmaps occupy texture memory in the VTF renderer path.
+        for (clipmap in scene.clipmaps) {
+            bytes += clipmap.heightmap.floats.size.toLong() * 4L
+        }
         lastGpuBytes = bytes
         lastDemCells = scene.sourceWidth * scene.sourceHeight
     }
