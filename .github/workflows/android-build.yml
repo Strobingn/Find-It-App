@@ -192,6 +192,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
           source "$HOME/.cargo/env"
           test -d "$ANDROID_NDK_HOME"
+          rustup target add aarch64-linux-android
           cargo install cargo-ndk --version 3.5.4
           cd native/lazrs-jni
           cargo ndk -t arm64-v8a -o ../../app/src/main/jniLibs build --release
