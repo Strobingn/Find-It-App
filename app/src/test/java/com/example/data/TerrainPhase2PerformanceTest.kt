@@ -85,6 +85,24 @@ class TerrainPhase2PerformanceTest {
     }
 
     @Test
+    fun gpuSceneBuildsOnlyLevelsTheRendererCanSelect() {
+        // The renderer clamps zoom to [0.75, 8] (GpuTerrainSurface), so selectForZoom can only
+        // ever return the finest level (zoom >= 1) or the factor-2 level (zoom in [0.75, 1)).
+        // The scene must not pay mesh-build time and RAM for deeper levels.
+        val scene = TerrainGpuSceneBuilder.build(
+            source = sampleGrid(1_024, 768),
+            maxFinestDimension = 1_024,
+            tileSize = TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE,
+        )
+
+        assertTrue(scene.levels.size <= 2)
+        assertEquals(1, scene.levels.first().reductionFactor)
+        assertEquals(2, scene.levels.last().reductionFactor)
+        assertEquals(scene.levels.last(), scene.selectForZoom(0.75f))
+        assertEquals(scene.levels.first(), scene.selectForZoom(8f))
+    }
+
+    @Test
     fun twoTierCacheMakesNewTerrainAvailableFromMemoryImmediately() {
         val root = Files.createTempDirectory("findit-async-cache").toFile()
         try {

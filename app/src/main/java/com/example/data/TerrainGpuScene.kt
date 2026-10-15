@@ -82,7 +82,11 @@ object TerrainGpuSceneBuilder {
             source = source,
             maxFinestDimension = maxFinestDimension,
             minDimension = 64,
-            maxLevels = 4,
+            // The renderer clamps zoom to [0.75, 8] (GpuTerrainSurface), so selectForZoom can
+            // only ever return the finest level (zoom >= 1) or the factor-2 level (zoom in
+            // [0.75, 1)). Building factor-4/8 levels was pure waste: extra mesh-build CPU,
+            // extra scene RAM, and buffers that were never uploaded or drawn.
+            maxLevels = 2,
         )
         val levels = pyramid.levels.map { level ->
             val index = TerrainSpatialGridIndex.build(level.grid, safeTileSize)

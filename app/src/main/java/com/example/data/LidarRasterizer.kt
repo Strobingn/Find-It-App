@@ -50,6 +50,7 @@ internal class LidarRasterizer(
     minY: Double,
     maxY: Double,
     options: LidarImportOptions,
+    /** Retained for call-site compatibility; not read since full-detail binning replaced estimates. */
     declaredPointCount: Long,
     maxBinnedPoints: Double = MAX_BINNED_POINTS,
     lasVersionMajor: Int = 1,
@@ -90,9 +91,6 @@ internal class LidarRasterizer(
     private val allCount: IntArray
     private val coverageCount: IntArray
     private val classHistogram = IntArray(256)
-    private val estimatedPointsInFocus = declaredPointCount.coerceAtLeast(1L).toDouble() *
-        ((focus?.right ?: 1.0) - (focus?.left ?: 0.0)) *
-        ((focus?.bottom ?: 1.0) - (focus?.top ?: 0.0))
     private val lasVersionMajor: Int
     private val lasVersionMinor: Int
     private val pointFormat: Int
@@ -102,7 +100,6 @@ internal class LidarRasterizer(
     var pointsBinned: Int = 0
         private set
     private var groundPointsBinned: Int = 0
-    private var elevationCellsPopulated: Int = 0
     /** Set when a reader stops before the declared point count (cancel, I/O, or early exit). */
     var truncatedByReader: Boolean = false
 
@@ -185,7 +182,6 @@ internal class LidarRasterizer(
             allLowBandCount[index]++
         }
         if (z > allMax[index]) allMax[index] = z
-        if (allCount[index] == 0) elevationCellsPopulated++
         allCount[index]++
         pointsBinned++
 
@@ -280,7 +276,7 @@ internal class LidarRasterizer(
         } else {
             pointsBinned
         }
-        // Ground samples → per-tile buffered Delaunay TIN → max-edge kill → bounded hole fill.
+        // Ground samples → closing-hull coverage → smooth harmonic void fill.
         // True voids outside the data hull stay NaN and are never shown as measured ground.
         val filled = interpolateBareEarth(
             measuredElevations = surface,
@@ -336,11 +332,6 @@ internal class LidarRasterizer(
         val validData = filled.validData
         val interpolatedData = filled.interpolatedData
         val groundSamplesPerCell = if (populatedCells > 0) {
-            val groundSamples = if (appliedMode == GroundSurfaceMode.SOURCE_CLASSIFIED) {
-                groundPointsBinned
-            } else {
-                pointsBinned
-            }
             groundSamples.toFloat() / populatedCells
         } else {
             0f
@@ -515,7 +506,6 @@ internal class LidarRasterizer(
                     allSecondMin[index] = other.allMin[index]
                 }
                 if (other.allMax[index] > allMax[index]) allMax[index] = other.allMax[index]
-                if (allCount[index] == 0) elevationCellsPopulated++
                 allCount[index] += other.allCount[index]
                 allLowBandCount[index] = allLowBandCount[index] + other.allLowBandCount[index]
             }
