@@ -49,10 +49,10 @@ class GitHubReleaseClientTimeoutTest {
         val result = AppUpdateChecker.check(installedVersionCode = 1_000_000, client = client)
         assertTrue(result is UpdateCheckResult.Available)
         val release = (result as UpdateCheckResult.Available).release
-        assertEquals("findit-v1000678", release.tag)
+        assertEquals("findit-grok-v1000678", release.tag)
         assertEquals(1_000_678, release.versionCode)
         assertEquals("findit-1000678.apk", release.apkName)
-        assertEquals("com.aistudio.lidardetector.pkrxtz", release.applicationId)
+        assertEquals("com.grok.findit", release.applicationId)
         assertTrue(auth.all { it == null })
         assertEquals(1, auth.size) // short page ends pagination
     }

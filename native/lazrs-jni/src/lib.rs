@@ -1,229 +1,569 @@
-use jni::objects::{JByteBuffer, JClass, JDoubleArray, JString};
-use jni::sys::{jboolean, jint, JNI_TRUE};
-use jni::JNIEnv;
-use las::{Read as LasRead, Reader};
-use laz::{LazVlr, ParLasZipDecompressor};
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
-use std::path::Path;
+//! Streaming laz-rs decoder for Find-It terrain.
+//!
+//! Kotlin opens a [Session] for one file, then starts a decode over an explicit list of
+//! compressed chunk indices (all chunks for a full pass, or the [LazChunkIndex] selection for a
+//! viewport refine). Each rayon worker owns its own `LasZipDecompressor` and seeks chunk by chunk
+//! through the LAZ chunk table, decompresses into a reusable scratch buffer, applies exactly the
+//! laszip4j filter rule (half-open rect `min <= v < max`, global point stride) and packs the kept
+//! returns into a pooled output buffer. Kotlin pulls chunks strictly in slot order as direct
+//! ByteBuffers (no copy), bins them, then releases the slot so its buffer is reused. At most
+//! `window` chunks are in flight, so memory is O(workers × chunk), never O(file).
+//!
+//! Packed record (24 bytes, little endian): f64 x, f64 y, f32 z, u8 classification (raw LAS
+//! byte, as laszip4j reports it), u8 flags (bit0 key-point, bit1 withheld), u16 pad.
+//!
+//! Every entry point catches panics and reports failure, so Kotlin can fall back to laszip4j.
 
-/// Packed record: f32 dx, f32 dy, f32 dz relative to origin, u8 class, u8 flags, u16 pad.
-const RECORD_BYTES: usize = 16;
-/// Decompress this many LAS records at a time so a large cloud never sits fully in RAM.
-const CHUNK_POINTS: usize = 50_000;
+use jni::objects::{JClass, JDoubleArray, JIntArray, JLongArray, JObject, JString};
+use jni::sys::{jboolean, jint, jlong, jobject, JNI_FALSE, JNI_TRUE};
+use jni::JNIEnv;
+use las::Read as _;
+use laz::{DecompressionSelection, LasZipDecompressor, LazVlr};
+use std::fs::File;
+use std::io::{BufReader, Seek, SeekFrom};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+pub const RECORD_BYTES: usize = 24;
 const LASZIP_USER_ID: &str = "laszip encoded";
 const LASZIP_RECORD_ID: u16 = 22204;
 
-#[no_mangle]
-pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeAvailable(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jboolean {
-    JNI_TRUE
+/// Header facts the decoder needs; parsed once per session.
+#[derive(Clone)]
+pub struct FileInfo {
+    pub path: String,
+    pub vlr_bytes: Vec<u8>,
+    pub point_offset: u64,
+    pub record_len: usize,
+    pub point_format: u8,
+    pub point_count: u64,
+    pub chunk_size: u64,
+    pub scale: [f64; 3],
+    pub offset: [f64; 3],
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeDecode<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    path: JString<'local>,
-    destination: JByteBuffer<'local>,
-    origins: JDoubleArray<'local>,
-) -> jint {
-    let path: String = match env.get_string(&path) {
-        Ok(s) => s.into(),
-        Err(_) => return -1,
-    };
-    match decode_file(Path::new(&path), &mut env, destination, &origins) {
-        Ok(count) => count as jint,
-        Err(_) => -1,
-    }
-}
-
-fn decode_file(
-    path: &Path,
-    env: &mut JNIEnv,
-    destination: JByteBuffer,
-    origins: &JDoubleArray,
-) -> Result<usize, ()> {
-    let addr = env.get_direct_buffer_address(&destination).map_err(|_| ())?;
-    let cap = env.get_direct_buffer_capacity(&destination).map_err(|_| ())?;
-    let out = unsafe { std::slice::from_raw_parts_mut(addr, cap) };
-
-    if let Ok(count) = decode_laz_parallel(path, env, out, origins) {
-        return Ok(count);
-    }
-    decode_with_las_reader(path, env, out, origins)
-}
-
-fn write_origins(env: &mut JNIEnv, origins: &JDoubleArray, x: f64, y: f64, z: f64) {
-    let _ = env.set_double_array_region(origins, 0, &[x, y, z]);
-}
-
-fn is_cancelled(env: &mut JNIEnv) -> bool {
-    let class = match env.find_class("com/example/data/LazRsNativeDecoder") {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    match env.call_static_method(class, "isCancelled", "()Z", &[]) {
-        Ok(value) => value.z().unwrap_or(false),
-        Err(_) => {
-            let _ = env.exception_clear();
-            false
-        }
-    }
-}
-
-/// Parallel per-chunk LAZ decompression. Packs each chunk immediately so the
-/// decompressed LAS record buffer never holds the whole cloud.
-fn decode_laz_parallel(
-    path: &Path,
-    env: &mut JNIEnv,
-    out: &mut [u8],
-    origins: &JDoubleArray,
-) -> Result<usize, ()> {
-    let reader = Reader::from_path(path).map_err(|_| ())?;
+pub fn open_info(path: &str) -> Result<FileInfo, String> {
+    let reader = las::Reader::from_path(path).map_err(|e| e.to_string())?;
     let header = reader.header();
     let vlr_bytes = header
         .vlrs()
         .iter()
         .chain(header.evlrs())
-        .find(|vlr| vlr.user_id == LASZIP_USER_ID && vlr.record_id == LASZIP_RECORD_ID)
-        .map(|vlr| vlr.data.clone())
-        .ok_or(())?;
-    let laz_vlr = LazVlr::from_buffer(&vlr_bytes).map_err(|_| ())?;
-    let point_count = header.number_of_points() as usize;
-    let transforms = header.transforms();
-    let bounds = header.bounds();
-    let raw = header.clone().into_raw().map_err(|_| ())?;
+        .find(|v| v.user_id == LASZIP_USER_ID && v.record_id == LASZIP_RECORD_ID)
+        .map(|v| v.data.clone())
+        .ok_or("no laszip vlr")?;
+    let vlr = LazVlr::from_buffer(&vlr_bytes).map_err(|e| e.to_string())?;
+    if vlr.uses_variable_size_chunks() {
+        return Err("variable-size chunks not supported".into());
+    }
+    let t = header.transforms();
+    let point_count = header.number_of_points();
+    let raw = header.clone().into_raw().map_err(|e| e.to_string())?;
     let record_len = raw.point_data_record_length as usize;
-    if point_count == 0 || record_len < 15 {
-        return Err(());
-    }
     let point_format = raw.point_data_record_format & 0x3F;
-    let origin_x = bounds.min.x;
-    let origin_y = bounds.min.y;
-    let origin_z = bounds.min.z;
-    write_origins(env, origins, origin_x, origin_y, origin_z);
+    let min_len = if point_format >= 6 { 17 } else { 16 };
+    if record_len < min_len || vlr.items_size() as usize != record_len {
+        return Err("unexpected record layout".into());
+    }
+    Ok(FileInfo {
+        path: path.to_string(),
+        vlr_bytes,
+        point_offset: u64::from(raw.offset_to_point_data),
+        record_len,
+        point_format,
+        point_count,
+        chunk_size: u64::from(vlr.chunk_size()),
+        scale: [t.x.scale, t.y.scale, t.z.scale],
+        offset: [t.x.offset, t.y.offset, t.z.offset],
+    })
+}
 
-    let mut source = File::open(path).map_err(|_| ())?;
-    source
-        .seek(SeekFrom::Start(u64::from(raw.offset_to_point_data)))
-        .map_err(|_| ())?;
-    let mut decompressor = ParLasZipDecompressor::new(source, laz_vlr).map_err(|_| ())?;
-    let chunk_bytes = CHUNK_POINTS.saturating_mul(record_len);
-    let mut scratch = vec![0u8; chunk_bytes];
-    let mut remaining = point_count;
-    let mut written = 0usize;
-    while remaining > 0 {
-        if is_cancelled(env) {
-            break;
+/// Filter + options shared by all workers of one decode.
+#[derive(Clone)]
+pub struct Plan {
+    pub chunks: Vec<u32>,
+    pub rect: Option<[f64; 4]>,
+    pub stride: u64,
+}
+
+pub struct ChunkOut {
+    pub data: Vec<u8>,
+    pub kept: usize,
+    pub raw: usize,
+}
+
+enum Slot {
+    Pending,
+    Ready(ChunkOut),
+    Failed(String),
+    Taken,
+}
+
+struct State {
+    slots: Vec<Slot>,
+    next_claim: usize,
+    released: usize,
+    pool: Vec<Vec<u8>>,
+    active_workers: usize,
+}
+
+pub struct Decode {
+    state: Mutex<State>,
+    ready: Condvar,
+    cancel: AtomicBool,
+    window: usize,
+}
+
+impl Decode {
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.ready.notify_all();
+    }
+
+    /// Blocks up to `timeout` for `slot`. Ok(None) = not ready yet.
+    pub fn take(&self, slot: usize, timeout: Duration) -> Result<Option<ChunkOut>, String> {
+        let mut st = self.state.lock().map_err(|_| "poisoned")?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if slot >= st.slots.len() {
+                return Err("slot out of range".into());
+            }
+            match std::mem::replace(&mut st.slots[slot], Slot::Taken) {
+                Slot::Ready(out) => return Ok(Some(out)),
+                Slot::Failed(e) => return Err(e),
+                Slot::Taken => return Err("slot already taken".into()),
+                Slot::Pending => st.slots[slot] = Slot::Pending,
+            }
+            if st.active_workers == 0 {
+                return Err("workers stopped before slot was decoded".into());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            st = self.ready.wait_timeout(st, deadline - now).map_err(|_| "poisoned")?.0;
         }
-        let n = remaining.min(CHUNK_POINTS);
-        let bytes = n * record_len;
-        decompressor
-            .decompress_many(&mut scratch[..bytes])
-            .map_err(|_| ())?;
-        written += pack_raw_records(
-            &scratch[..bytes],
-            record_len,
-            point_format,
-            transforms.x.scale,
-            transforms.y.scale,
-            transforms.z.scale,
-            transforms.x.offset,
-            transforms.y.offset,
-            transforms.z.offset,
-            origin_x,
-            origin_y,
-            origin_z,
-            &mut out[written * RECORD_BYTES..],
+    }
+
+    /// Returns a consumed buffer to the pool and opens the window for one more chunk.
+    pub fn release(&self, buffer: Vec<u8>) {
+        if let Ok(mut st) = self.state.lock() {
+            st.released += 1;
+            st.pool.push(buffer);
+        }
+        self.ready.notify_all();
+    }
+
+    fn wait_and_claim(&self) -> Option<(usize, Vec<u8>)> {
+        let mut st = self.state.lock().ok()?;
+        loop {
+            if self.cancel.load(Ordering::SeqCst) || st.next_claim >= st.slots.len() {
+                return None;
+            }
+            if st.next_claim - st.released < self.window {
+                let slot = st.next_claim;
+                st.next_claim += 1;
+                let buf = st.pool.pop().unwrap_or_default();
+                return Some((slot, buf));
+            }
+            st = self.ready.wait(st).ok()?;
+        }
+    }
+
+    fn publish(&self, slot: usize, value: Slot) {
+        if let Ok(mut st) = self.state.lock() {
+            st.slots[slot] = value;
+        }
+        self.ready.notify_all();
+    }
+
+    fn worker_exit(&self) {
+        if let Ok(mut st) = self.state.lock() {
+            st.active_workers -= 1;
+        }
+        self.ready.notify_all();
+    }
+
+    /// Waits until every worker has left (after cancel or completion).
+    pub fn join(&self) {
+        if let Ok(mut st) = self.state.lock() {
+            while st.active_workers > 0 {
+                match self.ready.wait(st) {
+                    Ok(g) => st = g,
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+}
+
+struct Worker {
+    decompressor: LasZipDecompressor<'static, BufReader<File>>,
+    scratch: Vec<u8>,
+}
+
+impl Worker {
+    fn new(info: &FileInfo) -> Result<Self, String> {
+        let vlr = LazVlr::from_buffer(&info.vlr_bytes).map_err(|e| e.to_string())?;
+        let mut file = BufReader::with_capacity(256 * 1024, File::open(&info.path).map_err(|e| e.to_string())?);
+        file.seek(SeekFrom::Start(info.point_offset)).map_err(|e| e.to_string())?;
+        let selection = DecompressionSelection(
+            DecompressionSelection::Z | DecompressionSelection::CLASSIFICATION | DecompressionSelection::FLAGS,
         );
-        remaining -= n;
+        let decompressor = LasZipDecompressor::selective(file, vlr, selection).map_err(|e| e.to_string())?;
+        Ok(Self { decompressor, scratch: Vec::new() })
     }
-    Ok(written)
+
+    fn decode_chunk(&mut self, info: &FileInfo, plan: &Plan, chunk: u64, mut out: Vec<u8>) -> Result<ChunkOut, String> {
+        let first = chunk * info.chunk_size;
+        if first >= info.point_count {
+            return Err(format!("chunk {chunk} past end"));
+        }
+        let n = (info.point_count - first).min(info.chunk_size) as usize;
+        self.decompressor.seek(first).map_err(|e| e.to_string())?;
+        let bytes = n * info.record_len;
+        if self.scratch.len() < bytes {
+            self.scratch.resize(bytes, 0);
+        }
+        self.decompressor
+            .decompress_many(&mut self.scratch[..bytes])
+            .map_err(|e| e.to_string())?;
+        out.clear();
+        let kept = pack(info, plan, first, &self.scratch[..bytes], &mut out);
+        Ok(ChunkOut { data: out, kept, raw: n })
+    }
 }
 
-fn decode_with_las_reader(
-    path: &Path,
-    env: &mut JNIEnv,
-    out: &mut [u8],
-    origins: &JDoubleArray,
-) -> Result<usize, ()> {
-    let mut reader = Reader::from_path(path).map_err(|_| ())?;
-    let bounds = reader.header().bounds();
-    let origin_x = bounds.min.x;
-    let origin_y = bounds.min.y;
-    let origin_z = bounds.min.z;
-    write_origins(env, origins, origin_x, origin_y, origin_z);
-    let mut written = 0usize;
-    for (index, next) in reader.points().enumerate() {
-        if index % CHUNK_POINTS == 0 && is_cancelled(env) {
-            break;
+/// Same rule as laszip4j's chunk decoder: rect first (half-open), then global stride.
+pub fn pack(info: &FileInfo, plan: &Plan, first: u64, raw: &[u8], out: &mut Vec<u8>) -> usize {
+    let rl = info.record_len;
+    let ext = info.point_format >= 6;
+    let [sx, sy, sz] = info.scale;
+    let [ox, oy, oz] = info.offset;
+    let mut kept = 0usize;
+    for (i, rec) in raw.chunks_exact(rl).enumerate() {
+        let x = i32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as f64 * sx + ox;
+        let y = i32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]) as f64 * sy + oy;
+        if let Some(r) = plan.rect {
+            if x < r[0] || x >= r[2] || y < r[1] || y >= r[3] {
+                continue;
+            }
         }
-        let point = next.map_err(|_| ())?;
-        let start = written * RECORD_BYTES;
-        if start + RECORD_BYTES > out.len() {
-            break;
+        if plan.stride > 1 && (first + i as u64) % plan.stride != 0 {
+            continue;
         }
-        let dest = &mut out[start..start + RECORD_BYTES];
-        dest[0..4].copy_from_slice(&((point.x - origin_x) as f32).to_le_bytes());
-        dest[4..8].copy_from_slice(&((point.y - origin_y) as f32).to_le_bytes());
-        dest[8..12].copy_from_slice(&((point.z - origin_z) as f32).to_le_bytes());
-        dest[12] = u8::from(point.classification);
-        dest[13] = if point.is_key_point { 1 } else { 0 };
-        dest[14] = 0;
-        dest[15] = 0;
-        written += 1;
-    }
-    Ok(written)
-}
-
-fn pack_raw_records(
-    raw: &[u8],
-    record_len: usize,
-    point_format: u8,
-    scale_x: f64,
-    scale_y: f64,
-    scale_z: f64,
-    offset_x: f64,
-    offset_y: f64,
-    offset_z: f64,
-    origin_x: f64,
-    origin_y: f64,
-    origin_z: f64,
-    out: &mut [u8],
-) -> usize {
-    let class_at = if point_format >= 6 { 16 } else { 15 };
-    let mut written = 0usize;
-    let mut offset = 0usize;
-    while offset + record_len <= raw.len() {
-        let start = written * RECORD_BYTES;
-        if start + RECORD_BYTES > out.len() {
-            break;
-        }
-        let rec = &raw[offset..offset + record_len];
-        if rec.len() < class_at + 1 {
-            break;
-        }
-        let x = i32::from_le_bytes(rec[0..4].try_into().unwrap()) as f64 * scale_x + offset_x;
-        let y = i32::from_le_bytes(rec[4..8].try_into().unwrap()) as f64 * scale_y + offset_y;
-        let z = i32::from_le_bytes(rec[8..12].try_into().unwrap()) as f64 * scale_z + offset_z;
-        let (class, key) = if point_format >= 6 {
-            (rec[16], rec[15] & 0x02 != 0)
+        let z = (i32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]) as f64 * sz + oz) as f32;
+        let (class, key, held) = if ext {
+            (rec[16], rec[15] & 0x02 != 0, rec[15] & 0x04 != 0)
         } else {
-            (rec[15] & 0x1F, rec[15] & 0x40 != 0)
+            (rec[15], rec[15] & 0x40 != 0, rec[15] & 0x80 != 0)
         };
-        let dest = &mut out[start..start + RECORD_BYTES];
-        dest[0..4].copy_from_slice(&((x - origin_x) as f32).to_le_bytes());
-        dest[4..8].copy_from_slice(&((y - origin_y) as f32).to_le_bytes());
-        dest[8..12].copy_from_slice(&((z - origin_z) as f32).to_le_bytes());
-        dest[12] = class;
-        dest[13] = if key { 1 } else { 0 };
-        dest[14] = 0;
-        dest[15] = 0;
-        written += 1;
-        offset += record_len;
+        out.extend_from_slice(&x.to_le_bytes());
+        out.extend_from_slice(&y.to_le_bytes());
+        out.extend_from_slice(&z.to_le_bytes());
+        out.push(class);
+        out.push(u8::from(key) | (u8::from(held) << 1));
+        out.extend_from_slice(&[0, 0]);
+        kept += 1;
     }
-    written
+    kept
+}
+
+/// Starts `workers` rayon tasks, each owning one decompressor, over `plan.chunks`.
+pub fn start(info: Arc<FileInfo>, plan: Plan, workers: usize) -> Result<Arc<Decode>, String> {
+    let workers = workers.clamp(1, 16).min(plan.chunks.len().max(1));
+    let decode = Arc::new(Decode {
+        state: Mutex::new(State {
+            slots: (0..plan.chunks.len()).map(|_| Slot::Pending).collect(),
+            next_claim: 0,
+            released: 0,
+            pool: Vec::new(),
+            active_workers: workers,
+        }),
+        ready: Condvar::new(),
+        cancel: AtomicBool::new(false),
+        window: workers * 2,
+    });
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|i| format!("lazrs-{i}"))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let plan = Arc::new(plan);
+    for _ in 0..workers {
+        let (d, info, plan) = (decode.clone(), info.clone(), plan.clone());
+        pool.spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| run_worker(&d, &info, &plan)));
+            if result.is_err() {
+                d.cancel();
+                if let Ok(mut st) = d.state.lock() {
+                    for s in st.slots.iter_mut() {
+                        if matches!(s, Slot::Pending) {
+                            *s = Slot::Failed("native worker panicked".into());
+                        }
+                    }
+                }
+            }
+            d.worker_exit();
+        });
+    }
+    // Dropping the handle lets the pool threads exit once the spawned loops return.
+    drop(pool);
+    Ok(decode)
+}
+
+fn run_worker(d: &Decode, info: &FileInfo, plan: &Plan) {
+    let mut worker = match Worker::new(info) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            if let Some((slot, _)) = d.wait_and_claim() {
+                d.publish(slot, Slot::Failed(e));
+            }
+            d.cancel();
+            None
+        }
+    };
+    while let Some((slot, buf)) = d.wait_and_claim() {
+        let w = match worker.as_mut() {
+            Some(w) => w,
+            None => break,
+        };
+        let value = match w.decode_chunk(info, plan, u64::from(plan.chunks[slot]), buf) {
+            Ok(out) => Slot::Ready(out),
+            Err(e) => {
+                // A failed seek/decode leaves the decompressor in an unknown state; reopen.
+                worker = Worker::new(info).ok();
+                Slot::Failed(e)
+            }
+        };
+        d.publish(slot, value);
+    }
+}
+
+// ---------------------------------------------------------------- JNI
+
+struct Session {
+    info: Arc<FileInfo>,
+    decode: Option<Arc<Decode>>,
+    /// Chunks handed to Kotlin but not yet released, by slot.
+    lent: std::collections::HashMap<usize, Vec<u8>>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(d) = self.decode.take() {
+            d.cancel();
+            d.join();
+        }
+    }
+}
+
+fn guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or(fallback)
+}
+
+unsafe fn session<'a>(handle: jlong) -> Option<&'a mut Session> {
+    (handle as *mut Session).as_mut()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeAvailable(_env: JNIEnv, _c: JClass) -> jboolean {
+    JNI_TRUE
+}
+
+/// Returns a session handle (0 on failure). `header` receives
+/// `[pointCount, chunkSize, pointFormat, recordLength]`.
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeOpen<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    path: JString<'l>,
+    header: JLongArray<'l>,
+) -> jlong {
+    guard(0, || {
+        let path: String = match env.get_string(&path) {
+            Ok(s) => s.into(),
+            Err(_) => return 0,
+        };
+        let info = match open_info(&path) {
+            Ok(i) => i,
+            Err(_) => return 0,
+        };
+        let facts = [info.point_count as i64, info.chunk_size as i64, info.point_format as i64, info.record_len as i64];
+        if env.set_long_array_region(&header, 0, &facts).is_err() {
+            return 0;
+        }
+        Box::into_raw(Box::new(Session { info: Arc::new(info), decode: None, lent: Default::default() })) as jlong
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeStart<'l>(
+    env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    handle: jlong,
+    chunks: JIntArray<'l>,
+    rect: JDoubleArray<'l>,
+    stride: jint,
+    workers: jint,
+) -> jboolean {
+    guard(JNI_FALSE, || {
+        let s = match unsafe { session(handle) } {
+            Some(s) if s.decode.is_none() => s,
+            _ => return JNI_FALSE,
+        };
+        let n = match env.get_array_length(&chunks) {
+            Ok(n) => n as usize,
+            Err(_) => return JNI_FALSE,
+        };
+        let mut ids = vec![0i32; n];
+        if env.get_int_array_region(&chunks, 0, &mut ids).is_err() {
+            return JNI_FALSE;
+        }
+        let total_chunks = s.info.point_count.div_ceil(s.info.chunk_size.max(1));
+        if ids.iter().any(|&c| c < 0 || c as u64 >= total_chunks) {
+            return JNI_FALSE;
+        }
+        let rect = if rect.is_null() {
+            None
+        } else {
+            let mut r = [0f64; 4];
+            if env.get_double_array_region(&rect, 0, &mut r).is_err() {
+                return JNI_FALSE;
+            }
+            Some(r)
+        };
+        let plan = Plan { chunks: ids.into_iter().map(|c| c as u32).collect(), rect, stride: stride.max(1) as u64 };
+        match start(s.info.clone(), plan, workers.max(1) as usize) {
+            Ok(d) => {
+                s.decode = Some(d);
+                JNI_TRUE
+            }
+            Err(_) => JNI_FALSE,
+        }
+    })
+}
+
+/// Waits up to `timeoutMs` for `slot`. Returns a direct ByteBuffer over the packed records and
+/// writes `[kept, raw]` into `counts`; null with counts[0] = -2 on timeout, -1 on error.
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeNext<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    handle: jlong,
+    slot: jint,
+    counts: JLongArray<'l>,
+    timeout_ms: jint,
+) -> jobject {
+    let null = JObject::null().into_raw();
+    let status = guard(Err(-1i64), || {
+        let s = unsafe { session(handle) }.ok_or(-1i64)?;
+        let d = s.decode.clone().ok_or(-1i64)?;
+        match d.take(slot as usize, Duration::from_millis(timeout_ms.max(0) as u64)) {
+            Ok(None) => Err(-2),
+            Err(_) => Err(-1),
+            Ok(Some(mut out)) => {
+                if out.data.capacity() == 0 {
+                    out.data.reserve(RECORD_BYTES);
+                }
+                let ptr = out.data.as_mut_ptr();
+                let len = out.kept * RECORD_BYTES;
+                let (kept, raw) = (out.kept as i64, out.raw as i64);
+                s.lent.insert(slot as usize, out.data);
+                Ok((ptr, len.max(0), kept, raw))
+            }
+        }
+    });
+    match status {
+        Ok((ptr, len, kept, raw)) => {
+            let buffer = unsafe { env.new_direct_byte_buffer(ptr, len) };
+            match buffer {
+                Ok(b) if len > 0 => {
+                    let _ = env.set_long_array_region(&counts, 0, &[kept, raw]);
+                    b.into_raw()
+                }
+                _ if len == 0 => {
+                    // Empty chunk (all filtered): hand back a zero-length heap-free marker.
+                    let _ = env.exception_clear();
+                    let _ = env.set_long_array_region(&counts, 0, &[0, raw]);
+                    match unsafe { env.new_direct_byte_buffer(ptr, 0) } {
+                        Ok(b) => b.into_raw(),
+                        Err(_) => {
+                            let _ = env.exception_clear();
+                            null
+                        }
+                    }
+                }
+                _ => {
+                    let _ = env.exception_clear();
+                    let _ = env.set_long_array_region(&counts, 0, &[-1, 0]);
+                    null
+                }
+            }
+        }
+        Err(code) => {
+            let _ = env.set_long_array_region(&counts, 0, &[code, 0]);
+            null
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeRelease(_env: JNIEnv, _c: JClass, handle: jlong, slot: jint) {
+    guard((), || {
+        if let Some(s) = unsafe { session(handle) } {
+            if let (Some(buf), Some(d)) = (s.lent.remove(&(slot as usize)), s.decode.as_ref()) {
+                d.release(buf);
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeCancel(_env: JNIEnv, _c: JClass, handle: jlong) {
+    guard((), || {
+        if let Some(d) = unsafe { session(handle) }.and_then(|s| s.decode.as_ref()) {
+            d.cancel();
+        }
+    })
+}
+
+/// Cancels, joins the workers and frees the session. Kotlin must not touch lent buffers after this.
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_LazRsNativeDecoder_nativeClose(_env: JNIEnv, _c: JClass, handle: jlong) {
+    guard((), || {
+        if handle != 0 {
+            drop(unsafe { Box::from_raw(handle as *mut Session) });
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_autzen_all_chunks() {
+        let path = "/workspace/lazdata/autzen-classified.laz";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let info = Arc::new(open_info(path).unwrap());
+        let chunks = info.point_count.div_ceil(info.chunk_size) as u32;
+        let d = start(info.clone(), Plan { chunks: (0..chunks).collect(), rect: None, stride: 1 }, 4).unwrap();
+        let mut total = 0u64;
+        for slot in 0..chunks as usize {
+            let out = loop {
+                if let Some(o) = d.take(slot, Duration::from_secs(5)).unwrap() {
+                    break o;
+                }
+            };
+            total += out.raw as u64;
+            d.release(out.data);
+        }
+        d.join();
+        assert_eq!(total, info.point_count);
+    }
 }

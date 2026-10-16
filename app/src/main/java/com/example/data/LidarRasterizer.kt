@@ -282,7 +282,7 @@ internal class LidarRasterizer(
         }
         // Ground samples → per-tile buffered Delaunay TIN → max-edge kill → bounded hole fill.
         // True voids outside the data hull stay NaN and are never shown as measured ground.
-        val filled = interpolateBareEarth(
+        val filled = TerrainStageProfiler.stage("tin_fill", "${width}x$height") { interpolateBareEarth(
             measuredElevations = surface,
             measuredMask = measuredMask,
             width = width,
@@ -291,7 +291,7 @@ internal class LidarRasterizer(
             totalPoints = pointsDecoded,
             groundPoints = groundSamples,
             sourceCounts = sourceCounts,
-        )
+        ) }
 
         val cleaned = if (appliedMode == GroundSurfaceMode.SURFACE_MODEL) {
             filled.elevations

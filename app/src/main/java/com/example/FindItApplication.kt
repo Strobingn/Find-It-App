@@ -15,6 +15,8 @@ class FindItApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         LazDecoderSettings.load(this)
+        // Per-chunk LAZ bounds for fast refines live in app cache, not beside the user's files.
+        com.example.data.LazChunkIndex.fallbackDir = java.io.File(cacheDir, "laz-chunk-index").apply { mkdirs() }
         initSentry()
     }
 

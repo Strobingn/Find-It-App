@@ -50,4 +50,29 @@ class ParallelDecodeMatchesSequentialTest {
         }
         assertEquals(hash(sequential), hash(parallel))
     }
+
+    /** Refines decode only index-selected chunks in parallel; the grid must equal the sequential reader. */
+    @Test fun focusedRefineParallelEqualsSequential() {
+        val files = listOf(
+            File("/workspace/lazdata/autzen-classified.laz"),
+            File("/workspace/lazdata/USGS_LPC_NY_SouthEast4County_A22_u_5175065000_2022.laz"),
+        ).filter { it.isFile }
+        assumeTrue("real LAZ not present", files.isNotEmpty())
+        for (file in files) {
+            // Full pass first so the chunk index exists, exactly like the app (overview, then Refine).
+            LazTerrainReader.read(file, LidarImportOptions(rasterResolution = 512).sanitized())
+            for (focus in listOf(NormalizedRasterBounds(0.45, 0.45, 0.55, 0.55), NormalizedRasterBounds(0.0, 0.7, 0.3, 1.0))) {
+                val options = LidarImportOptions(rasterResolution = 2048, focusBounds = focus).sanitized()
+                val parallel = LazTerrainReader.read(file, options)!!
+                assertEquals(parallel.note, true, parallel.note.contains("chunk-index refine"))
+                val sequential = try {
+                    LazTerrainReader.parallelDecodeEnabled = false
+                    LazTerrainReader.read(file, options)!!
+                } finally {
+                    LazTerrainReader.parallelDecodeEnabled = true
+                }
+                assertEquals("${file.name} $focus", hash(sequential), hash(parallel))
+            }
+        }
+    }
 }

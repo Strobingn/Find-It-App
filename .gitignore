@@ -25,3 +25,4 @@ trace_processor
 *.perfetto-trace
 *.perfetto-trace_analysis*.md
 generated-baseline-prof.txt
+native/lazrs-jni/target/

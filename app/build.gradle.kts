@@ -78,7 +78,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.lidardetector.pkrxtz"
+    applicationId = "com.grok.findit"
     minSdk = 24
     targetSdk = 36
     versionCode = versionCodeOverride ?: 3
@@ -154,7 +154,7 @@ androidComponents {
     variant.outputs.forEach { output ->
       output.javaClass.methods
         .firstOrNull { it.name == "setOutputFileName" && it.parameterCount == 1 }
-        ?.invoke(output, "findit-v2-${variant.buildType}.apk")
+        ?.invoke(output, "findit-grok-${variant.buildType}.apk")
     }
   }
 }

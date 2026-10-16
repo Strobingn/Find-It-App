@@ -8,7 +8,7 @@ import okhttp3.Request
 import org.json.JSONArray
 
 /**
- * Pages `/repos/{owner}/{repo}/releases` (never `/latest`) and keeps only `findit-v*` tags.
+ * Pages `/repos/{owner}/{repo}/releases` (never `/latest`) and keeps only `findit-grok-v*` tags.
  * Public repos work with no token. [token] is optional and used only when set (private later).
  */
 class GitHubReleaseClient(
@@ -53,7 +53,7 @@ class GitHubReleaseClient(
             page += 1
         }
         val newest = releases.maxByOrNull { it.versionCode }
-            ?: return UpdateCheckResult.Failed("No findit-v* releases yet")
+            ?: return UpdateCheckResult.Failed("No findit-grok-v* releases yet")
         return UpdateCheckResult.Available(newest)
     }
 

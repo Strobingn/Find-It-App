@@ -35,7 +35,12 @@ sealed class UpdateCheckResult {
 }
 
 object AppUpdateParse {
-    private val tagCode = Regex("""^findit-v(\d+)$""", RegexOption.IGNORE_CASE)
+    /**
+     * This side-by-side "Find It Grok" build (com.grok.findit) only follows releases published from
+     * the GroK_Find_it branch. main publishes findit-v*, the find it 2 line findit2-v*; neither match.
+     */
+    const val TAG_PREFIX = "findit-grok-v"
+    private val tagCode = Regex("^" + Regex.escape(TAG_PREFIX) + """(\d+)$""", RegexOption.IGNORE_CASE)
     private val shaLine = Regex("""(?im)^sha256:\s*([0-9a-f]{64})\s*$""")
     private val appIdLine = Regex("""(?im)^app-id:\s*(\S+)\s*$""")
 

@@ -1,16 +1,19 @@
-name: Find-it-appAPK
+name: Find-It-Grok-APK
 
-# APK + GitHub Release only on pushes/merges to main (saves private-repo minutes).
-# Pull requests still run unit tests. Do not add extra release branches.
+# GroK_Find_it line ("Find It Grok", com.grok.findit, installs side by side with main's app).
+# Every push to GroK_Find_it builds and publishes findit-grok-v<1000000+run> releases only.
+# It never publishes main's findit-v* or find it 2's findit2-v* tags, and never marks a release
+# as "latest". Signed with the committed CI keystore (no secrets needed).
 on:
   push:
-    branches: [main]
+    branches: [GroK_Find_it]
   pull_request:
-    branches: [main]
+    branches: [GroK_Find_it]
   workflow_dispatch:
 
 env:
-  APPLICATION_ID: com.aistudio.lidardetector.pkrxtz
+  APPLICATION_ID: com.grok.findit
+  TAG_PREFIX: findit-grok-v
 
 jobs:
   test:
@@ -91,7 +94,7 @@ jobs:
           retention-days: 14
 
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/GroK_Find_it'
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -112,7 +115,8 @@ jobs:
           mkdir -p "$HOME/.android"
           cp -f ci/findit-debug.keystore "$HOME/.android/debug.keystore"
           cp -f ci/findit-debug.keystore debug.keystore
-          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+          # Find It Grok always uses the committed CI keystore so every APK updates in place.
+          if false; then
             echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/findit-release.jks"
             test -s "$GITHUB_WORKSPACE/findit-release.jks"
             echo "path=$GITHUB_WORKSPACE/findit-release.jks" >> "$GITHUB_OUTPUT"
@@ -162,8 +166,8 @@ jobs:
         id: version
         run: |
           CODE=$((1000000 + ${{ github.run_number }}))
-          NAME="2.0.${{ github.run_number }}"
-          TAG="findit-v${CODE}"
+          NAME="2.0.${{ github.run_number }}-grok"
+          TAG="${TAG_PREFIX}${CODE}"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -198,7 +202,7 @@ jobs:
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
           test -n "$APK"
-          DEST="$GITHUB_WORKSPACE/findit-${{ steps.version.outputs.code }}.apk"
+          DEST="$GITHUB_WORKSPACE/findit-grok-${{ steps.version.outputs.code }}.apk"
           cp "$APK" "$DEST"
           echo "apk=$DEST" >> "$GITHUB_OUTPUT"
           sha256sum "$DEST" | awk '{print $1}' > "$GITHUB_WORKSPACE/findit.sha256"
@@ -219,10 +223,10 @@ jobs:
           if [ "$SIGNING_MODE" = "release-secret" ]; then
             SIGN_NOTE="Signed with the optional repository release keystore secrets."
           else
-            SIGN_NOTE="Signed with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-v* APKs use this same key."
+            SIGN_NOTE="Signed with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-grok-v* APKs use this same key."
           fi
           NOTES=$(cat <<EOF
-          Find It Android build ${NAME} (${CODE})
+          Find It Grok Android build ${NAME} (${CODE}) from GroK_Find_it
 
           app-id: ${APPLICATION_ID}
           version-code: ${CODE}
@@ -234,7 +238,8 @@ jobs:
           )
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "Find It $NAME" \
+            --title "Find It Grok $NAME" \
+            --latest=false \
             --notes "$NOTES" \
             "$APK"
           BODY=$(gh release view "$TAG" --json body --jq .body)

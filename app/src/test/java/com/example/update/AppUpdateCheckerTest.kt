@@ -18,16 +18,19 @@ class AppUpdateCheckerTest {
 
     @Test
     fun parseFinditTagAndNotes() {
-        assertEquals(1_000_042, AppUpdateParse.versionCodeFromTag("findit-v1000042"))
-        assertTrue(AppUpdateParse.isFinditTag("findit-v1000001"))
+        assertEquals(1_000_042, AppUpdateParse.versionCodeFromTag("findit-grok-v1000042"))
+        assertTrue(AppUpdateParse.isFinditTag("findit-grok-v1000001"))
+        // Releases from main (findit-v*) and the find it 2 line (findit2-v*) are never offered.
+        assertEquals(null, AppUpdateParse.versionCodeFromTag("findit-v1000999"))
+        assertEquals(null, AppUpdateParse.versionCodeFromTag("findit2-v1000999"))
         assertFalse(AppUpdateParse.isFinditTag("v2.0"))
         assertEquals(
             "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-            AppUpdateParse.sha256FromNotes("app-id: com.aistudio.lidardetector.pkrxtz\nsha256: AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899\n"),
+            AppUpdateParse.sha256FromNotes("app-id: com.grok.findit\nsha256: AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899\n"),
         )
         assertEquals(
-            "com.aistudio.lidardetector.pkrxtz",
-            AppUpdateParse.appIdFromNotes("app-id: com.aistudio.lidardetector.pkrxtz"),
+            "com.grok.findit",
+            AppUpdateParse.appIdFromNotes("app-id: com.grok.findit"),
         )
         assertTrue(
             AppUpdateParse.sha256Matches(
@@ -49,9 +52,9 @@ class AppUpdateCheckerTest {
     fun parseReleaseKeepsNewestFinditApk() {
         val json = """
             {
-              "tag_name":"findit-v1000003",
+              "tag_name":"findit-grok-v1000003",
               "name":"Find It 2.0.3",
-              "body":"What's new\napp-id: com.aistudio.lidardetector.pkrxtz\nsha256: ${"ab".repeat(32)}\n",
+              "body":"What's new\napp-id: com.grok.findit\nsha256: ${"ab".repeat(32)}\n",
               "assets":[
                 {"id":9,"name":"notes.txt","url":"https://api.github.com/assets/9"},
                 {"id":11,"name":"findit-1000003.apk","url":"https://api.github.com/assets/11"}
@@ -61,7 +64,7 @@ class AppUpdateCheckerTest {
         val release = requireNotNull(GitHubReleaseClient.parseRelease(json))
         assertEquals(1_000_003, release.versionCode)
         assertEquals("findit-1000003.apk", release.apkName)
-        assertEquals("com.aistudio.lidardetector.pkrxtz", release.applicationId)
+        assertEquals("com.grok.findit", release.applicationId)
         assertEquals("ab".repeat(32), release.sha256)
         assertTrue(release.notesForUi.contains("What's new"))
         assertFalse(release.notesForUi.contains("sha256:"))
@@ -70,7 +73,7 @@ class AppUpdateCheckerTest {
     @Test
     fun checkPicksNewerVersionCodeOnly() {
         val release = FinditRelease(
-            tag = "findit-v1000005",
+            tag = "findit-grok-v1000005",
             versionCode = 1_000_005,
             name = "newer",
             body = "notes",
@@ -78,7 +81,7 @@ class AppUpdateCheckerTest {
             apkName = "a.apk",
             apkApiUrl = "https://api.github.com/assets/1",
             sha256 = "ab".repeat(32),
-            applicationId = "com.aistudio.lidardetector.pkrxtz",
+            applicationId = "com.grok.findit",
         )
         val newer = when (
             val result = if (release.versionCode > 3) UpdateCheckResult.Available(release)
@@ -121,14 +124,14 @@ class AppUpdateCheckerTest {
     fun parseReleaseReadsPublicBrowserDownloadUrl() {
         val json = """
             {
-              "tag_name":"findit-v1000008",
+              "tag_name":"findit-grok-v1000008",
               "name":"public",
-              "body":"app-id: com.aistudio.lidardetector.pkrxtz",
+              "body":"app-id: com.grok.findit",
               "assets":[{
                 "id":3,
                 "name":"findit-1000008.apk",
                 "url":"https://api.github.com/repos/Strobingn/Find-It-App/releases/assets/3",
-                "browser_download_url":"https://github.com/Strobingn/Find-It-App/releases/download/findit-v1000008/findit-1000008.apk"
+                "browser_download_url":"https://github.com/Strobingn/Find-It-App/releases/download/findit-grok-v1000008/findit-1000008.apk"
               }]
             }
         """.trimIndent()

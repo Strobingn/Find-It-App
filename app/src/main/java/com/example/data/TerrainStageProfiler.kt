@@ -57,6 +57,8 @@ object TerrainStageProfiler {
         StageSample(name, total / n, lastDetail[name].orEmpty())
     }
 
+    fun count(name: String): Int = counts[name] ?: 0
+
     fun formatReport(): String {
         val rows = snapshot()
         lastReport = buildString {

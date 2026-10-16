@@ -3,10 +3,10 @@
   "url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409330486",
   "assets_url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409330486/assets",
   "upload_url": "https://uploads.github.com/repos/Strobingn/Find-It-App/releases/409330486/assets{?name,label}",
-  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-v1000678",
+  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-grok-v1000678",
   "id": 409330486,
   "node_id": "RE_kwDOTeNO5c4YZeM2",
-  "tag_name": "findit-v1000678",
+  "tag_name": "findit-grok-v1000678",
   "target_commitish": "61538137054b88f0487248269afe6a774db93291",
   "name": "Find It 2.0.678",
   "draft": false,
@@ -29,21 +29,21 @@
     "download_count": 1,
     "created_at": "2026-10-11T01:49:26Z",
     "updated_at": "2026-10-11T01:49:27Z",
-    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-v1000678/findit-1000678.apk"
+    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-grok-v1000678/findit-1000678.apk"
    }
   ],
-  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-v1000678",
-  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-v1000678",
-  "body": "Find It Android build 2.0.678 (1000678)\n\napp-id: com.aistudio.lidardetector.pkrxtz\nversion-code: 1000678\nsha256: 066f00f78e377332e5240e80566605fb2409cf24fd72d7861a15ff60eb9c6163\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-v* APKs use this same key."
+  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-grok-v1000678",
+  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-grok-v1000678",
+  "body": "Find It Android build 2.0.678 (1000678)\n\napp-id: com.grok.findit\nversion-code: 1000678\nsha256: 066f00f78e377332e5240e80566605fb2409cf24fd72d7861a15ff60eb9c6163\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-grok-v* APKs use this same key."
  },
  {
   "url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409330641",
   "assets_url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409330641/assets",
   "upload_url": "https://uploads.github.com/repos/Strobingn/Find-It-App/releases/409330641/assets{?name,label}",
-  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-v1000677",
+  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-grok-v1000677",
   "id": 409330641,
   "node_id": "RE_kwDOTeNO5c4YZePR",
-  "tag_name": "findit-v1000677",
+  "tag_name": "findit-grok-v1000677",
   "target_commitish": "fd5ed34abb01fae9d62c827e888829f7187e1696",
   "name": "Find It 2.0.677",
   "draft": false,
@@ -66,21 +66,21 @@
     "download_count": 0,
     "created_at": "2026-10-11T01:49:45Z",
     "updated_at": "2026-10-11T01:49:47Z",
-    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-v1000677/findit-1000677.apk"
+    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-grok-v1000677/findit-1000677.apk"
    }
   ],
-  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-v1000677",
-  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-v1000677",
-  "body": "Find It Android build 2.0.677 (1000677)\n\napp-id: com.aistudio.lidardetector.pkrxtz\nversion-code: 1000677\nsha256: 34ba94cccdb785b72a2861f3a69bef2096b8e7039ef5f155cb86b16e27e1f369\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-v* APKs use this same key."
+  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-grok-v1000677",
+  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-grok-v1000677",
+  "body": "Find It Android build 2.0.677 (1000677)\n\napp-id: com.grok.findit\nversion-code: 1000677\nsha256: 34ba94cccdb785b72a2861f3a69bef2096b8e7039ef5f155cb86b16e27e1f369\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-grok-v* APKs use this same key."
  },
  {
   "url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409259804",
   "assets_url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409259804/assets",
   "upload_url": "https://uploads.github.com/repos/Strobingn/Find-It-App/releases/409259804/assets{?name,label}",
-  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-v1000674",
+  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-grok-v1000674",
   "id": 409259804,
   "node_id": "RE_kwDOTeNO5c4YZM8c",
-  "tag_name": "findit-v1000674",
+  "tag_name": "findit-grok-v1000674",
   "target_commitish": "9b47882a12685cb8754ca3db4d17074c2276d5a6",
   "name": "Find It 2.0.674",
   "draft": false,
@@ -103,21 +103,21 @@
     "download_count": 1,
     "created_at": "2026-10-10T23:07:37Z",
     "updated_at": "2026-10-10T23:07:39Z",
-    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-v1000674/findit-1000674.apk"
+    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-grok-v1000674/findit-1000674.apk"
    }
   ],
-  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-v1000674",
-  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-v1000674",
-  "body": "Find It Android build 2.0.674 (1000674)\n\napp-id: com.aistudio.lidardetector.pkrxtz\nversion-code: 1000674\nsha256: 57172787e1308955abafb63b27c742d81488e17419ea544b9f72c4f1719991c4\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-v* APKs use this same key."
+  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-grok-v1000674",
+  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-grok-v1000674",
+  "body": "Find It Android build 2.0.674 (1000674)\n\napp-id: com.grok.findit\nversion-code: 1000674\nsha256: 57172787e1308955abafb63b27c742d81488e17419ea544b9f72c4f1719991c4\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-grok-v* APKs use this same key."
  },
  {
   "url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409058441",
   "assets_url": "https://api.github.com/repos/Strobingn/Find-It-App/releases/409058441/assets",
   "upload_url": "https://uploads.github.com/repos/Strobingn/Find-It-App/releases/409058441/assets{?name,label}",
-  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-v1000671",
+  "html_url": "https://github.com/Strobingn/Find-It-App/releases/tag/findit-grok-v1000671",
   "id": 409058441,
   "node_id": "RE_kwDOTeNO5c4YYbyJ",
-  "tag_name": "findit-v1000671",
+  "tag_name": "findit-grok-v1000671",
   "target_commitish": "0fe3388f1c1c239a502024e6ccb83b48d57d90f2",
   "name": "Find It 2.0.671",
   "draft": false,
@@ -140,11 +140,11 @@
     "download_count": 2,
     "created_at": "2026-10-10T16:17:23Z",
     "updated_at": "2026-10-10T16:17:24Z",
-    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-v1000671/findit-1000671.apk"
+    "browser_download_url": "https://github.com/Strobingn/Find-It-App/releases/download/findit-grok-v1000671/findit-1000671.apk"
    }
   ],
-  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-v1000671",
-  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-v1000671",
-  "body": "Find It Android build 2.0.671 (1000671)\n\napp-id: com.aistudio.lidardetector.pkrxtz\nversion-code: 1000671\nsha256: 15dc00ba222c3e60aa742919829d1b1f35f9ab8d2d4ce9ee8da66d75b95a6863\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-v* APKs use this same key."
+  "tarball_url": "https://api.github.com/repos/Strobingn/Find-It-App/tarball/findit-grok-v1000671",
+  "zipball_url": "https://api.github.com/repos/Strobingn/Find-It-App/zipball/findit-grok-v1000671",
+  "body": "Find It Android build 2.0.671 (1000671)\n\napp-id: com.grok.findit\nversion-code: 1000671\nsha256: 15dc00ba222c3e60aa742919829d1b1f35f9ab8d2d4ce9ee8da66d75b95a6863\nupdate-token-expiry: optional\n\nSigned with the committed CI debug keystore (ci/findit-debug.keystore). Future findit-grok-v* APKs use this same key."
  }
 ]

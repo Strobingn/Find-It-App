@@ -7,7 +7,7 @@ object AppUpdateChecker {
     /** The UI always resolves to available / up to date / error within this budget. */
     const val CHECK_TIMEOUT_MS = 15_000L
 
-    /** e.g. "Build 1000685 (findit-v1000685)"; the name is dropped when blank or redundant. */
+    /** e.g. "Build 1000685 (findit-grok-v1000685)"; the name is dropped when blank or redundant. */
     fun buildLabel(versionName: String?, versionCode: Int): String {
         val name = versionName?.trim().orEmpty()
         return if (name.isEmpty() || name == versionCode.toString()) "Build $versionCode" else "Build $versionCode ($name)"
