@@ -29,10 +29,15 @@ class LazDownloadManager(
     private val mirrorResolver: com.example.data.download.LazMirrorResolver? = sharedMirrorResolver,
     /** USGS 3DEP EPT rebuild of TNM tiles (fast S3); null disables it. */
     private val eptBuilder: com.example.data.download.EptTileBuilder? = com.example.data.download.EptTileBuilder.shared,
+    /** OpenTopography catalog used to find 3DEP EPT resources; null disables that source. */
+    private val openTopography: com.example.data.download.OpenTopographyCatalog? = sharedOpenTopography,
 ) {
 
     companion object {
         internal val sharedMirrorResolver = com.example.data.download.LazMirrorResolver()
+        internal val sharedOpenTopography by lazy {
+            com.example.data.download.OpenTopographyCatalog(apiKey = com.example.BuildConfig.OPENTOPO_API_KEY)
+        }
         const val MAX_IMPORT_BYTES: Long = 10L * 1024L * 1024L * 1024L
         private const val MAX_REDIRECTS = 5
         private const val MAX_ATTEMPTS = 5
@@ -88,8 +93,41 @@ class LazDownloadManager(
                 eptFailure = error.message ?: error.javaClass.simpleName
             }
         }
-        if (eptTried || (source == com.example.data.download.LazDownloadSource.AMAZON && eptBuilder == null)) {
-            source.fallbackNotice(sourceUrl.substringAfterLast('/'), eptFailure ?: "EPT disabled")?.let(onNotice)
+        val otTried = com.example.data.download.LazDownloadSource.Step.OPENTOPOGRAPHY in steps &&
+            eptBuilder != null && openTopography != null
+        if (otTried) {
+            try {
+                val built = eptBuilder!!.build(
+                    sourceUrl.trim(), destinationDirectory, progress, shouldContinue,
+                    resourcesFor = { box ->
+                        // Skip surveys the URL-derived EPT attempt already tried (no double fetch).
+                        val tried = if (eptTried) {
+                            com.example.data.download.EptTileBuilder.candidateResources(sourceUrl.trim()).toSet()
+                        } else {
+                            emptySet()
+                        }
+                        openTopography!!.usgs3depResources(box).filterNot { it in tried }
+                    },
+                )
+                if (built != null) {
+                    System.err.println("LAZ via OpenTopography/EPT ${built.resource}: ${built.nodes} nodes, ${built.points} points")
+                    val size = built.file.length()
+                    progress?.invoke(size, size)
+                    return built.file
+                }
+                eptFailure = "no matching OpenTopography 3DEP survey"
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                System.err.println("LAZ OpenTopography lookup failed (${error.message}); using original URL")
+                eptFailure = error.message ?: error.javaClass.simpleName
+            }
+        }
+        val chosenFirst = steps.firstOrNull()
+        if (eptTried || otTried || chosenFirst == com.example.data.download.LazDownloadSource.Step.EPT ||
+            chosenFirst == com.example.data.download.LazDownloadSource.Step.OPENTOPOGRAPHY
+        ) {
+            source.fallbackNotice(sourceUrl.substringAfterLast('/'), eptFailure ?: "source disabled")?.let(onNotice)
         }
         if (com.example.data.download.LazDownloadSource.Step.MIRROR in steps) {
             val mirror = runCatching { mirrorResolver?.resolve(sourceUrl.trim()) }.getOrNull()

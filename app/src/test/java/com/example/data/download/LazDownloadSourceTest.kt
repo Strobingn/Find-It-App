@@ -10,7 +10,7 @@ class LazDownloadSourceTest {
     @Test
     fun autoIsDefaultAndKeepsCurrentChain() {
         assertEquals(LazDownloadSource.AUTO, LazDownloadSource.DEFAULT)
-        assertEquals(listOf(Step.EPT, Step.MIRROR, Step.ORIGINAL), LazDownloadSource.AUTO.steps)
+        assertEquals(listOf(Step.EPT, Step.OPENTOPOGRAPHY, Step.MIRROR, Step.ORIGINAL), LazDownloadSource.AUTO.steps)
     }
 
     @Test
@@ -26,6 +26,13 @@ class LazDownloadSourceTest {
         assertTrue(msg.contains("no EPT coverage"))
         assertNull(LazDownloadSource.AUTO.fallbackNotice("tile.laz", "x"))
         assertNull(LazDownloadSource.USGS.fallbackNotice("tile.laz", "x"))
+    }
+
+    @Test
+    fun openTopographyFirstThenFallsBackWithMessage() {
+        assertEquals(listOf(Step.OPENTOPOGRAPHY, Step.MIRROR, Step.ORIGINAL), LazDownloadSource.OPENTOPOGRAPHY.steps)
+        val msg = LazDownloadSource.OPENTOPOGRAPHY.fallbackNotice("tile.laz", null)!!
+        assertTrue(msg.contains("OpenTopography"))
     }
 
     @Test

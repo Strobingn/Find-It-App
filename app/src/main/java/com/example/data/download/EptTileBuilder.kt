@@ -51,18 +51,33 @@ class EptTileBuilder(
         destinationDirectory: File,
         progress: ((Long, Long) -> Unit)? = null,
         shouldContinue: () -> Boolean = { true },
+        /**
+         * Optional external resolver (e.g. the OpenTopography catalog) mapping the tile's WGS84
+         * box (west, south, east, north) to 3DEP EPT resource names. When set it replaces the
+         * resource names derived from the tile URL; the exact point-count check is unchanged.
+         */
+        resourcesFor: ((DoubleArray) -> List<String>)? = null,
     ): Result? {
         if (!available()) return null
         val name = URL(tileUrl).path.substringAfterLast('/')
         if (!name.endsWith(".laz", true) && !name.endsWith(".las", true)) return null
         val target = File(destinationDirectory, name)
         if (target.exists()) return null
-        val resource = candidateResources(tileUrl).firstNotNullOfOrNull { r ->
+        var header: TileHeader? = null
+        val names = if (resourcesFor == null) {
+            candidateResources(tileUrl)
+        } else {
+            header = readTileHeader(tileUrl) ?: return null
+            val utm = header.utm ?: return null
+            resourcesFor(geographicBox(utm, header.minX, header.minY, header.maxX, header.maxY))
+                .filter { it.matches(Regex("[A-Za-z0-9_\\-]+")) }
+        }
+        val resource = names.firstNotNullOfOrNull { r ->
             fetch("$BUCKET/$r/ept.json", null)?.let { r to String(it) }
         } ?: return null
         val (resourceName, ept) = resource
         if (!Regex("\"horizontal\"\\s*:\\s*\"3857\"").containsMatchIn(ept)) return null
-        val header = readTileHeader(tileUrl) ?: return null
+        if (header == null) header = readTileHeader(tileUrl) ?: return null
         val tm = header.utm ?: return null
         val box = mercatorBox(tm, header.minX, header.minY, header.maxX, header.maxY)
         val eb = Regex("\"bounds\"\\s*:\\s*\\[([^\\]]+)]").find(ept)?.groupValues?.get(1)
@@ -254,6 +269,15 @@ class EptTileBuilder(
                 tau += (tauP - tp) / sqrt(1 + tp * tp) * (1 + (1 - es * es) * tau * tau) / ((1 - es * es) * sqrt(1 + tau * tau))
             }
             return atan(tau) to lon
+        }
+
+        /** WGS84 (west, south, east, north) degrees enclosing a UTM box. */
+        fun geographicBox(utm: Utm, minX: Double, minY: Double, maxX: Double, maxY: Double): DoubleArray {
+            val corners = listOf(minX to minY, minX to maxY, maxX to minY, maxX to maxY)
+                .map { (e, n) -> utmToGeographic(utm, e, n) }
+            val lats = corners.map { Math.toDegrees(it.first) }
+            val lons = corners.map { Math.toDegrees(it.second) }
+            return doubleArrayOf(lons.min(), lats.min(), lons.max(), lats.max())
         }
 
         fun utmToMercator(utm: Utm, e: Double, n: Double): Pair<Double, Double> {

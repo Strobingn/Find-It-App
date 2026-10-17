@@ -50,6 +50,8 @@ val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
 val mapsApiKey = projectSecret("MAPS_API_KEY")
 // Optional: Sentry DSN for crash + AI performance monitoring (never commit real DSN to git).
 val sentryDsn = projectSecret("SENTRY_DSN")
+// Optional: the OpenTopography catalog works without a key; sent only when configured.
+val openTopoApiKey = projectSecret("OPENTOPO_API_KEY")
 val finditUpdateToken = projectSecret("FINDIT_UPDATE_TOKEN")
 val finditUpdateRepo = projectSecret("FINDIT_UPDATE_REPO").ifBlank { "Strobingn/Find-It-App" }
 val versionCodeOverride = System.getenv("VERSION_CODE")?.toIntOrNull()
@@ -93,6 +95,7 @@ android {
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
     buildConfigField("String", "MAPS_API_KEY", quotedBuildConfig(mapsApiKey))
     buildConfigField("String", "SENTRY_DSN", quotedBuildConfig(sentryDsn))
+    buildConfigField("String", "OPENTOPO_API_KEY", quotedBuildConfig(openTopoApiKey))
     buildConfigField("String", "FINDIT_UPDATE_TOKEN", quotedBuildConfig(finditUpdateToken))
     buildConfigField("String", "FINDIT_UPDATE_REPO", quotedBuildConfig(finditUpdateRepo))
     // Debug: sample more AI traces; release: lower default (overridable via Sentry init).
