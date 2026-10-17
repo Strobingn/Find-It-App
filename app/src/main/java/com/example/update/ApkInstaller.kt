@@ -41,7 +41,10 @@ object ApkInstaller {
         }
         val installed = installedInfo(context) ?:
             return VerifyResult(false, "Could not read the installed package")
-        if (!signaturesMatch(installed, archive)) {
+        // Some Android 9-12 / OEM builds return no signers for a downloaded archive even when it is
+        // valid. Only a provable mismatch blocks; unreadable signers fall through to the system
+        // installer, which enforces the same-key rule itself.
+        if (signatureVerdict(signatureDigests(installed), signatureDigests(archive)) == SignatureVerdict.MISMATCH) {
             return VerifyResult(
                 ok = false,
                 needsUninstall = true,
@@ -118,18 +121,27 @@ object ApkInstaller {
         }
     }
 
-    fun signaturesMatch(installed: PackageInfo, archive: PackageInfo): Boolean {
-        val left = signatureDigests(installed)
-        val right = signatureDigests(archive)
-        if (left.isEmpty() || right.isEmpty()) return false
-        return left.any { want -> right.any { it.contentEquals(want) } }
+    enum class SignatureVerdict { MATCH, MISMATCH, UNKNOWN }
+
+    /** UNKNOWN when either side could not be read (platform bug), never treated as a mismatch. */
+    fun signatureVerdict(installed: List<ByteArray>, archive: List<ByteArray>): SignatureVerdict {
+        if (installed.isEmpty() || archive.isEmpty()) return SignatureVerdict.UNKNOWN
+        return if (installed.any { want -> archive.any { it.contentEquals(want) } }) {
+            SignatureVerdict.MATCH
+        } else {
+            SignatureVerdict.MISMATCH
+        }
     }
+
+    fun signaturesMatch(installed: PackageInfo, archive: PackageInfo): Boolean =
+        signatureVerdict(signatureDigests(installed), signatureDigests(archive)) == SignatureVerdict.MATCH
 
     private fun archiveInfo(pm: PackageManager, apk: File): PackageInfo? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
             pm.getPackageArchiveInfo(
                 apk.absolutePath,
-                PackageManager.GET_SIGNING_CERTIFICATES,
+                PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES,
             )
         } else {
             @Suppress("DEPRECATION")
@@ -151,13 +163,15 @@ object ApkInstaller {
 
     private fun signatureDigests(info: PackageInfo): List<ByteArray> {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val signing = info.signingInfo ?: return emptyList()
-            val signers = if (signing.hasMultipleSigners()) {
-                signing.apkContentsSigners
-            } else {
-                signing.signingCertificateHistory
+            val signing = info.signingInfo
+            val signers = when {
+                signing == null -> null
+                signing.hasMultipleSigners() -> signing.apkContentsSigners
+                else -> signing.signingCertificateHistory
             }
-            return signers?.map { it.toByteArray() }.orEmpty()
+            val digests = signers?.map { it.toByteArray() }.orEmpty()
+            if (digests.isNotEmpty()) return digests
+            // Fall back to the legacy array (filled by GET_SIGNATURES on archives).
         }
         @Suppress("DEPRECATION")
         return info.signatures?.map { it.toByteArray() }.orEmpty()
