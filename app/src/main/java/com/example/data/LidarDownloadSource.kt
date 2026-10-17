@@ -6,7 +6,8 @@ package com.example.data
  * USGS The National Map still lists the official LPC files, but those URLs land on
  * rockyweb (~0.3 MB/s). The same 3DEP points are published as COPC on Azure and typically
  * transfer an order of magnitude faster. NOAA Digital Coast is a third option for shoreline
- * surveys that are often denser than inland 3DEP.
+ * surveys that are often denser than inland 3DEP. OpenTopography hosts additional high-res
+ * clouds and will crop them to the search box instead of shipping whole tiles.
  */
 enum class LidarDownloadSource(
     val chipLabel: String,
@@ -17,6 +18,11 @@ enum class LidarDownloadSource(
         chipLabel = "Fast Azure",
         shortHost = "Azure 3DEP (fast)",
         description = "USGS 3DEP COPC on Azure. Same points as TNM, much faster downloads.",
+    ),
+    OPEN_TOPOGRAPHY(
+        chipLabel = "OpenTopo",
+        shortHost = "OpenTopography",
+        description = "High-res hosted clouds cropped to your box. Needs a free myOpenTopo API key.",
     ),
     USGS_TNM(
         chipLabel = "USGS TNM",

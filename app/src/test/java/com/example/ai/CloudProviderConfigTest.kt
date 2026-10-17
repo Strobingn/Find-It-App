@@ -22,4 +22,9 @@ class CloudProviderConfigTest {
         // Presence of the field is the contract: empty is fine in CI without secrets.
         assertEquals(BuildConfig.GEMINI_API_KEY, BuildConfig.GEMINI_API_KEY)
     }
+
+    @Test
+    fun openTopographyApiKeyBuildConfigFieldExists() {
+        assertEquals(BuildConfig.OPENTOPOGRAPHY_API_KEY, BuildConfig.OPENTOPOGRAPHY_API_KEY)
+    }
 }

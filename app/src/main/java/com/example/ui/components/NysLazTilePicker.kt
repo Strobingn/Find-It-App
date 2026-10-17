@@ -47,8 +47,12 @@ import com.example.data.CopcAsset
 import com.example.data.CopcStacCatalog
 import com.example.data.LidarDownloadSource
 import com.example.data.NoaaCoastalLidarCatalog
+import com.example.data.OpenTopographyApiKey
+import com.example.data.OpenTopographyCatalog
 import com.example.data.lidarTileSubtitle
 import com.example.data.searchPublicLidarTiles
+import com.example.data.signPublicLidarDownloadUrl
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
 import com.example.data.LazTerrainCache
@@ -120,6 +124,7 @@ fun NysLazTilePicker(
     val catalog = remember { NysHistoricLazTileCatalog() }
     val copcCatalog = remember { CopcStacCatalog() }
     val noaaCatalog = remember { NoaaCoastalLidarCatalog() }
+    val openTopographyCatalog = remember { OpenTopographyCatalog() }
     val store = remember(context) { LazDownloadQueue.store(context) }
     val diskCache = remember(context) { LazTerrainDiskCache(File(context.cacheDir, "decoded-terrain")) }
     val terrainCache = remember(diskCache) { LazTerrainCache(LazTerrainMemoryCache(), diskCache) }
@@ -159,6 +164,8 @@ fun NysLazTilePicker(
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var sessionRestored by remember { mutableStateOf(false) }
+    var openTopoKeyDraft by rememberSaveable { mutableStateOf("") }
+    var openTopoKeySaved by remember { mutableStateOf(OpenTopographyApiKey.isConfigured(context)) }
     // Downloads live in LazDownloadService, so they survive leaving this screen. The picker only
     // observes them and opens a tile once its bytes have landed.
     val downloadTasks by LazDownloadQueue.tasks.collectAsStateWithLifecycle()
@@ -293,6 +300,7 @@ fun NysLazTilePicker(
                     usgsCatalog = catalog,
                     copcCatalog = copcCatalog,
                     noaaCatalog = noaaCatalog,
+                    openTopographyCatalog = openTopographyCatalog,
                 )
                 tiles = found.tiles
                 copcAssets = found.copc
@@ -349,6 +357,7 @@ fun NysLazTilePicker(
                     usgsCatalog = catalog,
                     copcCatalog = copcCatalog,
                     noaaCatalog = noaaCatalog,
+                    openTopographyCatalog = openTopographyCatalog,
                 )
                 // Providers only accept envelopes. Preserve a tile with no returned footprint so
                 // the server's spatial intersection remains authoritative, but precisely filter
@@ -480,8 +489,13 @@ fun NysLazTilePicker(
                     NysHistoricLazTileCatalog.DownloadEstimate(knownBytes = 0L, unknownTileCount = 0)
                 } else {
                     val sized = needed.map { tile ->
-                        val url = runCatching { copcCatalog.signIfNeeded(tile.downloadUrl) }
-                            .getOrDefault(tile.downloadUrl)
+                        val url = runCatching {
+                            signPublicLidarDownloadUrl(
+                                url = tile.downloadUrl,
+                                copcCatalog = copcCatalog,
+                                openTopographyApiKey = OpenTopographyApiKey.load(context),
+                            )
+                        }.getOrDefault(tile.downloadUrl)
                         if (url == tile.downloadUrl) tile else tile.copy(downloadUrl = url)
                     }
                     catalog.estimateDownloadBytes(sized)
@@ -902,7 +916,7 @@ fun NysLazTilePicker(
                 }
             }
             Text(
-                "USGS rockyweb is slow. Fast Azure serves the same 3DEP points as COPC. NOAA Digital Coast is for shoreline surveys that are often denser. Pick a source, then search.",
+                "USGS rockyweb is slow. Fast Azure serves the same 3DEP points as COPC. OpenTopography crops hosted high-res clouds to your box. NOAA Digital Coast is for shoreline surveys. Pick a source, then search.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Row(
@@ -927,6 +941,55 @@ fun NysLazTilePicker(
                         label = { Text(source.chipLabel) },
                         modifier = Modifier.testTag("lidar_source_${source.name}"),
                     )
+                }
+            }
+            if (downloadSource == LidarDownloadSource.OPEN_TOPOGRAPHY) {
+                Text(
+                    if (openTopoKeySaved) {
+                        "Crop downloads will attach your myOpenTopo API key. Search does not need it."
+                    } else {
+                        "Crop downloads need a free API key from portal.opentopography.org/myopentopo. Catalog search still works without one."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = openTopoKeyDraft,
+                    onValueChange = { openTopoKeyDraft = it },
+                    label = { Text("OpenTopography API key") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("opentopo_api_key_field"),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (OpenTopographyApiKey.hasDeviceKey(context)) {
+                        TextButton(
+                            onClick = {
+                                OpenTopographyApiKey.clear(context)
+                                openTopoKeyDraft = ""
+                                openTopoKeySaved = OpenTopographyApiKey.isConfigured(context)
+                            },
+                        ) { Text("Remove key") }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (OpenTopographyApiKey.save(context, openTopoKeyDraft)) {
+                                openTopoKeyDraft = ""
+                                openTopoKeySaved = true
+                                error = null
+                            } else {
+                                error = "Paste a myOpenTopo API key, then Save."
+                            }
+                        },
+                        enabled = openTopoKeyDraft.isNotBlank(),
+                        modifier = Modifier.testTag("save_opentopo_api_key"),
+                    ) {
+                        Text(if (openTopoKeySaved && openTopoKeyDraft.isBlank()) "Key saved" else "Save key")
+                    }
                 }
             }
             Text(

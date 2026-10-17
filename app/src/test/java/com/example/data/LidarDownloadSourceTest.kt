@@ -11,6 +11,8 @@ class LidarDownloadSourceTest {
         assertTrue(azureCopcStatus(2).contains("Azure"))
         assertTrue(azureFallbackStatus(3).contains("USGS TNM"))
         assertTrue(noaaCoastStatus(0).contains("Fast Azure"))
+        assertTrue(openTopographyStatus(1).contains("cropped"))
+        assertTrue(openTopographyStatus(0).contains("Fast Azure"))
     }
 
     @Test

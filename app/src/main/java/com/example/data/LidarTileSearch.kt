@@ -15,6 +15,7 @@ suspend fun searchPublicLidarTiles(
     usgsCatalog: NysHistoricLazTileCatalog,
     copcCatalog: CopcStacCatalog,
     noaaCatalog: NoaaCoastalLidarCatalog,
+    openTopographyCatalog: OpenTopographyCatalog,
 ): LidarTileSearchResult {
     return when (source) {
         LidarDownloadSource.FAST_AZURE -> {
@@ -72,7 +73,36 @@ suspend fun searchPublicLidarTiles(
                 error = noaa.exceptionOrNull(),
             )
         }
+        LidarDownloadSource.OPEN_TOPOGRAPHY -> {
+            val openTopo = runCatching {
+                openTopographyCatalog.tilesInBounds(
+                    bounds.minLon,
+                    bounds.minLat,
+                    bounds.maxLon,
+                    bounds.maxLat,
+                )
+            }
+            val tiles = openTopo.getOrDefault(emptyList())
+            if (tiles.isEmpty() && openTopo.exceptionOrNull() != null) {
+                throw openTopo.exceptionOrNull()!!
+            }
+            LidarTileSearchResult(
+                tiles = tiles,
+                copc = emptyList(),
+                status = openTopographyStatus(tiles.size),
+                error = openTopo.exceptionOrNull(),
+            )
+        }
     }
+}
+
+suspend fun signPublicLidarDownloadUrl(
+    url: String,
+    copcCatalog: CopcStacCatalog,
+    openTopographyApiKey: String,
+): String {
+    val azureSigned = runCatching { copcCatalog.signIfNeeded(url) }.getOrDefault(url)
+    return OpenTopographyCatalog.attachApiKeyIfNeeded(azureSigned, openTopographyApiKey)
 }
 
 internal fun azureCopcStatus(count: Int): String =
@@ -100,4 +130,11 @@ internal fun noaaCoastStatus(count: Int): String =
         "No NOAA Digital Coast COPC intersects that area. Inland sites usually need Fast Azure."
     } else {
         "Found $count NOAA coastal COPC tile${if (count == 1) "" else "s"} on AWS S3."
+    }
+
+internal fun openTopographyStatus(count: Int): String =
+    if (count == 0) {
+        "No OpenTopography point clouds intersect that area. Try Fast Azure for nationwide 3DEP."
+    } else {
+        "Found $count OpenTopography dataset${if (count == 1) "" else "s"} — each download is cropped to your box."
     }

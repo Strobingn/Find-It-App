@@ -52,6 +52,25 @@ class LazDownloadManager(
 
         /** Shared by LAS and LAZ; LAZ is LAS with compressed point data. */
         private val LIDAR_SIGNATURE = "LASF".toByteArray(Charsets.US_ASCII)
+
+        /**
+         * Crop APIs like OpenTopography stream LAZ from `/API/pointcloud` with no `.laz` path.
+         * Prefer a caller-supplied name, then Content-Disposition / URL path, then reject.
+         */
+        internal fun resolveDownloadFileName(
+            urlPathName: String,
+            preferredFileName: String? = null,
+        ): String {
+            fun candidate(raw: String?): String? {
+                if (raw.isNullOrBlank()) return null
+                val stripped = raw.substringAfterLast('/').substringBefore('?').trim(' ', '"', '\'')
+                val safe = stripped.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                val extension = safe.substringAfterLast('.', "").lowercase(Locale.US)
+                return safe.takeIf { it.isNotBlank() && (extension == "laz" || extension == "las") }
+            }
+            return candidate(urlPathName) ?: candidate(preferredFileName)
+                ?: throw IllegalArgumentException("The URL must resolve to a direct LAZ or LAS file")
+        }
     }
 
     fun download(
@@ -59,6 +78,7 @@ class LazDownloadManager(
         destinationDirectory: File,
         progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+        preferredFileName: String? = null,
     ): File {
         destinationDirectory.mkdirs()
         require(destinationDirectory.isDirectory) { "Unable to create LAZ storage directory" }
@@ -66,7 +86,10 @@ class LazDownloadManager(
         val originalUrl = validateRemoteUrl(URL(sourceUrl.trim()))
         var destination: File? = runCatching {
             val urlName = originalUrl.path.substringAfterLast('/').ifBlank { "lidar-download.laz" }
-            uniqueDestination(destinationDirectory, sanitizeAndValidateName(urlName))
+            uniqueDestination(
+                destinationDirectory,
+                resolveDownloadFileName(urlName, preferredFileName),
+            )
         }.getOrNull()
         var partial: File? = destination?.let { File(destinationDirectory, ".${it.name}.part") }
         var expectedTotal = -1L
@@ -118,7 +141,7 @@ class LazDownloadManager(
                 if (destination == null || partial == null) {
                     val responseName = contentDispositionFileName(connection.getHeaderField("Content-Disposition"))
                     val urlName = opened.url.path.substringAfterLast('/').ifBlank { "lidar-download.laz" }
-                    val finalName = sanitizeAndValidateName(responseName ?: urlName)
+                    val finalName = resolveDownloadFileName(responseName ?: urlName, preferredFileName)
                     destination = uniqueDestination(destinationDirectory, finalName)
                     partial = File(destinationDirectory, ".${requireNotNull(destination).name}.part")
                 }
@@ -508,16 +531,6 @@ class LazDownloadManager(
             ?.groupValues
             ?.getOrNull(1)
             ?.toLongOrNull()
-    }
-
-    private fun sanitizeAndValidateName(rawName: String): String {
-        val stripped = rawName.substringAfterLast('/').substringBefore('?').trim(' ', '"', '\'')
-        val safe = stripped.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "lidar-download.laz" }
-        val extension = safe.substringAfterLast('.', "").lowercase(Locale.US)
-        require(extension == "laz" || extension == "las") {
-            "The URL must resolve to a direct LAZ or LAS file"
-        }
-        return safe
     }
 
     private fun uniqueDestination(directory: File, requestedName: String): File {
