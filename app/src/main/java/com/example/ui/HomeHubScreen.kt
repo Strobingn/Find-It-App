@@ -33,6 +33,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -60,6 +63,8 @@ fun HomeHubScreen(
     onOpen: (AppDestination) -> Unit,
 ) {
     val context = LocalContext.current
+    var showCodingIdeas by rememberSaveable { mutableStateOf(false) }
+    if (showCodingIdeas) CursorIdeasDialog(onDismiss = { showCodingIdeas = false })
     val summary by viewModel.activeTerrainSummary.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
     val isDetailed by viewModel.isDetailedTerrain.collectAsStateWithLifecycle()
@@ -131,6 +136,19 @@ fun HomeHubScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                modifier = Modifier.fillMaxWidth().testTag("home_coding_ideas_card"),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Coding ideas", fontWeight = FontWeight.SemiBold)
+                    Text("Send improvements and bug reports to Cursor.", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { showCodingIdeas = true }) { Text("Open coding ideas") }
                 }
             }
         }
