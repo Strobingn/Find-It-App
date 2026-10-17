@@ -2,6 +2,7 @@ package com.example.data
 
 import com.example.ui.chooseAiRefineResolution
 import com.example.ui.isEffectivelyWholeTerrain
+import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -119,6 +120,47 @@ class RefineViewRegressionTest {
     }
 
     @Test
+    fun zoomedRefineCellIsFinerThanOverviewAndNearNativeSpacing() {
+        val fullRange = 1_000.0
+        val overviewResolution = 1_024
+        val overviewCell = fullRange / (overviewResolution - 1)
+        val cropRange = 100.0
+        val pointsInCrop = 80_000L
+        val refineResolution = focusResolutionForPointSpacing(
+            rangeX = cropRange,
+            rangeY = cropRange,
+            pointsInFocus = pointsInCrop,
+            requestedResolution = overviewResolution,
+        )
+        val refineCell = cropRange / (refineResolution - 1)
+        val spacing = 1.0 / sqrt(pointsInCrop / (cropRange * cropRange))
+        assertTrue(
+            "refined cell $refineCell m must be smaller than overview cell $overviewCell m",
+            refineCell < overviewCell,
+        )
+        assertTrue("refine cell must not go finer than the point spacing ($spacing)", refineCell >= spacing)
+        assertTrue(
+            "refine cell should stay around 1–2× ground spacing ($spacing), was $refineCell",
+            refineCell <= spacing * 2.05,
+        )
+    }
+
+    @Test
+    fun refinedProductIsWhatTheGpuRendererShows() {
+        val overview = sampleGrid(1_024, 768, cellSizeMeters = 0.98f)
+        val refined = sampleGrid(227, 227, cellSizeMeters = 0.44f)
+        TerrainPerformanceSession.publish(TerrainGpuSceneBuilder.build(overview))
+        val refinedScene = TerrainGpuSceneBuilder.build(refined)
+        TerrainPerformanceSession.publish(refinedScene)
+        val shown = TerrainPerformanceSession.gpuScene.value
+        assertNotNull(shown)
+        assertEquals(refined.width, shown!!.sourceWidth)
+        assertEquals(refined.height, shown.sourceHeight)
+        assertTrue(refined.cellSizeMeters < overview.cellSizeMeters)
+        TerrainPerformanceSession.clear()
+    }
+
+    @Test
     fun previewAndExactJobHooksAreStillPresent() {
         assertTrue(TerrainDecodeCoordinator.GPU_PREVIEW_MAX_DIMENSION > 0)
         val sample = ElevationGrid(
@@ -138,5 +180,25 @@ class RefineViewRegressionTest {
         assertTrue(outcome.isPreview)
         assertNull(outcome.exactOutcome)
         assertEquals(2_048, LidarImportOptions.MAX_REFINED_RESOLUTION)
+    }
+
+    private fun sampleGrid(
+        width: Int,
+        height: Int,
+        cellSizeMeters: Float = 1f,
+    ): ElevationGrid {
+        val size = width * height
+        return ElevationGrid(
+            width = width,
+            height = height,
+            bareEarth = FloatArray(size) { index ->
+                val x = index % width
+                val y = index / width
+                (x + y).toFloat()
+            },
+            canopySpikes = FloatArray(size),
+            validData = BooleanArray(size) { true },
+            cellSizeMeters = cellSizeMeters,
+        )
     }
 }

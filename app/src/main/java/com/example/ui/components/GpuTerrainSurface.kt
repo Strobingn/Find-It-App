@@ -93,8 +93,16 @@ private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
 
     fun setScene(scene: TerrainGpuScene) {
         if (submittedScene === scene) return
+        val sizeChanged = submittedScene.let { previous ->
+            previous == null ||
+                previous.sourceWidth != scene.sourceWidth ||
+                previous.sourceHeight != scene.sourceHeight
+        }
         submittedScene = scene
-        queueEvent { terrainRenderer.submit(scene) }
+        queueEvent {
+            terrainRenderer.submit(scene)
+            if (sizeChanged) terrainRenderer.resetCamera()
+        }
         requestRender()
     }
 

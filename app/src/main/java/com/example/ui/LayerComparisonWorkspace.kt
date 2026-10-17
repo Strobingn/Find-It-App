@@ -84,6 +84,7 @@ fun LayerComparisonWorkspace(
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
     val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
+    val viewportResetKey by viewModel.viewportResetKey.collectAsStateWithLifecycle()
     val aiState by assistantViewModel.state.collectAsStateWithLifecycle()
     val result = aiState.localResult
     val currentDatasetKey = remember(grid) { TerrainIntelligenceEngine.terrainSignature(grid) }
@@ -114,7 +115,7 @@ fun LayerComparisonWorkspace(
     var pan by remember { mutableStateOf(Offset.Zero) }
     var paneSize by remember { mutableStateOf(IntSize.Zero) }
 
-    LaunchedEffect(result) {
+    LaunchedEffect(result, viewportResetKey) {
         zoom = 1f
         pan = Offset.Zero
     }

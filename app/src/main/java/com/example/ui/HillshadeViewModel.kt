@@ -1238,7 +1238,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         "${options.rasterResolution} px detailed viewport loaded from the original point cloud."
                     }
-                    applyCustomTerrain(result, resetViewport = false)
+                    // The crop *is* the previous viewport. Reset zoom/pan so the sharper grid
+                    // fills the screen instead of staying magnified on a corner of the new raster.
+                    applyCustomTerrain(result, resetViewport = true)
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
                         message = "Refinement complete",
