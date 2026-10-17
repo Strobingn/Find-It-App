@@ -37,6 +37,29 @@ class NysHistoricLazTileCatalogTest {
      * SE 4-county 2022 survey, so every coordinate outside that one project found nothing.
      */
     @Test
+    fun nationalMapKeepsFileSizeAndYearForFastEstimates() {
+        val tiles = NysHistoricLazTileCatalog().parseNationalMap(
+            json = productsJson(
+                item(
+                    title = "USGS Lidar Point Cloud NY_SouthEast4County_A22 u_5790058550_2022",
+                    downloadUrl = "https://example.org/hudson.laz",
+                    sizeInBytes = 126_192_321L,
+                    publicationDate = "2024-09-23",
+                ),
+            ),
+            west = -74.04,
+            south = 41.43,
+            east = -74.04,
+            north = 41.43,
+        )
+
+        assertEquals(1, tiles.size)
+        assertEquals(126_192_321L, tiles[0].sizeBytes)
+        assertEquals(2024, tiles[0].acquiredYear)
+        assertEquals(LidarDownloadSource.USGS_TNM, tiles[0].source)
+    }
+
+    @Test
     fun coveringTilesFromOtherProjectsAreReturned() {
         val tiles = NysHistoricLazTileCatalog().parseNationalMap(
             json = productsJson(
@@ -132,13 +155,17 @@ class NysHistoricLazTileCatalogTest {
         downloadUrl: String,
         minX: Double = -74.05,
         maxX: Double = -74.03,
-    ): String = """
-        {
-          "title": "$title",
-          "downloadURL": "$downloadUrl",
-          "boundingBox": { "minX": $minX, "minY": 41.42, "maxX": $maxX, "maxY": 41.44 }
-        }
-    """.trimIndent()
+        sizeInBytes: Long? = null,
+        publicationDate: String? = null,
+    ): String = buildString {
+        append("{")
+        append("\"title\": \"$title\",")
+        append("\"downloadURL\": \"$downloadUrl\",")
+        sizeInBytes?.let { append("\"sizeInBytes\": $it,") }
+        publicationDate?.let { append("\"publicationDate\": \"$it\",") }
+        append("\"boundingBox\": { \"minX\": $minX, \"minY\": 41.42, \"maxX\": $maxX, \"maxY\": 41.44 }")
+        append("}")
+    }
 
     private fun productsJson(vararg items: String): String =
         """{ "items": [ ${items.joinToString(",")} ] }"""
