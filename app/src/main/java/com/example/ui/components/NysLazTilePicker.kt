@@ -1334,6 +1334,8 @@ fun NysLazTilePicker(
                 }
             }
 
+            LazDownloadSourcePicker()
+
             val activeDownloads = downloadTasks.filterNot(LazDownloadTask::isFinished)
             if (activeDownloads.isNotEmpty()) {
                 Text(

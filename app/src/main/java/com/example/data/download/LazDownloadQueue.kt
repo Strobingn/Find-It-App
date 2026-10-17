@@ -43,6 +43,11 @@ object LazDownloadQueue {
     private val _tasks = MutableStateFlow<List<LazDownloadTask>>(emptyList())
     val tasks: StateFlow<List<LazDownloadTask>> = _tasks.asStateFlow()
 
+    /** Latest download-source fallback message (e.g. Amazon EPT unavailable), shown on the picker. */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+    fun postNotice(message: String?) { _notice.value = message }
+
     /** Cancellation requests, read by the running transfer between buffer writes. */
     private val cancelled = mutableSetOf<String>()
 

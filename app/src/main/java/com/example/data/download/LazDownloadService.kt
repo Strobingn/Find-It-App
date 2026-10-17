@@ -108,6 +108,8 @@ class LazDownloadService : Service() {
                     }
                 },
                 shouldContinue = { !LazDownloadQueue.isCancelled(task.url) },
+                source = LazDownloadSourcePrefs.load(this),
+                onNotice = LazDownloadQueue::postNotice,
             )
             // Recorded before the task is marked done, so anything reacting to completion already
             // sees the provenance and can reuse this file instead of fetching it again.

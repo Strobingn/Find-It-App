@@ -64,32 +64,44 @@ class LazDownloadManager(
         destinationDirectory: File,
         progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
+        source: com.example.data.download.LazDownloadSource = com.example.data.download.LazDownloadSource.DEFAULT,
+        onNotice: (String) -> Unit = {},
     ): File {
-        if (eptBuilder != null) {
+        val steps = source.steps
+        var eptFailure: String? = null
+        val eptTried = com.example.data.download.LazDownloadSource.Step.EPT in steps && eptBuilder != null
+        if (eptTried) {
             try {
-                val built = eptBuilder.build(sourceUrl.trim(), destinationDirectory, progress, shouldContinue)
+                val built = eptBuilder!!.build(sourceUrl.trim(), destinationDirectory, progress, shouldContinue)
                 if (built != null) {
                     System.err.println("LAZ via EPT ${built.resource}: ${built.nodes} nodes, ${built.points} points")
                     val size = built.file.length()
                     progress?.invoke(size, size)
                     return built.file
                 }
+                eptFailure = "no EPT coverage"
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {
                 // EPT unavailable or mismatched: the original download path below is unchanged.
                 System.err.println("LAZ EPT rebuild failed (${error.message}); using original URL")
+                eptFailure = error.message ?: error.javaClass.simpleName
             }
         }
-        val mirror = runCatching { mirrorResolver?.resolve(sourceUrl.trim()) }.getOrNull()
-        if (mirror != null) {
-            try {
-                return downloadFrom(mirror, destinationDirectory, progress, shouldContinue, nameUrl = sourceUrl)
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (error: Throwable) {
-                // Mirror failed: fall back to the original URL (same file name, so a partial resumes).
-                System.err.println("LAZ mirror $mirror failed (${error.message}); using original URL")
+        if (eptTried || (source == com.example.data.download.LazDownloadSource.AMAZON && eptBuilder == null)) {
+            source.fallbackNotice(sourceUrl.substringAfterLast('/'), eptFailure ?: "EPT disabled")?.let(onNotice)
+        }
+        if (com.example.data.download.LazDownloadSource.Step.MIRROR in steps) {
+            val mirror = runCatching { mirrorResolver?.resolve(sourceUrl.trim()) }.getOrNull()
+            if (mirror != null) {
+                try {
+                    return downloadFrom(mirror, destinationDirectory, progress, shouldContinue, nameUrl = sourceUrl)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    // Mirror failed: fall back to the original URL (same file name, so a partial resumes).
+                    System.err.println("LAZ mirror $mirror failed (${error.message}); using original URL")
+                }
             }
         }
         return downloadFrom(sourceUrl, destinationDirectory, progress, shouldContinue, nameUrl = sourceUrl)
