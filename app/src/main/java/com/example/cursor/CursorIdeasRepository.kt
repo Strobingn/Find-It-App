@@ -16,6 +16,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.FileNotFoundException
 import java.security.KeyStore
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
@@ -81,8 +82,14 @@ class CursorIdeasStore(context: Context) {
 
     @Synchronized
     fun read(): IdeasLocalState {
-        if (!file.baseFile.exists()) return IdeasLocalState()
-        val envelope = JSONObject(file.openRead().use { it.readBytes().toString(Charsets.UTF_8) })
+        // openRead restores AtomicFile's backup after an interrupted write. Checking
+        // only the base file first can mistakenly erase an unresolved submission.
+        val contents = try { file.openRead().use { it.readBytes().toString(Charsets.UTF_8) } }
+        catch (error: FileNotFoundException) {
+            if (!file.baseFile.exists() && !File(file.baseFile.path + ".bak").exists()) return IdeasLocalState()
+            throw error
+        }
+        val envelope = JSONObject(contents)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(envelope.getString("iv"), Base64.NO_WRAP)))
         val json = JSONObject(cipher.doFinal(Base64.decode(envelope.getString("data"), Base64.NO_WRAP)).toString(Charsets.UTF_8))

@@ -63,7 +63,9 @@ class CursorIdeasViewModel(application: Application) : AndroidViewModel(applicat
         persist(local.copy(pending = idea))
         val task = try { repository.submit(local.endpoint, local.token, idea) }
         catch (error: IdeasApiException) {
-            if (error.definitelyNotStarted) persist(state.value.local.copy(pending = null))
+            // A rejection of a retry cannot rule out an earlier successful launch
+            // whose response was lost. Only clear a newly created request here.
+            if (error.definitelyNotStarted && local.pending == null) persist(state.value.local.copy(pending = null))
             throw error
         }
         persist(state.value.local.copy(title = "", details = "", pending = null,
