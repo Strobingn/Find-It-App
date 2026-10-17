@@ -70,6 +70,22 @@ class NysHistoricLazTileCatalog(
         national.getOrThrow()
     }
 
+    /** Groups tiles by survey and ranks them (density, then newest); one 375-byte header read per survey. */
+    suspend fun rankDatasets(tiles: List<Tile>): List<LidarDatasetRanking.Dataset> = withContext(Dispatchers.IO) {
+        LidarDatasetRanking.rank(tiles) { tile -> runCatching { lasHeader(tile.downloadUrl) }.getOrNull() }
+    }
+
+    private fun lasHeader(url: String): ByteArray? {
+        val request = Request.Builder().url(url).header("Range", "bytes=0-374").get().build()
+        httpClient.newCall(request).execute().use { response ->
+            if (response.code != 206 && response.code != 200) return null
+            val source = response.body?.source() ?: return null
+            val buffer = okio.Buffer()
+            while (buffer.size < 375 && source.read(buffer, 375 - buffer.size) != -1L) Unit
+            return buffer.readByteArray()
+        }
+    }
+
     /** Reads source file sizes without downloading a LAZ payload. */
     suspend fun estimateDownloadBytes(tiles: List<Tile>): DownloadEstimate = withContext(Dispatchers.IO) {
         var knownBytes = 0L

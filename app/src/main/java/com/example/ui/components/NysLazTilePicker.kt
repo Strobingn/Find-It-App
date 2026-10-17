@@ -44,6 +44,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
 import com.example.data.CopcAsset
+import com.example.data.LidarDatasetRanking
 import com.example.data.CopcStacCatalog
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
@@ -144,6 +145,9 @@ fun NysLazTilePicker(
     }
     var savedMosaicProjects by remember { mutableStateOf<List<MosaicProject>>(emptyList()) }
     var selectedUrls by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Surveys covering the area, most detailed first; the best one is pre-selected, others switchable.
+    var datasets by remember { mutableStateOf<List<LidarDatasetRanking.Dataset>>(emptyList()) }
+    var chosenDatasetKey by remember { mutableStateOf<String?>(null) }
     var selectedAreaDescription by remember { mutableStateOf<String?>(null) }
     var downloadEstimate by remember { mutableStateOf<NysHistoricLazTileCatalog.DownloadEstimate?>(null) }
     var isLookingUp by remember { mutableStateOf(false) }
@@ -256,6 +260,25 @@ fun NysLazTilePicker(
         status = "${region.displayName} bounds loaded. Narrow the box, then find tiles in the area."
     }
 
+    fun chooseBestDataset(found: List<NysHistoricLazTileCatalog.Tile>) {
+        datasets = emptyList()
+        chosenDatasetKey = null
+        if (found.isEmpty()) return
+        scope.launch {
+            val ranked = runCatching { catalog.rankDatasets(found) }.getOrDefault(emptyList())
+            if (tiles != found) return@launch // a newer search replaced these results
+            datasets = ranked
+            val best = ranked.firstOrNull() ?: return@launch
+            if (ranked.size > 1) {
+                chosenDatasetKey = best.key
+                selectedUrls = best.tiles.map { it.downloadUrl }.toSet()
+                downloadEstimate = null
+            } else {
+                chosenDatasetKey = best.key
+            }
+        }
+    }
+
     fun lookup() {
         val lat = latitude.trim().toDoubleOrNull()
         val lon = longitude.trim().toDoubleOrNull()
@@ -274,6 +297,7 @@ fun NysLazTilePicker(
             try {
                 tiles = catalog.tilesAt(lon, lat)
                 selectedUrls = tiles.map { it.downloadUrl }.toSet()
+                chooseBestDataset(tiles)
                 status = if (tiles.isEmpty()) {
                     "No published LiDAR tile covers that coordinate."
                 } else {
@@ -340,6 +364,7 @@ fun NysLazTilePicker(
                     copcResult.exceptionOrNull()?.let { throw it }
                 }
                 selectedUrls = tiles.map { it.downloadUrl }.toSet()
+                chooseBestDataset(tiles)
                 status = when {
                     tiles.isEmpty() && copcAssets.isEmpty() ->
                         "No published LiDAR tiles intersect that area."
@@ -1157,6 +1182,37 @@ fun NysLazTilePicker(
                         onClick = { downloadJob?.cancel() },
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                     ) { Text("Cancel COPC stream") }
+                }
+            }
+            if (datasets.isNotEmpty()) {
+                val chosen = datasets.firstOrNull { it.key == chosenDatasetKey }
+                Text(
+                    if (chosen == datasets.first()) "Most detailed survey: ${chosen.summary}"
+                    else "Selected survey: ${chosen?.summary ?: "manual selection"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag("best_lidar_dataset"),
+                )
+                if (datasets.size > 1) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                        datasets.forEachIndexed { index, dataset ->
+                            FilterChip(
+                                selected = dataset.key == chosenDatasetKey,
+                                onClick = {
+                                    chosenDatasetKey = dataset.key
+                                    selectedUrls = dataset.tiles.map { it.downloadUrl }.toSet()
+                                    downloadEstimate = null
+                                },
+                                label = {
+                                    Text(
+                                        "${dataset.displayName} ${dataset.year ?: ""} · " +
+                                            (dataset.pointsPerSquareMeter?.let { "%.1f/m²".format(java.util.Locale.US, it) } ?: "?"),
+                                        maxLines = 1,
+                                    )
+                                },
+                                modifier = Modifier.padding(end = 6.dp).testTag("lidar_dataset_$index"),
+                            )
+                        }
+                    }
                 }
             }
             tiles.forEach { tile ->

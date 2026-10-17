@@ -25,9 +25,12 @@ import kotlin.math.min
 class LazDownloadManager(
     /** Parallel ranged connections for large files; 1 disables the multipart path. */
     private val parallelConnections: Int = DEFAULT_PARALLEL_CONNECTIONS,
+    /** Faster byte-identical mirror lookup; null disables mirrors. */
+    private val mirrorResolver: com.example.data.download.LazMirrorResolver? = sharedMirrorResolver,
 ) {
 
     companion object {
+        internal val sharedMirrorResolver = com.example.data.download.LazMirrorResolver()
         const val MAX_IMPORT_BYTES: Long = 10L * 1024L * 1024L * 1024L
         private const val MAX_REDIRECTS = 5
         private const val MAX_ATTEMPTS = 5
@@ -60,12 +63,33 @@ class LazDownloadManager(
         progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
     ): File {
+        val mirror = runCatching { mirrorResolver?.resolve(sourceUrl.trim()) }.getOrNull()
+        if (mirror != null) {
+            try {
+                return downloadFrom(mirror, destinationDirectory, progress, shouldContinue, nameUrl = sourceUrl)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                // Mirror failed: fall back to the original URL (same file name, so a partial resumes).
+                System.err.println("LAZ mirror $mirror failed (${error.message}); using original URL")
+            }
+        }
+        return downloadFrom(sourceUrl, destinationDirectory, progress, shouldContinue, nameUrl = sourceUrl)
+    }
+
+    private fun downloadFrom(
+        sourceUrl: String,
+        destinationDirectory: File,
+        progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)?,
+        shouldContinue: () -> Boolean,
+        nameUrl: String,
+    ): File {
         destinationDirectory.mkdirs()
         require(destinationDirectory.isDirectory) { "Unable to create LAZ storage directory" }
 
         val originalUrl = validateRemoteUrl(URL(sourceUrl.trim()))
         var destination: File? = runCatching {
-            val urlName = originalUrl.path.substringAfterLast('/').ifBlank { "lidar-download.laz" }
+            val urlName = URL(nameUrl.trim()).path.substringAfterLast('/').ifBlank { "lidar-download.laz" }
             uniqueDestination(destinationDirectory, sanitizeAndValidateName(urlName))
         }.getOrNull()
         var partial: File? = destination?.let { File(destinationDirectory, ".${it.name}.part") }
