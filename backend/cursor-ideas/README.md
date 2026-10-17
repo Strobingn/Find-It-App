@@ -20,7 +20,7 @@ No changes to terrain processing, existing update channels, or app identity. The
 5. Install the branch test APK from the **Cursor ideas integration checks** Actions artifact. Home → **Coding ideas** → connection settings. Enter the deployed HTTPS root URL and the separate `FINDIT_IDEAS_TOKEN`. Never enter the Cursor key in the app.
 6. Send an Evaluate idea first. Open its Cursor link to inspect the plan. Enable implementation on the server when ready and send an implementation request. Inspect its pull request and checks before merging.
 
-No Cursor API key was available during development. Automated tests mock Cursor; a live authenticated submission must be verified after configuring your key.
+No Cursor API key was available during development. Nine automated backend tests mock Cursor; a live authenticated submission must be verified after configuring your key.
 
 ## Branch and execution rules
 

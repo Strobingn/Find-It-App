@@ -136,7 +136,8 @@ class CursorIdeasRepository {
             if (!response.isSuccessful) {
                 val message = json?.optString("error")?.takeIf { it.isNotBlank() }?.take(400)
                     ?: "Backend returned HTTP ${response.code}. Check the endpoint and Vercel deployment access."
-                throw IdeasApiException(message, response.code in setOf(400, 401, 403, 413, 415, 429, 503))
+                // A proxy HTTP error alone cannot prove the remote task never started.
+                throw IdeasApiException(message, json?.optBoolean("notStarted", false) == true)
             }
             if (json == null) throw IOException("Backend returned an invalid response. Retry the same idea.")
             val id = json.getString("agentId")

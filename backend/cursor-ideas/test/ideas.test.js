@@ -119,5 +119,13 @@ test('does not leak upstream error details or falsely report success', async () 
   const handlers = createHandlers(env, async () => ok({ error: 'secret-account-info' }, 401));
   const response = await handlers.POST(request());
   assert.equal(response.status, 502);
-  assert.equal((await response.text()).includes('secret-account-info'), false);
+  const body = await response.json();
+  assert.equal(JSON.stringify(body).includes('secret-account-info'), false);
+  assert.equal(body.notStarted, false);
+});
+
+test('only pre-launch rejection allows Android to discard its pending retry identity', async () => {
+  const handlers = createHandlers(env, async () => { throw Error('Must not launch'); });
+  const response = await handlers.POST(request({ ...idea, title: '' }));
+  assert.equal((await response.json()).notStarted, true);
 });

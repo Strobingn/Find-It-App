@@ -47,6 +47,7 @@ class CursorIdeasViewModel(application: Application) : AndroidViewModel(applicat
     fun saveConnection(endpoint: String, token: String) = action {
         require(state.value.local.pending == null) { "Retry the pending idea before changing connections." }
         require(token.trim().length in 32..512) { "Connection token must contain 32–512 characters. Use the separate backend token, not your Cursor API key." }
+        require(token.trim().none { it.isWhitespace() || it.code < 33 || it.code > 126 }) { "Use a printable connection token without spaces or line breaks." }
         require(!token.trim().startsWith("crsr_")) { "Keep your Cursor API key in Vercel. Enter the separate connection token here." }
         persist(state.value.local.copy(endpoint = CursorIdeasRepository.normalizeEndpoint(endpoint), token = token.trim()))
         message("Connection saved. You can now submit an idea.")
