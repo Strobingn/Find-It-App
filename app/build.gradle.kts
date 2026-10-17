@@ -46,6 +46,7 @@ val openAiBaseUrl = projectSecret("OPENAI_BASE_URL").ifBlank { "https://api.open
 val openAiProxyToken = projectSecret("OPENAI_PROXY_TOKEN").ifBlank { projectSecret("PROXY_AUTH_TOKEN") }
 // Gemini only — use GEMINI_API_KEY in local.properties / .env / CI secrets.
 val geminiApiKey = projectSecret("GEMINI_API_KEY")
+val openTopographyApiKey = projectSecret("OPENTOPOGRAPHY_API_KEY")
 val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
 val mapsApiKey = projectSecret("MAPS_API_KEY")
 // Optional: Sentry DSN for crash + AI performance monitoring (never commit real DSN to git).
@@ -91,6 +92,7 @@ android {
     buildConfigField("String", "OPENAI_PROXY_TOKEN", quotedBuildConfig(openAiProxyToken))
     buildConfigField("String", "GEMINI_API_KEY", quotedBuildConfig(geminiApiKey))
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
+    buildConfigField("String", "OPENTOPOGRAPHY_API_KEY", quotedBuildConfig(openTopographyApiKey))
     buildConfigField("String", "MAPS_API_KEY", quotedBuildConfig(mapsApiKey))
     buildConfigField("String", "SENTRY_DSN", quotedBuildConfig(sentryDsn))
     buildConfigField("String", "FINDIT_UPDATE_TOKEN", quotedBuildConfig(finditUpdateToken))

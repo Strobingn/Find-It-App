@@ -28,12 +28,13 @@ import javax.microedition.khronos.opengles.GL10
 fun GpuTerrainSurface(
     scene: TerrainGpuScene,
     modifier: Modifier = Modifier,
+    viewportResetKey: Int = 0,
 ) {
     AndroidView(
         factory = { context ->
-            TerrainGlSurfaceView(context).apply { setScene(scene) }
+            TerrainGlSurfaceView(context).apply { setScene(scene, viewportResetKey) }
         },
-        update = { view -> view.setScene(scene) },
+        update = { view -> view.setScene(scene, viewportResetKey) },
         modifier = modifier,
     )
 }
@@ -41,6 +42,7 @@ fun GpuTerrainSurface(
 private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
     private val terrainRenderer = TerrainGlRenderer()
     private var submittedScene: TerrainGpuScene? = null
+    private var submittedResetKey: Int = 0
 
     /** True while two or more fingers are down, which orbits the camera instead of panning it. */
     private var orbiting = false
@@ -91,10 +93,20 @@ private class TerrainGlSurfaceView(context: Context) : GLSurfaceView(context) {
         preserveEGLContextOnPause = true
     }
 
-    fun setScene(scene: TerrainGpuScene) {
-        if (submittedScene === scene) return
+    fun setScene(scene: TerrainGpuScene, viewportResetKey: Int = 0) {
+        if (submittedScene === scene && submittedResetKey == viewportResetKey) return
+        val resetCamera = shouldResetGpuCamera(
+            previousScene = submittedScene,
+            previousResetKey = submittedResetKey,
+            nextScene = scene,
+            nextResetKey = viewportResetKey,
+        )
         submittedScene = scene
-        queueEvent { terrainRenderer.submit(scene) }
+        submittedResetKey = viewportResetKey
+        queueEvent {
+            terrainRenderer.submit(scene)
+            if (resetCamera) terrainRenderer.resetCamera()
+        }
         requestRender()
     }
 

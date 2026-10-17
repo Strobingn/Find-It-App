@@ -22,6 +22,9 @@ class CopcStacCatalogTest {
         assertEquals("3dep-lidar-copc", body.getJSONArray("collections").getString(0))
         assertEquals(-74.0, body.getJSONArray("bbox").getDouble(0), 0.0)
         assertEquals(42.0, body.getJSONArray("bbox").getDouble(3), 0.0)
+        val sort = body.getJSONArray("sortby").getJSONObject(0)
+        assertEquals("datetime", sort.getString("field"))
+        assertEquals("desc", sort.getString("direction"))
     }
 
     @Test
@@ -33,6 +36,29 @@ class CopcStacCatalogTest {
         assertEquals(1, result.size)
         assertTrue(result.single().href.endsWith(".copc.laz"))
         assertEquals(42.0, result.single().bounds?.maxLat ?: 0.0, 0.0)
+    }
+
+    @Test
+    fun parserKeepsPointCountAndDatetimeForDenserNewerRanking() {
+        val result = CopcStacCatalog().parseSearchResponse(
+            """{"features":[{"id":"tile-1","bbox":[-74,41,-73,42],"properties":{"datetime":"2022-04-01T00:00:00Z","pc:count":24369468},"assets":{"data":{"href":"https://usgslidareuwest.blob.core.windows.net/usgs-3dep-copc/tile.copc.laz"}}}]}""",
+        )
+
+        assertEquals(24_369_468L, result.single().pointCount)
+        assertEquals("2022-04-01T00:00:00Z", result.single().datetime)
+        val tile = result.single().toDownloadTile()
+        assertEquals(LidarDownloadSource.FAST_AZURE, tile.source)
+        assertEquals(2022, tile.acquiredYear)
+        assertTrue(CopcStacCatalog().needsSigning(tile.downloadUrl))
+    }
+
+    @Test
+    fun alreadySignedAzureUrlsAreLeftAlone() {
+        assertTrue(
+            !CopcStacCatalog().needsSigning(
+                "https://usgslidareuwest.blob.core.windows.net/usgs-3dep-copc/tile.copc.laz?sig=abc",
+            ),
+        )
     }
 
     @Test

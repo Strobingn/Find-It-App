@@ -1038,7 +1038,11 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         applyCustomTerrain(result, resetViewport = true)
     }
 
-    private fun applyCustomTerrain(result: DemGenerator.TerrainLoadResult, resetViewport: Boolean = false) {
+    private fun applyCustomTerrain(
+        result: DemGenerator.TerrainLoadResult,
+        resetViewport: Boolean = false,
+        discardSavedViewport: Boolean = false,
+    ) {
         siteGenerationJob?.cancel()
         val grid = result.grid
         customGrid = result.grid
@@ -1058,6 +1062,19 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         updateCoordinates()
         scheduleRender(immediate = true)
         if (_basemapEnabled.value) refreshBasemapTiles()
+        if (discardSavedViewport) {
+            // Terrain may not be composed (Refine from AI / comparison). Clearing the persisted
+            // zoom/pan means a later first composition cannot restore the pre-refine magnification
+            // onto the new crop.
+            val cleared = persistViewportAfterTerrainSwap(
+                PersistedMapViewport(_viewportZoom.value, _viewportPanX.value, _viewportPanY.value),
+                discardSavedViewport = true,
+            )
+            _viewportZoom.value = cleared.zoom
+            _viewportPanX.value = cleared.panX
+            _viewportPanY.value = cleared.panY
+            saveSettings()
+        }
         if (resetViewport) {
             _viewportResetKey.value = _viewportResetKey.value + 1
         }
@@ -1238,7 +1255,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         "${options.rasterResolution} px detailed viewport loaded from the original point cloud."
                     }
-                    applyCustomTerrain(result, resetViewport = false)
+                    // The crop *is* the previous viewport. Reset zoom/pan so the sharper grid
+                    // fills the screen instead of staying magnified on a corner of the new raster.
+                    applyCustomTerrain(result, resetViewport = true, discardSavedViewport = true)
                     _terrainRefinementProgress.value = TerrainRefinementProgress(
                         fraction = 1f,
                         message = "Refinement complete",
@@ -1259,7 +1278,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         currentSourceBounds = NormalizedRasterBounds.Full
         _isDetailedTerrain.value = false
         _terrainDetailMessage.value = "Showing the complete point-cloud footprint."
-        applyCustomTerrain(overview, resetViewport = true)
+        applyCustomTerrain(overview, resetViewport = true, discardSavedViewport = true)
     }
 
     /**
