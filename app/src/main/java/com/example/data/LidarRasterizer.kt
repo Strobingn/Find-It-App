@@ -164,25 +164,7 @@ internal class LidarRasterizer(
             return true
         }
         val index = cellIndex(x, y) ?: return true
-
-        coverageCount[index]++
-
-        if (z < allMin[index]) {
-            // A newly observed low demotes the previous minimum to second place. Returns that
-            // corroborate each other within a narrow band keep the band count high; a lone return
-            // far below everything else stays isolated and can later be rejected as a low spike.
-            allSecondMin[index] = allMin[index]
-            allMin[index] = z
-            allLowBandCount[index] =
-                if (allSecondMin[index] - z <= LOW_BAND_METERS) 2 else 1
-        } else if (z < allSecondMin[index]) {
-            allSecondMin[index] = z
-            if (z - allMin[index] <= LOW_BAND_METERS) allLowBandCount[index]++
-        } else if (z - allMin[index] <= LOW_BAND_METERS) {
-            allLowBandCount[index]++
-        }
-        if (z > allMax[index]) allMax[index] = z
-        allCount[index]++
+        accumulateCell(index, z)
         pointsBinned++
 
         // Skip classification work when the requested surface does not use ASPRS ground classes.
@@ -204,6 +186,96 @@ internal class LidarRasterizer(
             }
         }
         return true
+    }
+
+    /** Unclassified / unfiltered binning can skip the per-return class histogram. */
+    internal val acceptsFastBin: Boolean
+        get() = allowedClasses == null && !tracksSourceClasses
+
+    /**
+     * Bins unclassified XYZ samples. Row bands run in parallel and each band scans in file order,
+     * so per-cell minimum, second-minimum, and low-band counts match [addPoint].
+     */
+    internal fun addUnclassifiedSamples(xs: DoubleArray, ys: DoubleArray, zs: FloatArray, count: Int) {
+        require(acceptsFastBin) { "Classified or filtered rasters must use addPoint" }
+        val n = count.coerceIn(0, min(xs.size, min(ys.size, zs.size)))
+        if (n == 0) return
+        pointsDecoded += n
+        val threads = if (n >= PARALLEL_BIN_MIN_POINTS && height >= 2) BIN_PARALLELISM else 1
+        if (threads <= 1) {
+            pointsBinned += binSamples(xs, ys, zs, n, 0, height)
+            return
+        }
+        val bandHeight = (height + threads - 1) / threads
+        val counts = IntArray(threads)
+        val pending = (1 until threads).map { band ->
+            val y0 = band * bandHeight
+            val y1 = min(y0 + bandHeight, height)
+            binPool.submit { counts[band] = binSamples(xs, ys, zs, n, y0, y1) }
+        }
+        counts[0] = binSamples(xs, ys, zs, n, 0, min(bandHeight, height))
+        pending.forEach { it.get() }
+        var binned = 0
+        for (c in counts) binned += c
+        pointsBinned += binned
+    }
+
+    private fun binSamples(
+        xs: DoubleArray,
+        ys: DoubleArray,
+        zs: FloatArray,
+        n: Int,
+        y0: Int,
+        y1: Int,
+    ): Int {
+        if (y0 >= y1) return 0
+        var binned = 0
+        val minXBound = cropMinX
+        val maxXBound = cropMaxX
+        val minYBound = cropMinY
+        val maxYBound = cropMaxY
+        val xScale = xToGrid
+        val yScale = yToGrid
+        val originX = cropMinX
+        val originY = cropMaxY
+        val gridWidth = width
+        val gridHeight = height
+        for (i in 0 until n) {
+            val z = zs[i]
+            if (!z.isFinite()) continue
+            val x = xs[i]
+            val y = ys[i]
+            if (!x.isFinite() || !y.isFinite()) continue
+            if (x < minXBound || x > maxXBound || y < minYBound || y > maxYBound) continue
+            val gx = ((x - originX) * xScale + 0.5).toInt().coerceIn(0, gridWidth - 1)
+            val gy = ((originY - y) * yScale + 0.5).toInt().coerceIn(0, gridHeight - 1)
+            if (gy < y0 || gy >= y1) continue
+            accumulateCell(gy * gridWidth + gx, z)
+            binned++
+        }
+        return binned
+    }
+
+    /**
+     * A newly observed low demotes the previous minimum to second place. Returns that corroborate
+     * each other within a narrow band keep the band count high; a lone return far below everything
+     * else stays isolated and can later be rejected as a low spike.
+     */
+    private fun accumulateCell(index: Int, z: Float) {
+        coverageCount[index]++
+        if (z < allMin[index]) {
+            allSecondMin[index] = allMin[index]
+            allMin[index] = z
+            allLowBandCount[index] =
+                if (allSecondMin[index] - z <= LOW_BAND_METERS) 2 else 1
+        } else if (z < allSecondMin[index]) {
+            allSecondMin[index] = z
+            if (z - allMin[index] <= LOW_BAND_METERS) allLowBandCount[index]++
+        } else if (z - allMin[index] <= LOW_BAND_METERS) {
+            allLowBandCount[index]++
+        }
+        if (z > allMax[index]) allMax[index] = z
+        allCount[index]++
     }
 
     /**
@@ -765,7 +837,12 @@ private const val MIN_SAMPLES_FOR_SPIKE_REJECT = 4
 /** Fine/coarse disagreement (meters) at which multi-scale smoothing fully keeps the fine pass. */
 private const val MULTI_SCALE_EDGE_METERS = 0.5f
 private const val MIN_CELLS_FOR_PARALLEL_POST = 40_000
+private const val PARALLEL_BIN_MIN_POINTS = 16_384
 private val POST_PROCESS_PARALLELISM = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+private val BIN_PARALLELISM = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
 private val postProcessPool = Executors.newFixedThreadPool(POST_PROCESS_PARALLELISM) { task ->
     Thread(task, "terrain-post").apply { isDaemon = true }
+}
+private val binPool = Executors.newFixedThreadPool(BIN_PARALLELISM) { task ->
+    Thread(task, "terrain-bin").apply { isDaemon = true }
 }

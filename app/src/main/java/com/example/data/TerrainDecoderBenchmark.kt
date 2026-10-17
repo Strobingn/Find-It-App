@@ -113,12 +113,7 @@ object TerrainDecoderBenchmark {
         }
 
         val mesh = TerrainStageProfiler.stage("mesh_build", "${javaResult.grid.width}x${javaResult.grid.height}") {
-            TerrainGpuSceneBuilder.build(
-                source = javaResult.grid,
-                maxFinestDimension = maxOf(javaResult.grid.width, javaResult.grid.height, 64),
-                tileSize = TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE,
-                attachHeightmap = true,
-            )
+            TerrainGpuSceneBuilder.buildDisplayScene(javaResult.grid)
         }
         TerrainMemoryMonitor.noteGpuScene(mesh)
 

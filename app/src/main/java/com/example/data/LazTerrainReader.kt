@@ -741,6 +741,10 @@ internal object LazTerrainReader {
         private val keyPoints: BooleanArray,
     ) {
         fun addTo(rasterizer: LidarRasterizer) {
+            if (rasterizer.acceptsFastBin) {
+                rasterizer.addUnclassifiedSamples(xs, ys, zs, count)
+                return
+            }
             for (i in 0 until count) {
                 rasterizer.addPoint(
                     x = xs[i],

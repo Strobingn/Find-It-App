@@ -710,7 +710,7 @@ fun NysLazTilePicker(
                     updatedAtMillis = System.currentTimeMillis(),
                 )
                 mosaicProjectDao.upsert(project.toEntity())
-                TerrainPerformanceSession.publish(com.example.data.TerrainGpuSceneBuilder.build(mosaic.grid))
+                TerrainPerformanceSession.publish(com.example.data.TerrainGpuSceneBuilder.buildDisplayScene(mosaic.grid))
                 onCustomTerrainLoaded(mosaic, null)
                 status = "Opened ${project.displayName}. Source files remain offline for reopening."
             } catch (_: CancellationException) {
