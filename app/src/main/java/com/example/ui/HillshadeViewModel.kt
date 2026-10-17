@@ -1063,7 +1063,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         }
         // 2D hillshade updates immediately; rebuild the GPU mesh so 3D refine matches it.
         viewModelScope.launch(Dispatchers.Default) {
-            val scene = TerrainGpuSceneBuilder.build(grid)
+            val scene = TerrainGpuSceneBuilder.buildDisplayScene(grid)
             TerrainPerformanceSession.publish(scene)
         }
     }
@@ -2312,7 +2312,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (cached != null) {
             val (options, terrain) = cached
             val scene = withContext(Dispatchers.Default) {
-                TerrainGpuSceneBuilder.build(terrain.grid)
+                TerrainGpuSceneBuilder.buildDisplayScene(terrain.grid)
             }
             TerrainPerformanceSession.publish(scene)
             setCustomTerrain(
@@ -2393,7 +2393,7 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
             }
             if (cached != null) {
                 val scene = withContext(Dispatchers.Default) {
-                    TerrainGpuSceneBuilder.build(cached.grid)
+                    TerrainGpuSceneBuilder.buildDisplayScene(cached.grid)
                 }
                 TerrainPerformanceSession.publish(scene)
                 setCustomTerrain(

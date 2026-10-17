@@ -149,6 +149,59 @@ class ElevationGridTest {
     }
 
     @Test
+    fun fastHillshadeRowsMatchTheGeneralLoop() {
+        val width = 48
+        val height = 36
+        val elevations = FloatArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            20f + x * 0.15f + kotlin.math.sin(y * 0.4).toFloat()
+        }
+        val valid = BooleanArray(width * height) { true }
+        elevations[4 * width + 6] = Float.NaN
+        valid[4 * width + 6] = false
+        elevations[20 * width + 20] = Float.NaN
+        val grid = ElevationGrid(
+            width,
+            height,
+            elevations,
+            FloatArray(elevations.size),
+            cellSizeMeters = 0.8f,
+            validData = valid,
+        )
+        val fast = grid.renderHillshade(
+            sunAzimuth = 315f,
+            sunAltitude = 42f,
+            vegetationFilter = 0.25f,
+            palette = 1,
+            contrast = 1.7f,
+            zScale = 2.2f,
+        )
+        disableFastHillshadeRows = true
+        val slow = try {
+            grid.renderHillshade(
+                sunAzimuth = 315f,
+                sunAltitude = 42f,
+                vegetationFilter = 0.25f,
+                palette = 1,
+                contrast = 1.7f,
+                zScale = 2.2f,
+            )
+        } finally {
+            disableFastHillshadeRows = false
+        }
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                assertEquals(
+                    "pixel $x,$y",
+                    slow.getPixel(x, y),
+                    fast.getPixel(x, y),
+                )
+            }
+        }
+    }
+
+    @Test
     fun localReliefSurvivesNaNCells() = assertModeRendersWithNaN(3)
 
     @Test
