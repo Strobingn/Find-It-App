@@ -5,11 +5,16 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class NoaaCoastalLidarCatalogTest {
     @Test
     fun davQueryAsksForLidarFootprintsInWgs84() {
-        val url = NoaaCoastalLidarCatalog().buildDavQueryUrl(
+        val url = NoaaCoastalLidarCatalog.davQueryUrl(
             west = -74.05,
             south = 40.55,
             east = -73.95,
@@ -24,7 +29,7 @@ class NoaaCoastalLidarCatalogTest {
 
     @Test
     fun davParserReadsDatasetIds() {
-        val datasets = NoaaCoastalLidarCatalog().parseDavDatasets(
+        val datasets = NoaaCoastalLidarCatalog.davDatasets(
             """{"features":[{"attributes":{"id":33,"title":"2005 USACE NCMP Topobathy Lidar: Atlantic Coast (NY to VA)","data_type":"Lidar"}}]}""",
         )
 
@@ -35,24 +40,25 @@ class NoaaCoastalLidarCatalogTest {
 
     @Test
     fun filenameGridEstimatesNeighboringTileBoxes() {
-        val origin = "20230413_2175078050.copc" to GeoSpatialLibrary.GeographicBounds(
-            minLat = 43.12412326,
-            maxLat = 43.13897811,
-            minLon = -78.4740993,
-            maxLon = -78.45382011,
+        val origin = "20230413_1000010000.copc" to GeoSpatialLibrary.GeographicBounds(
+            minLat = 40.0,
+            maxLat = 40.01,
+            minLon = -74.02,
+            maxLon = -74.00,
         )
-        val north = "20230413_2175078200.copc" to GeoSpatialLibrary.GeographicBounds(
-            minLat = 43.13760658,
-            maxLat = 43.1524596,
-            minLon = -78.47486282,
-            maxLon = -78.45457853,
+        val east = "20230413_1015010000.copc" to GeoSpatialLibrary.GeographicBounds(
+            minLat = 40.0,
+            maxLat = 40.01,
+            minLon = -74.00,
+            maxLon = -73.98,
         )
-        val estimator = NoaaCopcGrid.fit(listOf(origin, north))
-        val predicted = estimator.boundsFor("20230413_2175078200.copc")
+        val estimator = NoaaCopcGrid.fit(listOf(origin, east))
+        val predicted = estimator.boundsFor("20230413_1015010000.copc")
             ?: error("expected bounds")
 
-        assertEquals(north.second.minLat, predicted.minLat, 1e-6)
-        assertEquals(north.second.minLon, predicted.minLon, 1e-6)
+        assertEquals(east.second.minLat, predicted.minLat, 1e-9)
+        assertEquals(east.second.minLon, predicted.minLon, 1e-9)
+        assertEquals(east.second.maxLon, predicted.maxLon, 1e-9)
     }
 
     @Test

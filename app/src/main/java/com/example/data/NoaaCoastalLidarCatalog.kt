@@ -68,33 +68,9 @@ class NoaaCoastalLidarCatalog(
         south: Double,
         east: Double,
         north: Double,
-    ): String {
-        fun encoded(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
-        return buildString {
-            append(DAV_FOOTPRINTS_QUERY)
-            append("?f=json")
-            append("&where=").append(encoded("data_type='Lidar'"))
-            append("&geometry=").append(encoded("$west,$south,$east,$north"))
-            append("&geometryType=esriGeometryEnvelope")
-            append("&inSR=4326")
-            append("&spatialRel=esriSpatialRelIntersects")
-            append("&outFields=").append(encoded("id,title,data_type"))
-            append("&returnGeometry=false")
-            append("&resultRecordCount=").append(MAX_DATASETS)
-        }
-    }
+    ): String = davQueryUrl(west, south, east, north)
 
-    internal fun parseDavDatasets(json: String): List<NoaaDataset> {
-        val features = JSONObject(json).optJSONArray("features") ?: JSONArray()
-        return buildList {
-            for (index in 0 until features.length()) {
-                val attributes = features.optJSONObject(index)?.optJSONObject("attributes") ?: continue
-                val id = attributes.optInt("id", -1).takeIf { it > 0 } ?: continue
-                val title = attributes.optString("title").ifBlank { "NOAA dataset $id" }
-                add(NoaaDataset(id = id, title = title))
-            }
-        }
-    }
+    internal fun parseDavDatasets(json: String): List<NoaaDataset> = davDatasets(json)
 
     private data class OpenedCollection(val url: String, val body: String)
 
@@ -257,6 +233,39 @@ class NoaaCoastalLidarCatalog(
         internal val DATUMS = listOf("geoid18", "geoid12b", "egm08", "mllw", "msl", "igld85")
         private const val MAX_DATASETS = 12
         private const val MAX_ITEM_FETCH = 80
+
+        internal fun davQueryUrl(
+            west: Double,
+            south: Double,
+            east: Double,
+            north: Double,
+        ): String {
+            fun encoded(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+            return buildString {
+                append(DAV_FOOTPRINTS_QUERY)
+                append("?f=json")
+                append("&where=").append(encoded("data_type='Lidar'"))
+                append("&geometry=").append(encoded("$west,$south,$east,$north"))
+                append("&geometryType=esriGeometryEnvelope")
+                append("&inSR=4326")
+                append("&spatialRel=esriSpatialRelIntersects")
+                append("&outFields=").append(encoded("id,title,data_type"))
+                append("&returnGeometry=false")
+                append("&resultRecordCount=").append(MAX_DATASETS)
+            }
+        }
+
+        internal fun davDatasets(json: String): List<NoaaDataset> {
+            val features = JSONObject(json).optJSONArray("features") ?: JSONArray()
+            return buildList {
+                for (index in 0 until features.length()) {
+                    val attributes = features.optJSONObject(index)?.optJSONObject("attributes") ?: continue
+                    val id = attributes.optInt("id", -1).takeIf { it > 0 } ?: continue
+                    val title = attributes.optString("title").ifBlank { "NOAA dataset $id" }
+                    add(NoaaDataset(id = id, title = title))
+                }
+            }
+        }
 
         internal fun collectionUrl(datum: String, datasetId: Int): String =
             "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/laz/$datum/$datasetId/stac/collection.json"
