@@ -1,7 +1,10 @@
 package com.example.data
 
+import com.example.ui.PersistedMapViewport
 import com.example.ui.chooseAiRefineResolution
+import com.example.ui.components.shouldResetGpuCamera
 import com.example.ui.isEffectivelyWholeTerrain
+import com.example.ui.persistViewportAfterTerrainSwap
 import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -142,6 +145,52 @@ class RefineViewRegressionTest {
         assertTrue(
             "refine cell should stay around 1–2× ground spacing ($spacing), was $refineCell",
             refineCell <= spacing * 2.05,
+        )
+    }
+
+    @Test
+    fun refineDiscardsSavedZoomSoALaterTerrainTabCannotRemagnifyTheCrop() {
+        val zoomed = PersistedMapViewport(zoom = 4.5f, panX = 180f, panY = -90f)
+        val afterRefine = persistViewportAfterTerrainSwap(zoomed, discardSavedViewport = true)
+        assertEquals(PersistedMapViewport.FitToCanvas, afterRefine)
+        // First composition of Terrain runs the restore-token effect after the reset-key
+        // effect. Restore wins, so it must read the cleared values rather than 4.5×.
+        val restoreToken = 1
+        val shown = if (restoreToken > 0) afterRefine else PersistedMapViewport.FitToCanvas
+        assertEquals(1f, shown.zoom, 0f)
+        assertEquals(0f, shown.panX, 0f)
+        assertEquals(0f, shown.panY, 0f)
+    }
+
+    @Test
+    fun loadingANewLidarKeepsThePersistedViewportForColdStartRestore() {
+        val saved = PersistedMapViewport(zoom = 3f, panX = 40f, panY = 12f)
+        assertEquals(saved, persistViewportAfterTerrainSwap(saved, discardSavedViewport = false))
+    }
+
+    @Test
+    fun sameSizedRefinedGpuSceneStillResetsTheCamera() {
+        val overview = TerrainGpuSceneBuilder.build(sampleGrid(1_024, 1_024, cellSizeMeters = 0.98f))
+        val crop = TerrainGpuSceneBuilder.build(sampleGrid(1_024, 1_024, cellSizeMeters = 0.12f))
+        assertEquals(overview.sourceWidth, crop.sourceWidth)
+        assertEquals(overview.sourceHeight, crop.sourceHeight)
+        assertFalse(
+            "dimensions alone must not keep the old 3D camera on a same-size crop",
+            shouldResetGpuCamera(
+                previousScene = overview,
+                previousResetKey = 1,
+                nextScene = crop,
+                nextResetKey = 1,
+            ),
+        )
+        assertTrue(
+            "the refine viewport-reset key must reset the GPU camera even when pixel size is unchanged",
+            shouldResetGpuCamera(
+                previousScene = overview,
+                previousResetKey = 1,
+                nextScene = crop,
+                nextResetKey = 2,
+            ),
         )
     }
 
