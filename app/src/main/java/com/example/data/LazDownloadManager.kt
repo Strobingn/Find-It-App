@@ -27,6 +27,8 @@ class LazDownloadManager(
     private val parallelConnections: Int = DEFAULT_PARALLEL_CONNECTIONS,
     /** Faster byte-identical mirror lookup; null disables mirrors. */
     private val mirrorResolver: com.example.data.download.LazMirrorResolver? = sharedMirrorResolver,
+    /** USGS 3DEP EPT rebuild of TNM tiles (fast S3); null disables it. */
+    private val eptBuilder: com.example.data.download.EptTileBuilder? = com.example.data.download.EptTileBuilder.shared,
 ) {
 
     companion object {
@@ -63,6 +65,22 @@ class LazDownloadManager(
         progress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null,
         shouldContinue: () -> Boolean = { !Thread.currentThread().isInterrupted },
     ): File {
+        if (eptBuilder != null) {
+            try {
+                val built = eptBuilder.build(sourceUrl.trim(), destinationDirectory, progress, shouldContinue)
+                if (built != null) {
+                    System.err.println("LAZ via EPT ${built.resource}: ${built.nodes} nodes, ${built.points} points")
+                    val size = built.file.length()
+                    progress?.invoke(size, size)
+                    return built.file
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                // EPT unavailable or mismatched: the original download path below is unchanged.
+                System.err.println("LAZ EPT rebuild failed (${error.message}); using original URL")
+            }
+        }
         val mirror = runCatching { mirrorResolver?.resolve(sourceUrl.trim()) }.getOrNull()
         if (mirror != null) {
             try {

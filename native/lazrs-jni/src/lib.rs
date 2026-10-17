@@ -567,3 +567,41 @@ mod tests {
         assert_eq!(total, info.point_count);
     }
 }
+
+pub mod ept;
+
+/// Rebuild one TNM tile from downloaded EPT nodes. Returns null on success, else an error text.
+/// `tm` = [lon0Deg, k0, falseEasting, falseNorthing]; `stats` receives [pointsRead, pointsKept].
+#[no_mangle]
+pub extern "system" fn Java_com_example_data_download_EptTileBuilder_nativeMerge<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    template: JString<'l>,
+    inputs: jni::objects::JObjectArray<'l>,
+    out: JString<'l>,
+    tm: JDoubleArray<'l>,
+    stats: JLongArray<'l>,
+) -> jobject {
+    let result: Result<ept::MergeStats, String> = (|| {
+        let template: String = env.get_string(&template).map_err(|e| e.to_string())?.into();
+        let out: String = env.get_string(&out).map_err(|e| e.to_string())?.into();
+        let n = env.get_array_length(&inputs).map_err(|e| e.to_string())?;
+        let mut paths = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let o = env.get_object_array_element(&inputs, i).map_err(|e| e.to_string())?;
+            let s: String = env.get_string(&JString::from(o)).map_err(|e| e.to_string())?.into();
+            paths.push(s);
+        }
+        let mut t = [0f64; 4];
+        env.get_double_array_region(&tm, 0, &mut t).map_err(|e| e.to_string())?;
+        let params = ept::MergeParams { template, inputs: paths, out, tm: ept::Tm::new(t[0], t[1], t[2], t[3]) };
+        catch_unwind(AssertUnwindSafe(|| ept::merge(&params))).map_err(|_| "panic in ept merge".to_string())?
+    })();
+    match result {
+        Ok(s) => {
+            let _ = env.set_long_array_region(&stats, 0, &[s.read as i64, s.kept as i64]);
+            std::ptr::null_mut()
+        }
+        Err(e) => env.new_string(e).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()),
+    }
+}
