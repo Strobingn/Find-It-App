@@ -668,79 +668,97 @@ object DemGenerator {
         }
     }
 
+    private data class ParsedXyzData(
+        val points: List<FloatArray>,
+        val minX: Float,
+        val maxX: Float,
+        val minY: Float,
+        val maxY: Float
+    )
+
+    private fun parseXyzLines(reader: java.io.BufferedReader): ParsedXyzData? {
+        val xs = ArrayList<Float>()
+        val ys = ArrayList<Float>()
+        val zs = ArrayList<Float>()
+        var minX = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        reader.forEachLine { line ->
+            val tokens = line.trim().split(Regex("[,\\s\\t]+"))
+            if (tokens.size >= 3) {
+                val x = tokens[0].toFloatOrNull()
+                val y = tokens[1].toFloatOrNull()
+                val z = tokens[2].toFloatOrNull()
+                if (x != null && y != null && z != null && x.isFinite() && y.isFinite() && z.isFinite()) {
+                    xs.add(x)
+                    ys.add(y)
+                    zs.add(z)
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+            }
+        }
+
+        if (xs.isEmpty()) return null
+
+        val points = ArrayList<FloatArray>(xs.size)
+        for (i in xs.indices) points.add(floatArrayOf(xs[i], ys[i], zs[i]))
+
+        return ParsedXyzData(points, minX, maxX, minY, maxY)
+    }
+
+    private fun createGridFromXyzPoints(data: ParsedXyzData): ElevationGrid {
+        val gridW = 100
+        val gridH = 100
+        val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
+        val maxGrid = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
+        val countGrid = IntArray(gridW * gridH)
+
+        val rangeX = if (data.maxX - data.minX > 0) (data.maxX - data.minX) else 1f
+        val rangeY = if (data.maxY - data.minY > 0) (data.maxY - data.minY) else 1f
+
+        for (pt in data.points) {
+            val x = pt[0]
+            val y = pt[1]
+            val z = pt[2]
+            
+            val gx = (((x - data.minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
+            val gy = ((1f - (y - data.minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
+            
+            val idx = gy * gridW + gx
+            if (z < minGrid[idx]) minGrid[idx] = z
+            if (z > maxGrid[idx]) maxGrid[idx] = z
+            countGrid[idx]++
+        }
+
+        val bareEarth = FloatArray(gridW * gridH)
+        val canopySpikes = FloatArray(gridW * gridH)
+        val valid = BooleanArray(gridW * gridH)
+        for (y in 0 until gridH) {
+            for (x in 0 until gridW) {
+                val idx = y * gridW + x
+                if (countGrid[idx] > 0) {
+                    bareEarth[idx] = minGrid[idx]
+                    canopySpikes[idx] = (maxGrid[idx] - minGrid[idx]).coerceAtLeast(0f)
+                    valid[idx] = true
+                } else {
+                    bareEarth[idx] = Float.NaN
+                }
+            }
+        }
+        return ElevationGrid(gridW, gridH, bareEarth, canopySpikes, 1f, valid)
+    }
+
     fun parseXyzStream(reader: java.io.BufferedReader): ElevationGrid? {
-        try {
-            val xs = ArrayList<Float>()
-            val ys = ArrayList<Float>()
-            val zs = ArrayList<Float>()
-            var minX = Float.MAX_VALUE
-            var maxX = -Float.MAX_VALUE
-            var minY = Float.MAX_VALUE
-            var maxY = -Float.MAX_VALUE
-            reader.forEachLine { line ->
-                val tokens = line.trim().split(Regex("[,\\s\\t]+"))
-                if (tokens.size >= 3) {
-                    val x = tokens[0].toFloatOrNull()
-                    val y = tokens[1].toFloatOrNull()
-                    val z = tokens[2].toFloatOrNull()
-                    if (x != null && y != null && z != null && x.isFinite() && y.isFinite() && z.isFinite()) {
-                        xs.add(x)
-                        ys.add(y)
-                        zs.add(z)
-                        if (x < minX) minX = x
-                        if (x > maxX) maxX = x
-                        if (y < minY) minY = y
-                        if (y > maxY) maxY = y
-                    }
-                }
-            }
-            val points = ArrayList<FloatArray>(xs.size)
-            for (i in xs.indices) points.add(floatArrayOf(xs[i], ys[i], zs[i]))
-            
-            if (points.isEmpty()) return null
-            
-            val gridW = 100
-            val gridH = 100
-            val minGrid = FloatArray(gridW * gridH) { Float.MAX_VALUE }
-            val maxGrid = FloatArray(gridW * gridH) { -Float.MAX_VALUE }
-            val countGrid = IntArray(gridW * gridH)
-            
-            val rangeX = if (maxX - minX > 0) (maxX - minX) else 1f
-            val rangeY = if (maxY - minY > 0) (maxY - minY) else 1f
-            
-            for (pt in points) {
-                val x = pt[0]
-                val y = pt[1]
-                val z = pt[2]
-                
-                val gx = (((x - minX) / rangeX) * (gridW - 1)).toInt().coerceIn(0, gridW - 1)
-                val gy = ((1f - (y - minY) / rangeY) * (gridH - 1)).toInt().coerceIn(0, gridH - 1)
-                
-                val idx = gy * gridW + gx
-                if (z < minGrid[idx]) minGrid[idx] = z
-                if (z > maxGrid[idx]) maxGrid[idx] = z
-                countGrid[idx]++
-            }
-            
-            val bareEarth = FloatArray(gridW * gridH)
-            val canopySpikes = FloatArray(gridW * gridH)
-            val valid = BooleanArray(gridW * gridH)
-            for (y in 0 until gridH) {
-                for (x in 0 until gridW) {
-                    val idx = y * gridW + x
-                    if (countGrid[idx] > 0) {
-                        bareEarth[idx] = minGrid[idx]
-                        canopySpikes[idx] = (maxGrid[idx] - minGrid[idx]).coerceAtLeast(0f)
-                        valid[idx] = true
-                    } else {
-                        bareEarth[idx] = Float.NaN
-                    }
-                }
-            }
-            return ElevationGrid(gridW, gridH, bareEarth, canopySpikes, 1f, valid)
+        return try {
+            val parsedData = parseXyzLines(reader) ?: return null
+            createGridFromXyzPoints(parsedData)
         } catch (e: Exception) {
             e.printStackTrace()
-            return null
+            null
         }
     }
 
