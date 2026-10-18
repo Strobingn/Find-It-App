@@ -576,6 +576,41 @@ fun TerrainGoogleMapScreen(
         hasSavedAlignment = true
     }
 
+    val locationTracker = remember(context) { com.example.geospatial.LocationTracker(context) }
+    fun centerOnFix() {
+        when (val outcome = com.example.geospatial.MapLocate.outcome(context, locationTracker)) {
+            com.example.geospatial.MapLocate.Outcome.READY -> {
+                android.widget.Toast.makeText(context, com.example.geospatial.MapLocate.message(outcome), android.widget.Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    val fix = com.example.geospatial.MapLocate.currentFix(context, locationTracker)
+                    val map = googleMap
+                    if (fix == null || map == null) {
+                        android.widget.Toast.makeText(context, com.example.geospatial.MapLocate.message(null), android.widget.Toast.LENGTH_LONG).show()
+                    } else {
+                        runCatching {
+                            map.isMyLocationEnabled = true
+                            map.uiSettings.isMyLocationButtonEnabled = true
+                        }
+                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(fix.latitude, fix.longitude), 17f))
+                    }
+                }
+            }
+            else -> android.widget.Toast.makeText(context, com.example.geospatial.MapLocate.message(outcome), android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+    val locatePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { centerOnFix() }
+    fun locateMe() {
+        if (locationTracker.hasLocationPermission()) {
+            centerOnFix()
+        } else {
+            locatePermissionLauncher.launch(
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+            )
+        }
+    }
+
     DisposableEffect(mapView) {
         mapView.getMapAsync { map ->
             googleMap = map
@@ -1093,13 +1128,21 @@ fun TerrainGoogleMapScreen(
             modifier = Modifier.align(Alignment.CenterEnd).padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Magnifying glass = find my position (GPS) and center the map on it.
+            SmallFloatingActionButton(
+                onClick = { locateMe() },
+                modifier = Modifier.testTag("map_locate_me"),
+            ) {
+                Icon(Icons.Default.Search, contentDescription = "Find my location")
+            }
             val findTiles = onFindLidarTiles
             if (findTiles != null) {
+                // Hands the visible area to the LiDAR import tab (separate, clearly labelled icon).
                 SmallFloatingActionButton(
                     onClick = { visibleSearchBounds(googleMap)?.let(findTiles) },
                     modifier = Modifier.testTag("find_lidar_tiles_in_view"),
                 ) {
-                    Icon(Icons.Default.Search, contentDescription = "Find LiDAR tiles in this view")
+                    Icon(Icons.Default.UploadFile, contentDescription = "Find LiDAR tiles in this view")
                 }
             }
             SmallFloatingActionButton(onClick = { showCoverage = !showCoverage }) {
