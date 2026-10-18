@@ -474,9 +474,14 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (active) {
             if (compassHeadingJob?.isActive == true) return
             compassHeadingJob = viewModelScope.launch {
-                compassHeadingTracker.headings()
-                    .catch { _compassHeadingDegrees.value = null }
-                    .collect { heading -> _compassHeadingDegrees.value = heading }
+                try {
+                    compassHeadingTracker.headings().collect { heading ->
+                        _compassHeadingDegrees.value = heading
+                    }
+                } catch (e: Throwable) {
+                    if (e is CancellationException) throw e
+                    _compassHeadingDegrees.value = null
+                }
             }
         } else {
             compassHeadingJob?.cancel()
@@ -735,9 +740,8 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (locationJob?.isActive == true) return
         preciseGps.start()
         locationJob = viewModelScope.launch {
-            preciseGps.fixes
-                .catch { /* provider unavailable or a platform SecurityException — stop tracking */ }
-                .collect { incoming ->
+            try {
+                preciseGps.fixes.collect { incoming ->
                     val fix = if (incoming.source == com.example.gps.FixSource.AVERAGED) {
                         heldPreciseFix = incoming
                         incoming
@@ -756,6 +760,10 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     refreshBoundaryProximity(fix.latitude, fix.longitude)
                 }
+            } catch (e: Throwable) {
+                if (e is CancellationException) throw e
+                /* provider unavailable or a platform SecurityException — stop tracking */
+            }
         }
     }
 
