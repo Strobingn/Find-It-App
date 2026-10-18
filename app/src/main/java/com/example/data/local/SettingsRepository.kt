@@ -81,7 +81,7 @@ class SettingsRepository(private val settingDao: SettingDao) {
     }
 
     suspend fun clearAll() {
-        settingDao.getAll().forEach { settingDao.delete(it.key) }
+        settingDao.clearAll()
     }
 
     fun getAllSettings(): Flow<List<Setting>> = flow {
