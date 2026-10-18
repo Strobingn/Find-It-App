@@ -19,25 +19,51 @@ internal object PackedPointRasterizer {
     ): Boolean {
         val buffer = packed.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         buffer.clear()
+        if (!rasterizer.acceptsFastBin) {
+            repeat(pointCount) { index ->
+                if (index and 32_767 == 32_767 && !shouldContinue()) {
+                    rasterizer.markTruncated()
+                    return false
+                }
+                val x = buffer.float.toDouble() + originX
+                val y = buffer.float.toDouble() + originY
+                val z = (buffer.float.toDouble() + originZ).toFloat()
+                val classification = buffer.get().toInt() and 0xFF
+                val flags = buffer.get().toInt() and 0xFF
+                buffer.short
+                rasterizer.addPoint(
+                    x = x,
+                    y = y,
+                    z = z,
+                    classification = classification,
+                    isKeyPoint = flags and 0x01 != 0,
+                )
+            }
+            return true
+        }
+        val window = 16_384
+        val xs = DoubleArray(window)
+        val ys = DoubleArray(window)
+        val zs = FloatArray(window)
+        var filled = 0
         repeat(pointCount) { index ->
             if (index and 32_767 == 32_767 && !shouldContinue()) {
+                if (filled > 0) rasterizer.addUnclassifiedSamples(xs, ys, zs, filled)
                 rasterizer.markTruncated()
                 return false
             }
-            val x = buffer.float.toDouble() + originX
-            val y = buffer.float.toDouble() + originY
-            val z = (buffer.float.toDouble() + originZ).toFloat()
-            val classification = buffer.get().toInt() and 0xFF
-            val flags = buffer.get().toInt() and 0xFF
+            xs[filled] = buffer.float.toDouble() + originX
+            ys[filled] = buffer.float.toDouble() + originY
+            zs[filled] = (buffer.float.toDouble() + originZ).toFloat()
             buffer.short
-            rasterizer.addPoint(
-                x = x,
-                y = y,
-                z = z,
-                classification = classification,
-                isKeyPoint = flags and 0x01 != 0,
-            )
+            buffer.short
+            filled++
+            if (filled == window) {
+                rasterizer.addUnclassifiedSamples(xs, ys, zs, filled)
+                filled = 0
+            }
         }
+        if (filled > 0) rasterizer.addUnclassifiedSamples(xs, ys, zs, filled)
         return true
     }
 

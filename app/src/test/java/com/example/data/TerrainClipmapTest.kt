@@ -1,5 +1,6 @@
 package com.example.data
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -87,6 +88,66 @@ class TerrainClipmapTest {
                 assertEquals(bare[index], clipmap.heightmap.floats[index], 0f)
             } else {
                 assertTrue(clipmap.heightmap.floats[index].isNaN())
+            }
+        }
+    }
+
+    @Test
+    fun indexOnlyClipmapMatchesCpuVerticesAndIndices() {
+        val width = 320
+        val height = 256
+        val bare = FloatArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            10f + x * 0.02f + y * 0.01f
+        }
+        val valid = BooleanArray(width * height) { true }
+        for (y in 20..28) {
+            for (x in 40..48) valid[y * width + x] = false
+        }
+        bare[80 * width + 70] = Float.NaN
+        val source = ElevationGrid(
+            width,
+            height,
+            bare,
+            FloatArray(width * height),
+            cellSizeMeters = 0.5f,
+            validData = valid,
+        )
+        val cpu = TerrainGpuSceneBuilder.build(
+            source = source,
+            maxFinestDimension = maxOf(width, height),
+            tileSize = 64,
+            attachHeightmap = false,
+        )
+        val clip = TerrainGpuSceneBuilder.build(
+            source = source,
+            maxFinestDimension = maxOf(width, height),
+            tileSize = 64,
+            attachHeightmap = true,
+        )
+        assertEquals(cpu.levels.size, clip.levels.size)
+        assertEquals(cpu.levels.size, clip.clipmaps.size)
+        cpu.levels.zip(clip.levels.zip(clip.clipmaps)).forEach { (cpuLevel, clipPair) ->
+            val (clipLevel, clipmap) = clipPair
+            assertEquals(cpuLevel.batches.size, clipLevel.batches.size)
+            cpuLevel.batches.zip(clipLevel.batches).forEach { (cpuBatch, clipBatch) ->
+                assertEquals(0, clipBatch.vertices.size)
+                assertEquals(cpuBatch.vertexCount, clipBatch.vertexCount)
+                assertArrayEquals(cpuBatch.indices, clipBatch.indices)
+                val rebuilt = TerrainGpuSceneBuilder.cpuVerticesFromHeightmap(
+                    batch = clipBatch,
+                    gridWidth = clipLevel.gridWidth,
+                    gridHeight = clipLevel.gridHeight,
+                    heights = clipmap.heightmap.floats,
+                    cellSizeMeters = clipmap.heightmap.cellSizeMeters,
+                    minElevation = clipmap.minElevation,
+                    maxElevation = clipmap.maxElevation,
+                )
+                assertEquals(cpuBatch.vertices.size, rebuilt.size)
+                for (index in rebuilt.indices) {
+                    assertEquals(cpuBatch.vertices[index], rebuilt[index], 0f)
+                }
             }
         }
     }

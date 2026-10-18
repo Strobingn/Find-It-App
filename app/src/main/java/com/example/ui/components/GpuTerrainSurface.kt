@@ -17,6 +17,7 @@ import com.example.data.TerrainFrustumCuller
 import com.example.data.TerrainGpuBatch
 import com.example.data.TerrainGpuLevel
 import com.example.data.TerrainGpuScene
+import com.example.data.TerrainGpuSceneBuilder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.tan
@@ -287,19 +288,15 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         val activeScene = scene ?: return
         val level = activeScene.selectForZoom(zoom)
-        val clipmap = if (vtfProgram != 0) {
-            activeScene.clipmaps.firstOrNull {
-                it.reductionFactor == level.reductionFactor &&
-                    it.heightmap.width == level.gridWidth &&
-                    it.heightmap.height == level.gridHeight
-            }
-        } else {
-            null
+        val clipmap = activeScene.clipmaps.firstOrNull {
+            it.reductionFactor == level.reductionFactor &&
+                it.heightmap.width == level.gridWidth &&
+                it.heightmap.height == level.gridHeight
         }
-        if (clipmap != null) {
+        if (vtfProgram != 0 && clipmap != null) {
             drawClipmapLevel(level, clipmap)
         } else {
-            drawCpuBatches(level)
+            drawCpuBatches(level, clipmap)
         }
     }
 
@@ -345,8 +342,8 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
     }
 
-    private fun drawCpuBatches(level: TerrainGpuLevel) {
-        val batches = uploadedLevels[level.reductionFactor] ?: upload(level, uploadVertexBuffers = true)
+    private fun drawCpuBatches(level: TerrainGpuLevel, clipmap: TerrainClipmapLevel?) {
+        val batches = uploadedLevels[level.reductionFactor] ?: upload(level, uploadVertexBuffers = true, clipmap)
         if (batches.isEmpty()) return
         activeBatches = batches
 
@@ -384,18 +381,38 @@ private class TerrainGlRenderer : GLSurfaceView.Renderer {
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
     }
 
-    private fun upload(level: TerrainGpuLevel, uploadVertexBuffers: Boolean): List<GlBatch> {
+    private fun upload(
+        level: TerrainGpuLevel,
+        uploadVertexBuffers: Boolean,
+        clipmap: TerrainClipmapLevel? = null,
+    ): List<GlBatch> {
         val uploaded = ArrayList<GlBatch>(level.batches.size)
         for (batch in level.batches) {
+            val cpuVertices = if (!uploadVertexBuffers || batch.vertices.isNotEmpty()) {
+                batch.vertices
+            } else if (clipmap != null) {
+                TerrainGpuSceneBuilder.cpuVerticesFromHeightmap(
+                    batch = batch,
+                    gridWidth = level.gridWidth,
+                    gridHeight = level.gridHeight,
+                    heights = clipmap.heightmap.floats,
+                    cellSizeMeters = clipmap.heightmap.cellSizeMeters,
+                    minElevation = clipmap.minElevation,
+                    maxElevation = clipmap.maxElevation,
+                )
+            } else {
+                batch.vertices
+            }
+            if (uploadVertexBuffers && cpuVertices.isEmpty()) continue
             val ids = IntArray(2)
             GLES20.glGenBuffers(if (uploadVertexBuffers) 2 else 1, ids, 0)
             val vertexBufferId: Int
             if (uploadVertexBuffers) {
-                val vertexBytes = batch.vertices.size * Float.SIZE_BYTES
+                val vertexBytes = cpuVertices.size * Float.SIZE_BYTES
                 val vertexBuffer = reusableFloatStaging(vertexBytes)
                 vertexBuffer.asFloatBuffer().apply {
                     clear()
-                    put(batch.vertices)
+                    put(cpuVertices)
                     position(0)
                 }
                 GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, ids[0])

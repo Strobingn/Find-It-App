@@ -18,6 +18,17 @@ import kotlin.math.sqrt
 // only larger refined-detail grids (up to 1536x1536 on capable devices) actually parallelize.
 private const val MIN_PIXELS_FOR_PARALLEL_RENDER = 200_000
 
+/**
+ * Test hook. Production hillshade uses the dense-row fast path; tests set this to compare
+ * that path against the general per-pixel loop.
+ */
+@Volatile
+internal var disableFastHillshadeRows: Boolean = false
+
+/** Opaque ARGB packing matching [android.graphics.Color.rgb] for channels already in 0..255. */
+private fun packRgb(red: Int, green: Int, blue: Int): Int =
+    (0xFF shl 24) or (red shl 16) or (green shl 8) or blue
+
 private val RENDER_PARALLELISM = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
 
 // Shared across grids and reused between renders. Daemon threads so an idle pool never keeps
@@ -194,8 +205,76 @@ class ElevationGrid(
         val gradientDivisor = 8f * cellDistance
         val lastX = width - 1
         val lastY = height - 1
+        // Mode 0 with no overlay/contours is the slider path. Rows whose 3-wide neighborhood is
+        // fully finite skip the per-neighbor validity calls; the Horn weights are unchanged.
+        val fastRows = if (
+            !disableFastHillshadeRows &&
+            boundedMode == 0 &&
+            overlayType <= 0 &&
+            contourInterval < 0.05f
+        ) {
+            BooleanArray(height) { y ->
+                val start = y * width
+                var dense = true
+                for (i in start until start + width) {
+                    if (!validData[i] || !elevations[i].isFinite()) {
+                        dense = false
+                        break
+                    }
+                }
+                dense
+            }
+        } else {
+            null
+        }
+
+        fun renderFastRow(y: Int) {
+            val above = (y - 1) * width
+            val row = y * width
+            val below = (y + 1) * width
+            for (x in 0 until width) {
+                val index = row + x
+                val centerZ = elevations[index]
+                val x0 = if (x == 0) 0 else x - 1
+                val x2 = if (x == lastX) lastX else x + 1
+                val z00 = elevations[above + x0]
+                val z01 = elevations[above + x]
+                val z02 = elevations[above + x2]
+                val z10 = elevations[row + x0]
+                val z12 = elevations[row + x2]
+                val z20 = elevations[below + x0]
+                val z21 = elevations[below + x]
+                val z22 = elevations[below + x2]
+                var gradientX = ((z02 + 2f * z12 + z22) - (z00 + 2f * z10 + z20)) /
+                    gradientDivisor * zMultiplier
+                var gradientY = ((z20 + 2f * z21 + z22) - (z00 + 2f * z01 + z02)) /
+                    gradientDivisor * zMultiplier
+                if (!gradientX.isFinite() || !gradientY.isFinite()) {
+                    gradientX = 0f
+                    gradientY = 0f
+                }
+                val normalLength = sqrt(gradientX * gradientX + gradientY * gradientY + 1f)
+                val primaryShade = illumination(
+                    -gradientX / normalLength,
+                    -gradientY / normalLength,
+                    1f / normalLength,
+                    primaryLight,
+                )
+                val elevationPercent = ((centerZ - minElevation) / elevationRange).coerceIn(0f, 1f)
+                pixels[index] = shadePalette(
+                    getPaletteColor(palette, elevationPercent),
+                    primaryShade,
+                    contrastValue,
+                )
+            }
+        }
 
         fun renderRow(y: Int) {
+            val dense = fastRows
+            if (dense != null && y > 0 && y < lastY && dense[y - 1] && dense[y] && dense[y + 1]) {
+                renderFastRow(y)
+                return
+            }
             val interiorRow = y > 0 && y < lastY
             for (x in 0 until width) {
                 val index = y * width + x
@@ -321,7 +400,7 @@ class ElevationGrid(
                 }
 
                 if (contourInterval >= 0.05f && isContourPixel(elevations, x, y, contourInterval)) {
-                    color = blend(color, Color.rgb(235, 244, 255), 0.72f)
+                    color = blend(color, packRgb(235, 244, 255), 0.72f)
                 }
                 pixels[index] = color
             }
@@ -419,16 +498,16 @@ class ElevationGrid(
     private fun shadePalette(baseColor: Int, rawShade: Float, contrast: Float): Int {
         val adjusted = ((rawShade - 0.5f) * contrast + 0.5f).coerceIn(0f, 1f)
         val illumination = 0.18f + adjusted * 0.82f
-        return Color.rgb(
-            (Color.red(baseColor) * illumination).toInt().coerceIn(0, 255),
-            (Color.green(baseColor) * illumination).toInt().coerceIn(0, 255),
-            (Color.blue(baseColor) * illumination).toInt().coerceIn(0, 255),
+        return packRgb(
+            ((baseColor shr 16 and 0xFF) * illumination).toInt().coerceIn(0, 255),
+            ((baseColor shr 8 and 0xFF) * illumination).toInt().coerceIn(0, 255),
+            ((baseColor and 0xFF) * illumination).toInt().coerceIn(0, 255),
         )
     }
 
     private fun slopeColor(baseColor: Int, slopeRadians: Float): Int {
         val strength = (slopeRadians / Math.toRadians(35.0).toFloat()).coerceIn(0f, 1f)
-        return blend(baseColor, Color.rgb(255, 70, 0), strength)
+        return blend(baseColor, packRgb(255, 70, 0), strength)
     }
 
     private fun isUsable(elevations: FloatArray, i: Int): Boolean =
@@ -540,48 +619,48 @@ class ElevationGrid(
             val isSectionLine = x % sectionX == 0 || y % sectionY == 0
             val roadY = height * 0.65f + sin(x * 0.08f) * height * 0.12f
             val isRoad = abs(y - roadY) < max(1.5f, height / 100f)
-            if (isSectionLine) return Color.rgb(180, 150, 110)
-            if (isRoad) return Color.rgb(160, 130, 90)
+            if (isSectionLine) return packRgb(180, 150, 110)
+            if (isRoad) return packRgb(160, 130, 90)
         } else if (overlayType == 2) {
             val isContour = currentElevation.toInt() % 12 == 0 &&
                 (elevations[index(x - 1, y)].toInt() % 12 != 0 ||
                     elevations[index(x, y - 1)].toInt() % 12 != 0)
-            if (isContour) return Color.rgb(115, 80, 50)
-            if (x == width / 2 || y == height / 2) return Color.rgb(50, 80, 115)
+            if (isContour) return packRgb(115, 80, 50)
+            if (x == width / 2 || y == height / 2) return packRgb(50, 80, 115)
         }
         return null
     }
 
     private fun divergingReliefColor(value: Float): Int {
-        val neutral = Color.rgb(198, 198, 194)
+        val neutral = packRgb(198, 198, 194)
         return if (value < 0f) {
-            blend(neutral, Color.rgb(32, 116, 210), -value)
+            blend(neutral, packRgb(32, 116, 210), -value)
         } else {
-            blend(neutral, Color.rgb(232, 82, 30), value)
+            blend(neutral, packRgb(232, 82, 30), value)
         }
     }
 
     private fun divergingCurvatureColor(value: Float): Int {
-        val neutral = Color.rgb(190, 190, 184)
+        val neutral = packRgb(190, 190, 184)
         return if (value < 0f) {
-            blend(neutral, Color.rgb(24, 180, 196), -value)
+            blend(neutral, packRgb(24, 180, 196), -value)
         } else {
-            blend(neutral, Color.rgb(208, 48, 146), value)
+            blend(neutral, packRgb(208, 48, 146), value)
         }
     }
 
     private fun disturbanceCandidateColor(score: Float, shade: Float): Int {
-        val base = Color.rgb(42, 49, 53)
+        val base = packRgb(42, 49, 53)
         val heat = when {
-            score < 0.35f -> blend(base, Color.rgb(44, 102, 126), score / 0.35f)
-            score < 0.7f -> blend(Color.rgb(44, 102, 126), Color.rgb(255, 204, 52), (score - 0.35f) / 0.35f)
-            else -> blend(Color.rgb(255, 204, 52), Color.rgb(230, 42, 38), (score - 0.7f) / 0.3f)
+            score < 0.35f -> blend(base, packRgb(44, 102, 126), score / 0.35f)
+            score < 0.7f -> blend(packRgb(44, 102, 126), packRgb(255, 204, 52), (score - 0.35f) / 0.35f)
+            else -> blend(packRgb(255, 204, 52), packRgb(230, 42, 38), (score - 0.7f) / 0.3f)
         }
         return shadePalette(heat, 0.3f + shade * 0.7f, 0.8f)
     }
 
     private fun aspectColor(dx: Float, dy: Float, slopeRadians: Float, shade: Float): Int {
-        if (slopeRadians < Math.toRadians(1.0).toFloat()) return Color.rgb(148, 148, 148)
+        if (slopeRadians < Math.toRadians(1.0).toFloat()) return packRgb(148, 148, 148)
         val degrees = ((Math.toDegrees(kotlin.math.atan2(dx, -dy).toDouble()).toFloat() + 360f) % 360f)
         val vivid = Color.HSVToColor(floatArrayOf(degrees, 0.82f, 0.95f))
         return shadePalette(vivid, 0.35f + shade * 0.65f, 0.72f)
@@ -590,9 +669,9 @@ class ElevationGrid(
     private fun canopyHeightColor(heightMeters: Float, scale: Float, shade: Float): Int {
         val normalized = (heightMeters.coerceAtLeast(0f) / scale).coerceIn(0f, 1f)
         val base = when {
-            normalized < 0.08f -> Color.rgb(82, 74, 62)
-            normalized < 0.45f -> blend(Color.rgb(82, 74, 62), Color.rgb(46, 139, 87), normalized / 0.45f)
-            else -> blend(Color.rgb(46, 139, 87), Color.rgb(8, 58, 32), (normalized - 0.45f) / 0.55f)
+            normalized < 0.08f -> packRgb(82, 74, 62)
+            normalized < 0.45f -> blend(packRgb(82, 74, 62), packRgb(46, 139, 87), normalized / 0.45f)
+            else -> blend(packRgb(46, 139, 87), packRgb(8, 58, 32), (normalized - 0.45f) / 0.55f)
         }
         return shadePalette(base, 0.4f + shade * 0.6f, 0.65f)
     }
@@ -614,28 +693,29 @@ class ElevationGrid(
     private fun getPaletteColor(palette: Int, percent: Float): Int = when (palette) {
         0 -> {
             val shade = (150 + percent * 60).toInt().coerceIn(0, 255)
-            Color.rgb(shade, shade, shade)
+            packRgb(shade, shade, shade)
         }
         1 -> when {
-            percent < 0.3f -> blend(Color.rgb(15, 20, 45), Color.rgb(80, 15, 20), percent / 0.3f)
-            percent < 0.7f -> blend(Color.rgb(80, 15, 20), Color.rgb(200, 90, 40), (percent - 0.3f) / 0.4f)
-            else -> blend(Color.rgb(200, 90, 40), Color.rgb(250, 180, 70), (percent - 0.7f) / 0.3f)
+            percent < 0.3f -> blend(packRgb(15, 20, 45), packRgb(80, 15, 20), percent / 0.3f)
+            percent < 0.7f -> blend(packRgb(80, 15, 20), packRgb(200, 90, 40), (percent - 0.3f) / 0.4f)
+            else -> blend(packRgb(200, 90, 40), packRgb(250, 180, 70), (percent - 0.7f) / 0.3f)
         }
         2 -> when {
-            percent < 0.2f -> blend(Color.rgb(34, 112, 63), Color.rgb(46, 139, 87), percent / 0.2f)
-            percent < 0.6f -> blend(Color.rgb(46, 139, 87), Color.rgb(196, 183, 101), (percent - 0.2f) / 0.4f)
-            percent < 0.85f -> blend(Color.rgb(196, 183, 101), Color.rgb(130, 80, 40), (percent - 0.6f) / 0.25f)
-            else -> blend(Color.rgb(130, 80, 40), Color.rgb(210, 210, 215), (percent - 0.85f) / 0.15f)
+            percent < 0.2f -> blend(packRgb(34, 112, 63), packRgb(46, 139, 87), percent / 0.2f)
+            percent < 0.6f -> blend(packRgb(46, 139, 87), packRgb(196, 183, 101), (percent - 0.2f) / 0.4f)
+            percent < 0.85f -> blend(packRgb(196, 183, 101), packRgb(130, 80, 40), (percent - 0.6f) / 0.25f)
+            else -> blend(packRgb(130, 80, 40), packRgb(210, 210, 215), (percent - 0.85f) / 0.15f)
         }
         else -> Color.GRAY
     }
 
     private fun blend(background: Int, foreground: Int, amount: Float): Int {
         val fraction = amount.coerceIn(0f, 1f)
-        return Color.rgb(
-            (Color.red(background) * (1f - fraction) + Color.red(foreground) * fraction).toInt(),
-            (Color.green(background) * (1f - fraction) + Color.green(foreground) * fraction).toInt(),
-            (Color.blue(background) * (1f - fraction) + Color.blue(foreground) * fraction).toInt(),
+        val inverse = 1f - fraction
+        return packRgb(
+            ((background shr 16 and 0xFF) * inverse + (foreground shr 16 and 0xFF) * fraction).toInt(),
+            ((background shr 8 and 0xFF) * inverse + (foreground shr 8 and 0xFF) * fraction).toInt(),
+            ((background and 0xFF) * inverse + (foreground and 0xFF) * fraction).toInt(),
         )
     }
 

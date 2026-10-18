@@ -1,5 +1,7 @@
 package com.example.data
 
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -9,8 +11,14 @@ data class TerrainGpuBatch(
     val vertices: FloatArray,
     val indices: ShortArray,
     val intIndices: IntArray? = null,
+    /**
+     * Vertex count when [vertices] is empty. Clipmap scenes upload only the index buffer;
+     * the vertex shader reconstructs positions. CPU fallback materializes this many vertices.
+     */
+    val indexOnlyVertexCount: Int = 0,
 ) {
-    val vertexCount: Int get() = vertices.size / FLOATS_PER_VERTEX
+    val vertexCount: Int
+        get() = if (vertices.isNotEmpty()) vertices.size / FLOATS_PER_VERTEX else indexOnlyVertexCount
     val triangleCount: Int get() = (intIndices?.size ?: indices.size) / 3
     val usesIntIndices: Boolean get() = intIndices != null
 
@@ -83,6 +91,18 @@ object TerrainGpuSceneBuilder {
     /** ES 3.0 unsigned-int index tiles. 1025² vertices still fit a 32-bit element buffer. */
     const val MAX_INT_TILE_SIZE = 1_024
 
+    /**
+     * Scene the GL surface draws. Clipmap heightmaps plus index buffers; positions and normals
+     * are reconstructed in the vertex shader, so this skips the CPU normal pass.
+     */
+    fun buildDisplayScene(source: ElevationGrid): TerrainGpuScene = build(
+        source = source,
+        maxFinestDimension = maxOf(source.width, source.height, 64),
+        tileSize = TerrainDecodeCoordinator.GPU_PREVIEW_TILE_SIZE,
+        useIntIndices = false,
+        attachHeightmap = true,
+    )
+
     fun build(
         source: ElevationGrid,
         maxFinestDimension: Int = Int.MAX_VALUE,
@@ -102,68 +122,22 @@ object TerrainGpuSceneBuilder {
             // extra scene RAM, and buffers that were never uploaded or drawn.
             maxLevels = 2,
         )
+        // Clipmap scenes never upload positions. Building them (and a normal per vertex) dominated
+        // mesh time on 1,024²+ DEMs and was discarded by the vertex-texture-fetch renderer.
+        val indexOnly = attachHeightmap
         val built = pyramid.levels.map { level ->
-            val index = TerrainSpatialGridIndex.build(level.grid, safeTileSize)
-            val elevationBounds = elevationBounds(level.grid)
-            var rendered = 0
-            var skippedEmpty = 0
-            var skippedNoQuads = 0
-            val batches = index.tiles.mapNotNull { tile ->
-                if (tile.isEmpty) {
-                    skippedEmpty++
-                    TerrainCoverageLog.emit(
-                        "FindItTerrain",
-                        "GPU tile r${tile.tileRow}c${tile.tileColumn} SKIP empty " +
-                            "(${tile.startX}..${tile.endXInclusive}," +
-                            "${tile.startY}..${tile.endYInclusive})",
-                    )
-                    return@mapNotNull null
-                }
-                val batch = buildBatch(
-                    level.grid,
-                    tile,
-                    elevationBounds.first,
-                    elevationBounds.second,
-                    useIntIndices,
-                )
-                if (batch == null) {
-                    skippedNoQuads++
-                    TerrainCoverageLog.emit(
-                        "FindItTerrain",
-                        "GPU tile r${tile.tileRow}c${tile.tileColumn} SKIP no-quads " +
-                            "valid=${tile.validCellCount}",
-                    )
-                } else {
-                    rendered++
-                    TerrainCoverageLog.emit(
-                        "FindItTerrain",
-                        "GPU tile r${tile.tileRow}c${tile.tileColumn} RENDER " +
-                            "valid=${tile.validCellCount} tris=${batch.triangleCount}",
-                    )
-                }
-                batch
-            }
-            TerrainCoverageLog.emit(
-                "FindItTerrain",
-                "GPU level ${level.grid.width}×${level.grid.height} tiles " +
-                    "render=$rendered empty=$skippedEmpty noQuads=$skippedNoQuads",
-            )
-            BuiltLevel(
-                level = TerrainGpuLevel(
-                    reductionFactor = level.reductionFactor,
-                    gridWidth = level.grid.width,
-                    gridHeight = level.grid.height,
-                    batches = batches,
-                ),
-                grid = level.grid,
-                minElevation = elevationBounds.first,
-                maxElevation = elevationBounds.second,
-            )
+            buildLevel(level, safeTileSize, useIntIndices, indexOnly)
         }.filter { it.level.batches.isNotEmpty() }
 
         val levels = built.map { it.level }
         require(levels.isNotEmpty()) { "Terrain contains no renderable cells" }
-        val heightmap = if (attachHeightmap) HeightmapCdlod.pack(source) else null
+        val clipmapPacks = if (attachHeightmap) built.map { HeightmapCdlod.pack(it.grid) } else null
+        val heightmap = when {
+            clipmapPacks == null -> null
+            // Finest LOD is the source grid itself: one pack feeds both the scene and that clipmap.
+            built.first().grid === source -> clipmapPacks.first()
+            else -> HeightmapCdlod.pack(source)
+        }
         val nodes = if (heightmap != null) {
             HeightmapCdlod.select(
                 width = heightmap.width,
@@ -176,11 +150,11 @@ object TerrainGpuSceneBuilder {
         // One heightmap per LOD level for the ES 3.0 vertex-texture-fetch renderer. The ARM
         // geometry-clipmap pattern backs each level with its own texture; the vertex shader
         // reconstructs positions and normals from it, so no per-vertex buffers are uploaded.
-        val clipmaps = if (attachHeightmap) {
-            built.map { entry ->
+        val clipmaps = if (clipmapPacks != null) {
+            built.zip(clipmapPacks).map { (entry, pack) ->
                 TerrainClipmapLevel(
                     reductionFactor = entry.level.reductionFactor,
-                    heightmap = HeightmapCdlod.pack(entry.grid),
+                    heightmap = pack,
                     minElevation = entry.minElevation,
                     maxElevation = entry.maxElevation,
                 )
@@ -208,7 +182,125 @@ object TerrainGpuSceneBuilder {
 
     internal fun buildBatch(grid: ElevationGrid, tile: TerrainSpatialTile): TerrainGpuBatch? {
         val bounds = elevationBounds(grid)
-        return buildBatch(grid, tile, bounds.first, bounds.second, useIntIndices = false)
+        return buildBatch(grid, tile, bounds.first, bounds.second, useIntIndices = false, indexOnly = false)
+    }
+
+    /**
+     * Rebuilds the CPU position/normal buffer from a clipmap heightmap. Used only when the ES 3.0
+     * clipmap shader failed to compile and the renderer must fall back to vertex buffers.
+     * NaN texels match [HeightmapCdlod.pack]: they are not a drawn corner.
+     */
+    fun cpuVerticesFromHeightmap(
+        batch: TerrainGpuBatch,
+        gridWidth: Int,
+        gridHeight: Int,
+        heights: FloatArray,
+        cellSizeMeters: Float,
+        minElevation: Float,
+        maxElevation: Float,
+    ): FloatArray {
+        if (batch.vertices.isNotEmpty()) return batch.vertices
+        val localWidth = batch.tile.endXInclusive - batch.tile.startX + 1
+        val localHeight = batch.tile.endYInclusive - batch.tile.startY + 1
+        val vertices = FloatArray(localWidth * localHeight * TerrainGpuBatch.FLOATS_PER_VERTEX)
+        val range = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
+        writeVertices(
+            vertices = vertices,
+            tile = batch.tile,
+            bare = heights,
+            valid = null,
+            gridWidth = gridWidth,
+            gridHeight = gridHeight,
+            cellSizeMeters = cellSizeMeters,
+            minElevation = minElevation,
+            elevationRange = range,
+        )
+        return vertices
+    }
+
+    private fun buildLevel(
+        level: TerrainLodLevel,
+        tileSize: Int,
+        useIntIndices: Boolean,
+        indexOnly: Boolean,
+    ): BuiltLevel {
+        val index = TerrainSpatialGridIndex.build(level.grid, tileSize)
+        val bounds = elevationBounds(level.grid)
+        val slots = arrayOfNulls<TerrainGpuBatch>(index.tiles.size)
+        val parallel = index.tiles.size >= 4 && level.grid.width * level.grid.height >= 65_536
+        if (!parallel) {
+            for (i in index.tiles.indices) {
+                slots[i] = batchForTile(level.grid, index.tiles[i], bounds, useIntIndices, indexOnly)
+            }
+        } else {
+            val tasks = index.tiles.indices.map { i ->
+                meshPool.submit {
+                    slots[i] = batchForTile(level.grid, index.tiles[i], bounds, useIntIndices, indexOnly)
+                }
+            }
+            var failure: Throwable? = null
+            for (task in tasks) {
+                try {
+                    task.get()
+                } catch (error: Throwable) {
+                    if (failure == null) failure = error
+                }
+            }
+            if (failure != null) {
+                val cause = (failure as? ExecutionException)?.cause ?: failure
+                throw cause
+            }
+        }
+        var rendered = 0
+        var skippedEmpty = 0
+        var skippedNoQuads = 0
+        val batches = ArrayList<TerrainGpuBatch>(slots.size)
+        for (i in slots.indices) {
+            val batch = slots[i]
+            if (index.tiles[i].isEmpty) {
+                skippedEmpty++
+            } else if (batch == null) {
+                skippedNoQuads++
+            } else {
+                rendered++
+                batches += batch
+            }
+        }
+        TerrainCoverageLog.emit(
+            "FindItTerrain",
+            "GPU level ${level.grid.width}×${level.grid.height} tiles " +
+                "render=$rendered empty=$skippedEmpty noQuads=$skippedNoQuads" +
+                if (indexOnly) " index-only" else "",
+        )
+        return BuiltLevel(
+            level = TerrainGpuLevel(
+                reductionFactor = level.reductionFactor,
+                gridWidth = level.grid.width,
+                gridHeight = level.grid.height,
+                batches = batches,
+            ),
+            grid = level.grid,
+            minElevation = bounds.first,
+            maxElevation = bounds.second,
+        )
+    }
+
+    private fun batchForTile(
+        grid: ElevationGrid,
+        tile: TerrainSpatialTile,
+        elevationBounds: Pair<Float, Float>,
+        useIntIndices: Boolean,
+        indexOnly: Boolean,
+    ): TerrainGpuBatch? {
+        if (tile.isEmpty) return null
+        return buildBatch(
+            grid,
+            tile,
+            elevationBounds.first,
+            elevationBounds.second,
+            useIntIndices,
+            indexOnly,
+        )
     }
 
     private fun buildBatch(
@@ -217,6 +309,7 @@ object TerrainGpuSceneBuilder {
         minElevation: Float,
         maxElevation: Float,
         useIntIndices: Boolean = false,
+        indexOnly: Boolean = false,
     ): TerrainGpuBatch? {
         if (tile.isEmpty) return null
         val localWidth = tile.endXInclusive - tile.startX + 1
@@ -228,21 +321,22 @@ object TerrainGpuSceneBuilder {
         }
         val elevationRange = (maxElevation - minElevation).takeIf { it > 0f } ?: 1f
 
-        val vertices = FloatArray(localWidth * localHeight * TerrainGpuBatch.FLOATS_PER_VERTEX)
-        for (localY in 0 until localHeight) {
-            for (localX in 0 until localWidth) {
-                val x = tile.startX + localX
-                val y = tile.startY + localY
-                val sourceIndex = y * grid.width + x
-                val vertexIndex = (localY * localWidth + localX) * TerrainGpuBatch.FLOATS_PER_VERTEX
-                val valid = grid.validData[sourceIndex] && grid.bareEarth[sourceIndex].isFinite()
-                val elevation = if (valid) grid.bareEarth[sourceIndex] else minElevation
-
-                vertices[vertexIndex] = if (grid.width > 1) x.toFloat() / (grid.width - 1) * 2f - 1f else 0f
-                vertices[vertexIndex + 1] = if (grid.height > 1) 1f - y.toFloat() / (grid.height - 1) * 2f else 0f
-                vertices[vertexIndex + 2] = ((elevation - minElevation) / elevationRange - 0.5f) * 0.75f
-                writeNormal(grid, x, y, valid, vertices, vertexIndex + 3)
-            }
+        val vertices = if (indexOnly) {
+            FloatArray(0)
+        } else {
+            val filled = FloatArray(localWidth * localHeight * TerrainGpuBatch.FLOATS_PER_VERTEX)
+            writeVertices(
+                vertices = filled,
+                tile = tile,
+                bare = grid.bareEarth,
+                valid = grid.validData,
+                gridWidth = grid.width,
+                gridHeight = grid.height,
+                cellSizeMeters = grid.cellSizeMeters,
+                minElevation = minElevation,
+                elevationRange = elevationRange,
+            )
+            filled
         }
 
         val quadCapacity = (localWidth - 1) * (localHeight - 1) * 6
@@ -287,6 +381,7 @@ object TerrainGpuSceneBuilder {
             vertices = vertices,
             indices = if (intIndices != null) ShortArray(0) else shortIndices.copyOf(indexCount),
             intIndices = intIndices?.copyOf(indexCount),
+            indexOnlyVertexCount = if (indexOnly) localWidth * localHeight else 0,
         )
     }
 
@@ -304,45 +399,106 @@ object TerrainGpuSceneBuilder {
         return minElevation to maxElevation
     }
 
-    private fun writeNormal(
-        grid: ElevationGrid,
-        x: Int,
-        y: Int,
-        valid: Boolean,
-        target: FloatArray,
-        offset: Int,
+    private fun writeVertices(
+        vertices: FloatArray,
+        tile: TerrainSpatialTile,
+        bare: FloatArray,
+        valid: BooleanArray?,
+        gridWidth: Int,
+        gridHeight: Int,
+        cellSizeMeters: Float,
+        minElevation: Float,
+        elevationRange: Float,
     ) {
-        if (!valid) {
-            target[offset] = 0f
-            target[offset + 1] = 0f
-            target[offset + 2] = 0f
-            return
-        }
-
-        fun elevationAt(sampleX: Int, sampleY: Int): Float {
-            val sx = sampleX.coerceIn(0, grid.width - 1)
-            val sy = sampleY.coerceIn(0, grid.height - 1)
-            val index = sy * grid.width + sx
-            return if (grid.validData[index] && grid.bareEarth[index].isFinite()) {
-                grid.bareEarth[index]
-            } else {
-                grid.bareEarth[y * grid.width + x].takeIf { it.isFinite() } ?: 0f
+        val localWidth = tile.endXInclusive - tile.startX + 1
+        val localHeight = tile.endYInclusive - tile.startY + 1
+        val xDenom = if (gridWidth > 1) (gridWidth - 1).toFloat() else 1f
+        val yDenom = if (gridHeight > 1) (gridHeight - 1).toFloat() else 1f
+        val span = max(2f * cellSizeMeters, 0.001f)
+        val lastX = gridWidth - 1
+        val lastY = gridHeight - 1
+        for (localY in 0 until localHeight) {
+            val y = tile.startY + localY
+            val row = y * gridWidth
+            val interiorY = y > 0 && y < lastY
+            for (localX in 0 until localWidth) {
+                val x = tile.startX + localX
+                val sourceIndex = row + x
+                val vertexIndex = (localY * localWidth + localX) * TerrainGpuBatch.FLOATS_PER_VERTEX
+                val center = bare[sourceIndex]
+                val isValid = if (valid != null) valid[sourceIndex] && center.isFinite() else center.isFinite()
+                val elevation = if (isValid) center else minElevation
+                vertices[vertexIndex] = if (gridWidth > 1) x.toFloat() / xDenom * 2f - 1f else 0f
+                vertices[vertexIndex + 1] = if (gridHeight > 1) 1f - y.toFloat() / yDenom * 2f else 0f
+                vertices[vertexIndex + 2] = ((elevation - minElevation) / elevationRange - 0.5f) * 0.75f
+                if (!isValid) {
+                    vertices[vertexIndex + 3] = 0f
+                    vertices[vertexIndex + 4] = 0f
+                    vertices[vertexIndex + 5] = 0f
+                    continue
+                }
+                val left: Float
+                val right: Float
+                val up: Float
+                val down: Float
+                if (interiorY && x > 0 && x < lastX) {
+                    left = sampleOrCenter(bare, valid, sourceIndex - 1, center)
+                    right = sampleOrCenter(bare, valid, sourceIndex + 1, center)
+                    up = sampleOrCenter(bare, valid, sourceIndex - gridWidth, center)
+                    down = sampleOrCenter(bare, valid, sourceIndex + gridWidth, center)
+                } else {
+                    left = sampleClamped(bare, valid, x - 1, y, gridWidth, gridHeight, center)
+                    right = sampleClamped(bare, valid, x + 1, y, gridWidth, gridHeight, center)
+                    up = sampleClamped(bare, valid, x, y - 1, gridWidth, gridHeight, center)
+                    down = sampleClamped(bare, valid, x, y + 1, gridWidth, gridHeight, center)
+                }
+                val dx = (right - left) / span
+                val dy = (down - up) / span
+                val nx = -dx
+                val ny = dy
+                val nz = 1f
+                val length = sqrt(nx * nx + ny * ny + nz * nz).coerceAtLeast(0.0001f)
+                vertices[vertexIndex + 3] = nx / length
+                vertices[vertexIndex + 4] = ny / length
+                vertices[vertexIndex + 5] = nz / length
             }
         }
-
-        val dx = (elevationAt(x + 1, y) - elevationAt(x - 1, y)) /
-            max(2f * grid.cellSizeMeters, 0.001f)
-        val dy = (elevationAt(x, y + 1) - elevationAt(x, y - 1)) /
-            max(2f * grid.cellSizeMeters, 0.001f)
-        var nx = -dx
-        var ny = dy
-        var nz = 1f
-        val length = sqrt(nx * nx + ny * ny + nz * nz).coerceAtLeast(0.0001f)
-        nx /= length
-        ny /= length
-        nz /= length
-        target[offset] = nx
-        target[offset + 1] = ny
-        target[offset + 2] = nz
     }
+
+    private fun sampleOrCenter(
+        bare: FloatArray,
+        valid: BooleanArray?,
+        index: Int,
+        center: Float,
+    ): Float {
+        val value = bare[index]
+        val usable = if (valid != null) valid[index] && value.isFinite() else value.isFinite()
+        return if (usable) value else center
+    }
+
+    private fun sampleClamped(
+        bare: FloatArray,
+        valid: BooleanArray?,
+        x: Int,
+        y: Int,
+        gridWidth: Int,
+        gridHeight: Int,
+        center: Float,
+    ): Float {
+        val sx = when {
+            x < 0 -> 0
+            x >= gridWidth -> gridWidth - 1
+            else -> x
+        }
+        val sy = when {
+            y < 0 -> 0
+            y >= gridHeight -> gridHeight - 1
+            else -> y
+        }
+        return sampleOrCenter(bare, valid, sy * gridWidth + sx, center)
+    }
+
+    private val meshPool = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors().coerceIn(1, 8),
+    ) { task -> Thread(task, "terrain-mesh").apply { isDaemon = true } }
 }

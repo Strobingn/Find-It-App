@@ -433,4 +433,74 @@ class LidarRasterizerTest {
         }
         assertTrue("flat-area residual noise too high: $noise", noise < 2.0f)
     }
+
+    @Test
+    fun unclassifiedBulkBinMatchesSequentialAddPoint() {
+        val extent = 80.0
+        fun newRasterizer(count: Int) = LidarRasterizer(
+            minX = 0.0,
+            maxX = extent,
+            minY = 0.0,
+            maxY = extent,
+            options = LidarImportOptions(
+                rasterResolution = 96,
+                groundMode = GroundSurfaceMode.AUTO_LOWEST,
+            ),
+            declaredPointCount = count.toLong(),
+        )
+        fun assertSameSurface(count: Int) {
+            val xs = DoubleArray(count)
+            val ys = DoubleArray(count)
+            val zs = FloatArray(count)
+            var state = 0x1234567
+            for (i in 0 until count) {
+                state = state * 1103515245 + 12345
+                val u = (state ushr 1) and 0x7fffffff
+                state = state * 1103515245 + 12345
+                val v = (state ushr 1) and 0x7fffffff
+                xs[i] = (u % 10_000) / 10_000.0 * extent
+                ys[i] = (v % 10_000) / 10_000.0 * extent
+                zs[i] = when {
+                    i % 17 == 0 -> 0.2f
+                    i % 17 == 1 -> 0.4f
+                    i % 17 == 2 -> 1.0f
+                    else -> 8f + (i % 5)
+                }
+            }
+            val sequential = newRasterizer(count)
+            for (i in 0 until count) sequential.addPoint(xs[i], ys[i], zs[i], classification = 2)
+            val bulk = newRasterizer(count)
+            assertTrue(bulk.acceptsFastBin)
+            bulk.addUnclassifiedSamples(xs, ys, zs, count)
+            assertEquals(sequential.pointsDecoded, bulk.pointsDecoded)
+            assertEquals(sequential.pointsBinned, bulk.pointsBinned)
+            val a = requireNotNull(sequential.finish(0, "seq")).grid
+            val b = requireNotNull(bulk.finish(0, "bulk")).grid
+            assertEquals(a.width, b.width)
+            assertEquals(a.height, b.height)
+            for (index in a.bareEarth.indices) {
+                if (a.bareEarth[index].isNaN()) {
+                    assertTrue(b.bareEarth[index].isNaN())
+                } else {
+                    assertEquals(a.bareEarth[index], b.bareEarth[index], 0f)
+                }
+                assertEquals(a.validData[index], b.validData[index])
+            }
+        }
+        assertSameSurface(100)
+        assertSameSurface(20_000)
+
+        val classified = LidarRasterizer(
+            minX = 0.0,
+            maxX = extent,
+            minY = 0.0,
+            maxY = extent,
+            options = LidarImportOptions(
+                rasterResolution = 32,
+                groundMode = GroundSurfaceMode.SOURCE_CLASSIFIED,
+            ),
+            declaredPointCount = 1,
+        )
+        assertFalse(classified.acceptsFastBin)
+    }
 }
