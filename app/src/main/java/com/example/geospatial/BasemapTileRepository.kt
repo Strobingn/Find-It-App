@@ -200,12 +200,36 @@ class BasemapTileRepository(context: Context) {
         deletedRange: SlippyTileMath.TileRange,
         retainedRanges: List<SlippyTileMath.TileRange>,
     ) {
+        val relevantRanges = retainedRanges.filter {
+            it.zoom == deletedRange.zoom &&
+            it.minX <= deletedRange.maxX && it.maxX >= deletedRange.minX &&
+            it.minY <= deletedRange.maxY && it.maxY >= deletedRange.minY
+        }
+
         for (y in deletedRange.minY..deletedRange.maxY) {
-            for (x in deletedRange.minX..deletedRange.maxX) {
-                val retained = retainedRanges.any { range ->
-                    range.zoom == deletedRange.zoom && x in range.minX..range.maxX && y in range.minY..range.maxY
+            val activeRanges = relevantRanges.filter { y in it.minY..it.maxY }
+            if (activeRanges.isEmpty()) {
+                for (x in deletedRange.minX..deletedRange.maxX) {
+                    tileFile(deletedRange.zoom, x, y).delete()
                 }
-                if (!retained) tileFile(deletedRange.zoom, x, y).delete()
+            } else {
+                val intervals = activeRanges.map { maxOf(it.minX, deletedRange.minX) to minOf(it.maxX, deletedRange.maxX) }
+                    .sortedBy { it.first }
+
+                var currentX = deletedRange.minX
+                for (interval in intervals) {
+                    while (currentX < interval.first) {
+                        tileFile(deletedRange.zoom, currentX, y).delete()
+                        currentX++
+                    }
+                    if (currentX <= interval.second) {
+                        currentX = interval.second + 1
+                    }
+                }
+                while (currentX <= deletedRange.maxX) {
+                    tileFile(deletedRange.zoom, currentX, y).delete()
+                    currentX++
+                }
             }
         }
         tileDir.walkBottomUp().filter { it.isDirectory && it != tileDir }.forEach { directory ->
