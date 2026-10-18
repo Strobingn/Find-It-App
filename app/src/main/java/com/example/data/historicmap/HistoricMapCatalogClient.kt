@@ -5,6 +5,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.delay
 import kotlin.math.max
 import org.json.JSONArray
 import org.json.JSONObject
@@ -17,10 +18,10 @@ import org.json.JSONObject
 class HistoricMapCatalogClient(
     private val userAgent: String = USER_AGENT,
     private val pauseMillis: Long = 350L,
-    private val opener: (String) -> String? = { url -> getText(url, userAgent) },
-    private val downloader: (String, File) -> Boolean = { url, dest -> downloadTo(url, dest, userAgent) },
+    private val opener: suspend (String) -> String? = { url -> getText(url, userAgent) },
+    private val downloader: suspend (String, File) -> Boolean = { url, dest -> downloadTo(url, dest, userAgent) },
 ) {
-    fun discover(
+    suspend fun discover(
         minLatitude: Double,
         maxLatitude: Double,
         minLongitude: Double,
@@ -35,7 +36,7 @@ class HistoricMapCatalogClient(
         }.distinctBy { it.footprintKey }
     }
 
-    fun downloadMissing(records: List<HistoricMapRecord>, archive: HistoricMapArchive): List<HistoricMapRecord> {
+    suspend fun downloadMissing(records: List<HistoricMapRecord>, archive: HistoricMapArchive): List<HistoricMapRecord> {
         val saved = ArrayList<HistoricMapRecord>()
         for (record in records) {
             if (archive.contains(record)) {
@@ -52,16 +53,16 @@ class HistoricMapCatalogClient(
             )
             archive.upsert(stored)
             saved += stored
-            Thread.sleep(pauseMillis)
+            delay(pauseMillis)
         }
         return saved
     }
 
-    internal fun usgsHistorical(bbox: List<Double>): List<HistoricMapRecord> {
+    internal suspend fun usgsHistorical(bbox: List<Double>): List<HistoricMapRecord> {
         val records = ArrayList<HistoricMapRecord>()
         var offset = 0
         repeat(MAX_PAGES) { page ->
-            if (page > 0) Thread.sleep(pauseMillis)
+            if (page > 0) delay(pauseMillis)
             val url = "https://tnmaccess.nationalmap.gov/api/v1/products?" +
                 "datasets=" + enc("Historical Topographic Maps") +
                 "&bbox=${bbox.joinToString(",")}" +
@@ -102,12 +103,12 @@ class HistoricMapCatalogClient(
             }
         }
 
-    internal fun davidRumsey(bbox: List<Double>): List<HistoricMapRecord> {
+    internal suspend fun davidRumsey(bbox: List<Double>): List<HistoricMapRecord> {
         val q = "georeferenced AND bbox:${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]}"
         val records = ArrayList<HistoricMapRecord>()
         var offset = 0
         repeat(MAX_PAGES) { page ->
-            if (page > 0) Thread.sleep(pauseMillis)
+            if (page > 0) delay(pauseMillis)
             val url = "https://www.davidrumsey.com/luna/servlet/as/search?q=${enc(q)}&os=$offset&bs=50&format=json"
             val body = opener(url) ?: return records
             val pageRecords = parseRumsey(body, bbox)
@@ -152,7 +153,7 @@ class HistoricMapCatalogClient(
         }
     }
 
-    internal fun libraryOfCongress(bbox: List<Double>, sanbornOnly: Boolean): List<HistoricMapRecord> {
+    internal suspend fun libraryOfCongress(bbox: List<Double>, sanbornOnly: Boolean): List<HistoricMapRecord> {
         val centerLat = (bbox[1] + bbox[3]) / 2.0
         val centerLon = (bbox[0] + bbox[2]) / 2.0
         val query = if (sanbornOnly) {
@@ -167,7 +168,7 @@ class HistoricMapCatalogClient(
         }
         val records = ArrayList<HistoricMapRecord>()
         repeat(MAX_PAGES) { page ->
-            if (page > 0) Thread.sleep(pauseMillis)
+            if (page > 0) delay(pauseMillis)
             val loc = "$base&sp=${page + 1}"
             val body = opener(loc) ?: return records
             val pageRecords = parseLoc(body, bbox, sanbornOnly)
