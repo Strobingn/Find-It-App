@@ -126,6 +126,10 @@ class TerrainClipmapTest {
             tileSize = 64,
             attachHeightmap = true,
         )
+        assertClipmapMatchesCpuScene(cpu, clip)
+    }
+
+    private fun assertClipmapMatchesCpuScene(cpu: TerrainGpuScene, clip: TerrainGpuScene) {
         assertEquals(cpu.levels.size, clip.levels.size)
         assertEquals(cpu.levels.size, clip.clipmaps.size)
         cpu.levels.zip(clip.levels.zip(clip.clipmaps)).forEach { (cpuLevel, clipPair) ->
