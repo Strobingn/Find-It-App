@@ -300,13 +300,15 @@ fun AiAnalysisWorkspace(
             }
     }
     val savedCloudTargets = remember(signals) {
-        signals.filter { it.source == DetectionSource.CLOUD_AI }.map { signal ->
-            CloudMapTarget(
-                xPercent = signal.gridX,
-                yPercent = signal.gridY,
-                label = signal.notes.substringAfter(CLOUD_AI_NOTE_PREFIX).substringBefore(" ·").ifBlank { "AI target" },
-                confidence = (signal.signalStrength / 100f).coerceIn(0f, 1f),
-            )
+        signals.mapNotNull { signal ->
+            if (signal.source == DetectionSource.CLOUD_AI) {
+                CloudMapTarget(
+                    xPercent = signal.gridX,
+                    yPercent = signal.gridY,
+                    label = signal.notes.substringAfter(CLOUD_AI_NOTE_PREFIX).substringBefore(" ·").ifBlank { "AI target" },
+                    confidence = (signal.signalStrength / 100f).coerceIn(0f, 1f),
+                )
+            } else null
         }
     }
     val currentCloudTargets = cloudTargetsForTerrain(aiState, terrainKey)
