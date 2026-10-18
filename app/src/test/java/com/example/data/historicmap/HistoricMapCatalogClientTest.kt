@@ -1,5 +1,6 @@
 package com.example.data.historicmap
 
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
