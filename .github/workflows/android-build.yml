@@ -1,12 +1,12 @@
 name: Find-it-appAPK
 
-# APK + GitHub Release only on pushes/merges to main (saves private-repo minutes).
-# Pull requests still run unit tests. Do not add extra release branches.
+# APK artifact on pushes to any branch and pull requests.
+# Official GitHub Release is created only on pushes to main.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
-    branches: [main]
+    branches: ["**"]
   workflow_dispatch:
 
 env:
@@ -19,7 +19,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Create local.properties before Gradle setup
         shell: bash
@@ -48,13 +48,13 @@ jobs:
           } > "$GITHUB_WORKSPACE/local.properties"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: "temurin"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Require Gradle wrapper
         run: |
@@ -83,22 +83,21 @@ jobs:
 
       - name: Upload test diagnostics
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: unit-test-log-${{ github.run_number }}
           path: unit-test.log
           if-no-files-found: warn
           retention-days: 14
 
-  release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  build-apk:
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Resolve signing keystore
         id: signing
@@ -150,13 +149,135 @@ jobs:
           } > "$GITHUB_WORKSPACE/local.properties"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: "temurin"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compute version
+        id: version
+        run: |
+          CODE=$((1000000 + ${{ github.run_number }}))
+          NAME="2.0.${{ github.run_number }}"
+          TAG="findit-v${CODE}"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure .env for secrets plugin
+        run: |
+          if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env
+          fi
+          touch .env
+
+      - name: Build signed release APK
+        env:
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          KEYSTORE_PATH: ${{ steps.signing.outputs.path }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          if [ "$SIGNING_MODE" = "release-secret" ]; then
+            export STORE_PASSWORD="$RELEASE_STORE_PASSWORD"
+            export KEY_ALIAS="$RELEASE_KEY_ALIAS"
+            export KEY_PASSWORD="$RELEASE_KEY_PASSWORD"
+          else
+            export STORE_PASSWORD=android
+            export KEY_ALIAS=androiddebugkey
+            export KEY_PASSWORD=android
+          fi
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          test -n "$APK"
+          DEST="$GITHUB_WORKSPACE/findit-${{ steps.version.outputs.code }}.apk"
+          cp "$APK" "$DEST"
+          echo "apk=$DEST" >> "$GITHUB_OUTPUT"
+          sha256sum "$DEST" | awk '{print $1}' > "$GITHUB_WORKSPACE/findit.sha256"
+          echo "sha256=$(cat "$GITHUB_WORKSPACE/findit.sha256")" >> "$GITHUB_OUTPUT"
+        id: apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: findit-apk-${{ steps.version.outputs.code }}
+          path: ${{ steps.apk.outputs.apk }}
+          retention-days: 30
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, build-apk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve signing keystore
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          test -s ci/findit-debug.keystore
+          mkdir -p "$HOME/.android"
+          cp -f ci/findit-debug.keystore "$HOME/.android/debug.keystore"
+          cp -f ci/findit-debug.keystore debug.keystore
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/findit-release.jks"
+            test -s "$GITHUB_WORKSPACE/findit-release.jks"
+            echo "path=$GITHUB_WORKSPACE/findit-release.jks" >> "$GITHUB_OUTPUT"
+            echo "mode=release-secret" >> "$GITHUB_OUTPUT"
+            echo "Using repository release keystore secrets"
+          else
+            echo "path=$GITHUB_WORKSPACE/ci/findit-debug.keystore" >> "$GITHUB_OUTPUT"
+            echo "mode=committed-debug" >> "$GITHUB_OUTPUT"
+            echo "No KEYSTORE_* secrets; signing with committed ci/findit-debug.keystore"
+          fi
+
+      - name: Create local.properties
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          FINDIT_UPDATE_TOKEN: ${{ secrets.FINDIT_UPDATE_TOKEN }}
+        run: |
+          {
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+            printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
+            printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
+            printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
+            printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
+            printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
+            printf 'FINDIT_UPDATE_TOKEN=%s\n' "$FINDIT_UPDATE_TOKEN"
+          } > "$GITHUB_WORKSPACE/local.properties"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Compute version
         id: version
