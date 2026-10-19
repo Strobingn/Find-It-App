@@ -67,34 +67,79 @@ object HuntZoneClusterer {
         }
 
         val groups = targets.indices.groupBy { find(it) }
+        val targetTypes = MetalDetectingTargetType.values()
+        val numTypes = targetTypes.size
+        val typeScoreSums = DoubleArray(numTypes)
+        val hasType = BooleanArray(numTypes)
+
+        // Single pass per cluster group to compute metrics without extra object allocations.
         return groups.values.map { members ->
-            val centroidX = members.map { targets[it].xPercent }.average().toFloat()
-            val centroidY = members.map { targets[it].yPercent }.average().toFloat()
-            val best = members.maxBy { targets[it].score }
+            var sumX = 0.0
+            var sumY = 0.0
+            var bestIdx = members[0]
+            var bestScore = targets[bestIdx].score
+
+            typeScoreSums.fill(0.0)
+            hasType.fill(false)
+
+            val memberTargets = ArrayList<MetalDetectingTarget>(members.size)
+
+            for (idx in members) {
+                val t = targets[idx]
+                sumX += t.xPercent
+                sumY += t.yPercent
+                if (t.score > bestScore) {
+                    bestScore = t.score
+                    bestIdx = idx
+                }
+                val ord = t.type.ordinal
+                typeScoreSums[ord] += t.score.toDouble()
+                hasType[ord] = true
+                memberTargets.add(t)
+            }
+
+            val centroidX = (sumX / members.size).toFloat()
+            val centroidY = (sumY / members.size).toFloat()
+
+            // Find dominant type with highest sum score (break ties with highest ordinal to match comparator)
+            var maxTypeScore = Double.NEGATIVE_INFINITY
+            var dominantOrdinal = 0
+            for (ord in 0 until numTypes) {
+                if (hasType[ord]) {
+                    val scoreSum = typeScoreSums[ord]
+                    if (scoreSum > maxTypeScore || (scoreSum == maxTypeScore && ord > dominantOrdinal)) {
+                        maxTypeScore = scoreSum
+                        dominantOrdinal = ord
+                    }
+                }
+            }
+            val dominantType = targetTypes[dominantOrdinal]
+
+            // Calculate max pairwise distance span in O(M^2) indexing without object allocation
             var maxPairSq = 0f
-            for (a in members) {
-                for (b in members) {
-                    if (a >= b) continue
+            val count = members.size
+            for (i in 0 until count) {
+                val a = members[i]
+                for (j in i + 1 until count) {
+                    val b = members[j]
                     val dx = xs[a] - xs[b]
                     val dy = ys[a] - ys[b]
                     val dSq = dx * dx + dy * dy
                     if (dSq > maxPairSq) maxPairSq = dSq
                 }
             }
-            val dominant = members
-                .groupBy { targets[it].type }
-                .mapValues { (_, idxs) -> idxs.sumOf { targets[it].score.toDouble() } }
-                .maxWith(compareBy<Map.Entry<MetalDetectingTargetType, Double>> { it.value }.thenBy { it.key.ordinal })
-                .key
+
+            memberTargets.sortByDescending { it.score }
+
             HuntZone(
                 id = 0, // assigned after sorting
                 centerXPercent = centroidX,
                 centerYPercent = centroidY,
                 targetCount = members.size,
-                bestScore = targets[best].score,
-                dominantType = dominant,
+                bestScore = bestScore,
+                dominantType = dominantType,
                 spanMeters = sqrt(maxPairSq),
-                targets = members.sortedByDescending { targets[it].score }.map { targets[it] },
+                targets = memberTargets,
             )
         }
             .sortedByDescending { it.bestScore }
