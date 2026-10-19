@@ -97,25 +97,34 @@ class LazDownloadManager(
             eptBuilder != null && openTopography != null
         if (otTried) {
             try {
-                val built = eptBuilder!!.build(
-                    sourceUrl.trim(), destinationDirectory, progress, shouldContinue,
-                    resourcesFor = { box ->
-                        // Skip surveys the URL-derived EPT attempt already tried (no double fetch).
-                        val tried = if (eptTried) {
-                            com.example.data.download.EptTileBuilder.candidateResources(sourceUrl.trim()).toSet()
-                        } else {
-                            emptySet()
-                        }
-                        openTopography!!.usgs3depResources(box).filterNot { it in tried }
-                    },
-                )
-                if (built != null) {
-                    System.err.println("LAZ via OpenTopography/EPT ${built.resource}: ${built.nodes} nodes, ${built.points} points")
-                    val size = built.file.length()
-                    progress?.invoke(size, size)
-                    return built.file
+                val trimmed = sourceUrl.trim()
+                val tried = if (eptTried) {
+                    com.example.data.download.EptTileBuilder.candidateResources(trimmed).toSet()
+                } else {
+                    emptySet()
                 }
-                eptFailure = "no matching OpenTopography 3DEP survey"
+                // Reuse the header the Amazon step already parsed. When the catalog only names
+                // surveys that step tried, stop before another rockyweb read or EPT fetch.
+                val fromCache = eptBuilder!!.newResourcesFromCache(trimmed, tried) { box ->
+                    openTopography!!.usgs3depResources(box)
+                }
+                if (fromCache != null && fromCache.isEmpty()) {
+                    eptFailure = "no matching OpenTopography 3DEP survey"
+                } else {
+                    val built = eptBuilder!!.build(
+                        trimmed, destinationDirectory, progress, shouldContinue,
+                        resourcesFor = { box ->
+                            fromCache ?: openTopography!!.usgs3depResources(box).filterNot { it in tried }
+                        },
+                    )
+                    if (built != null) {
+                        System.err.println("LAZ via OpenTopography/EPT ${built.resource}: ${built.nodes} nodes, ${built.points} points")
+                        val size = built.file.length()
+                        progress?.invoke(size, size)
+                        return built.file
+                    }
+                    eptFailure = "no matching OpenTopography 3DEP survey"
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {

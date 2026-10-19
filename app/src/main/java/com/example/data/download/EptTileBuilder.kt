@@ -27,16 +27,18 @@ import kotlin.math.tan
  * Rebuilds a USGS TNM LAZ tile from the USGS 3DEP Entwine Point Tile copy in the public
  * `usgs-lidar-public` AWS bucket (served at ~100+ MB/s versus ~0.35 MB/s per rockyweb connection).
  *
- * 1. Map the TNM project/subproject folder in the tile URL to an EPT resource and confirm its
- *    `ept.json` exists and its bounds cover the tile.
+ * 1. Map the TNM project/subproject folder in the tile URL to EPT resources (or use the caller's
+ *    list). Confirm `ept.json` exists, is EPSG:3857, and its bounds cover the tile.
  * 2. Range-read the original tile's LAS header + VLRs (tens of KB) for its exact bounds, scale,
- *    offset, CRS and point count.
- * 3. Walk `ept-hierarchy` and download every octree node intersecting the tile at every depth
- *    (full detail) with [connections] parallel keep-alive connections.
- * 4. Native merge: EPSG:3857 -> NAD83 UTM, re-quantize to the original grid, keep the points in the
+ *    offset, CRS and point count. A later call for the same URL reuses this header.
+ * 3. Walk `ept-hierarchy` and sum the point counts of nodes that intersect the tile. Skip a survey
+ *    whose total is below the header point count or more than 3x it, before any node download.
+ * 4. Download every remaining intersecting node at every depth (full detail) with [connections]
+ *    parallel keep-alive connections.
+ * 5. Native merge: EPSG:3857 -> NAD83 UTM, re-quantize to the original grid, keep the points in the
  *    original quantized bounds and write one standard LAZ with the original header/CRS.
- * 5. Accept only if the kept count equals the original header's point count; otherwise return null
- *    so the caller downloads the original file.
+ * 6. Accept only if the kept count equals the original header's point count; otherwise try the next
+ *    survey, or return null so the caller downloads the original file.
  */
 class EptTileBuilder(
     private val connections: Int = 24,
@@ -44,7 +46,15 @@ class EptTileBuilder(
     private val merge: (File, List<File>, File, DoubleArray) -> LongArray? = ::nativeMergeOrNull,
     private val available: () -> Boolean = { LazRsNativeDecoder.isAvailable },
 ) {
+    /** Header parsed for a tile URL, shared by the Amazon and OpenTopography steps on this builder. */
+    private val headerCacheLock = Any()
+    private val headerCache = object : LinkedHashMap<String, TileHeader>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, TileHeader>?) = size > 8
+    }
+
     data class Result(val file: File, val resource: String, val nodes: Int, val nodeBytes: Long, val points: Long)
+
+    private data class Intersecting(val keys: List<String>, val points: Long)
 
     fun build(
         tileUrl: String,
@@ -54,7 +64,8 @@ class EptTileBuilder(
         /**
          * Optional external resolver (e.g. the OpenTopography catalog) mapping the tile's WGS84
          * box (west, south, east, north) to 3DEP EPT resource names. When set it replaces the
-         * resource names derived from the tile URL; the exact point-count check is unchanged.
+         * resource names derived from the tile URL. Each name is gated on its hierarchy point
+         * total before any node download; the exact point-count check is unchanged.
          */
         resourcesFor: ((DoubleArray) -> List<String>)? = null,
     ): Result? {
@@ -68,25 +79,95 @@ class EptTileBuilder(
         val names = if (resourcesFor == null) {
             candidateResources(tileUrl)
         } else {
-            header = readTileHeader(tileUrl) ?: return null
-            val utm = header.utm ?: return null
-            resourcesFor(geographicBox(utm, header.minX, header.minY, header.maxX, header.maxY))
-                .filter { it.matches(Regex("[A-Za-z0-9_\\-]+")) }
+            val read = readTileHeader(tileUrl) ?: return null
+            header = read
+            val utm = read.utm ?: return null
+            resourcesFor(geographicBox(utm, read.minX, read.minY, read.maxX, read.maxY))
+                .filter { it.matches(RESOURCE_NAME) }
         }
-        val resource = names.firstNotNullOfOrNull { r ->
-            fetch("$BUCKET/$r/ept.json", null)?.let { r to String(it) }
-        } ?: return null
-        val (resourceName, ept) = resource
-        if (!Regex("\"horizontal\"\\s*:\\s*\"3857\"").containsMatchIn(ept)) return null
-        if (header == null) header = readTileHeader(tileUrl) ?: return null
-        val tm = header.utm ?: return null
-        val box = mercatorBox(tm, header.minX, header.minY, header.maxX, header.maxY)
-        val eb = Regex("\"bounds\"\\s*:\\s*\\[([^\\]]+)]").find(ept)?.groupValues?.get(1)
-            ?.split(',')?.map { it.trim().toDouble() }?.takeIf { it.size == 6 }?.toDoubleArray() ?: return null
+        for (resourceName in names) {
+            val built = try {
+                attemptResource(
+                    resourceName, tileUrl, header, name, target, destinationDirectory,
+                    progress, shouldContinue,
+                ) { header = it }
+            } catch (giveUp: GiveUp) {
+                return null
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (interrupted: InterruptedException) {
+                throw interrupted
+            } catch (error: Exception) {
+                error.findCancellation()?.let { throw it }
+                System.err.println("EPT $resourceName failed (${error.message}); trying next survey")
+                null
+            }
+            if (built != null) return built
+        }
+        return null
+    }
+
+    private fun attemptResource(
+        resourceName: String,
+        tileUrl: String,
+        header: TileHeader?,
+        name: String,
+        target: File,
+        destinationDirectory: File,
+        progress: ((Long, Long) -> Unit)?,
+        shouldContinue: () -> Boolean,
+        onHeader: (TileHeader) -> Unit,
+    ): Result? {
+        if (!shouldContinue()) throw CancellationException("EPT cancelled")
+        val ept = fetch("$BUCKET/$resourceName/ept.json", null)?.let { String(it) } ?: return null
+        if (!HORIZONTAL_3857.containsMatchIn(ept)) return null
+        val current = header ?: readTileHeader(tileUrl)?.also(onHeader) ?: throw GiveUp()
+        val tm = current.utm ?: throw GiveUp()
+        val box = mercatorBox(tm, current.minX, current.minY, current.maxX, current.maxY)
+        val eb = eptBounds(ept) ?: return null
         if (box[0] < eb[0] || box[1] < eb[1] || box[2] > eb[3] || box[3] > eb[4]) return null
         val nodes = intersectingNodes(resourceName, eb, box, shouldContinue)
-        if (nodes.isEmpty()) return null
+        if (nodes.keys.isEmpty()) return null
+        if (!hierarchyOverlapsTile(nodes.points, current.pointCount)) {
+            System.err.println(
+                "EPT $resourceName hierarchy has ${nodes.points} points vs tile ${current.pointCount}; skipping",
+            )
+            return null
+        }
+        return downloadAndMerge(
+            resourceName, nodes.keys, current, tm, name, target, destinationDirectory, progress, shouldContinue,
+        )
+    }
 
+    /** True when the hierarchy total can still be this tile: not short, and not more than 3x. */
+    private fun hierarchyOverlapsTile(hierarchyPoints: Long, tilePoints: Long): Boolean {
+        if (hierarchyPoints < tilePoints) return false
+        if (tilePoints > Long.MAX_VALUE / 3) return true
+        return hierarchyPoints <= tilePoints * 3
+    }
+
+    private fun eptBounds(ept: String): DoubleArray? {
+        val raw = EPT_BOUNDS.find(ept)?.groupValues?.get(1) ?: return null
+        val values = raw.split(',')
+        if (values.size != 6) return null
+        val out = DoubleArray(6)
+        for (i in values.indices) {
+            out[i] = values[i].trim().toDoubleOrNull() ?: return null
+        }
+        return out
+    }
+
+    private fun downloadAndMerge(
+        resourceName: String,
+        nodes: List<String>,
+        header: TileHeader,
+        tm: Utm,
+        name: String,
+        target: File,
+        destinationDirectory: File,
+        progress: ((Long, Long) -> Unit)?,
+        shouldContinue: () -> Boolean,
+    ): Result? {
         destinationDirectory.mkdirs()
         val work = File(destinationDirectory, ".ept-${name}.d").apply { deleteRecursively(); mkdirs() }
         try {
@@ -114,6 +195,7 @@ class EptTileBuilder(
     )
 
     internal fun readTileHeader(url: String): TileHeader? {
+        synchronized(headerCacheLock) { headerCache[url] }?.let { return it }
         val head = fetch(url, 0L..374L) ?: return null
         if (head.size < 227) return null
         val bb = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN)
@@ -121,13 +203,44 @@ class EptTileBuilder(
         if (offset > 4L * 1024 * 1024) return null
         val all = if (offset <= head.size) head.copyOf(offset.toInt()) else fetch(url, 0L until offset) ?: return null
         if (all.size.toLong() != offset) return null
-        return parseHeader(all)
+        val parsed = parseHeader(all) ?: return null
+        synchronized(headerCacheLock) { headerCache[url] = parsed }
+        return parsed
     }
 
-    private fun intersectingNodes(resource: String, eb: DoubleArray, box: DoubleArray, shouldContinue: () -> Boolean): List<String> {
+    /**
+     * Surveys [lookup] still worth trying after an earlier [build] cached [tileUrl]'s header.
+     * Null when this builder has not read that tile yet. Empty when the header cannot place the
+     * tile, or every catalog hit is in [exclude] — the caller should not start another build.
+     */
+    internal fun newResourcesFromCache(
+        tileUrl: String,
+        exclude: Set<String>,
+        lookup: (DoubleArray) -> List<String>,
+    ): List<String>? {
+        val header = synchronized(headerCacheLock) { headerCache[tileUrl] } ?: return null
+        val utm = header.utm ?: return emptyList()
+        val box = geographicBox(utm, header.minX, header.minY, header.maxX, header.maxY)
+        return lookup(box).filter { it !in exclude && it.matches(RESOURCE_NAME) }
+    }
+
+    /** The tile header is unusable (missing or not meter NAD83 UTM); no survey can match. */
+    private class GiveUp : RuntimeException()
+
+    private fun Throwable.findCancellation(): CancellationException? {
+        var current: Throwable? = this
+        while (current != null) {
+            if (current is CancellationException) return current
+            current = current.cause
+        }
+        return null
+    }
+
+    private fun intersectingNodes(resource: String, eb: DoubleArray, box: DoubleArray, shouldContinue: () -> Boolean): Intersecting {
         val pool = Executors.newFixedThreadPool(connections.coerceIn(1, 64))
         try {
             val out = ArrayList<String>()
+            var points = 0L
             var frontier = listOf("0-0-0-0")
             while (frontier.isNotEmpty()) {
                 if (!shouldContinue()) throw CancellationException("EPT cancelled")
@@ -140,13 +253,16 @@ class EptTileBuilder(
                         if (!nodeIntersects(key, eb, box)) continue
                         when (val count = m.groupValues[2].toLong()) {
                             -1L -> next += key
-                            else -> if (count > 0) out += key
+                            else -> if (count > 0) {
+                                out += key
+                                points += count
+                            }
                         }
                     }
                 }
                 frontier = next
             }
-            return out
+            return Intersecting(out, points)
         } finally {
             pool.shutdownNow()
         }
@@ -206,6 +322,9 @@ class EptTileBuilder(
         private const val R_MERC = 6378137.0
 
         private val HIER_ENTRY = Regex("\"(\\d+-\\d+-\\d+-\\d+)\"\\s*:\\s*(-?\\d+)")
+        private val RESOURCE_NAME = Regex("[A-Za-z0-9_\\-]+")
+        private val HORIZONTAL_3857 = Regex("\"horizontal\"\\s*:\\s*\"3857\"")
+        private val EPT_BOUNDS = Regex("\"bounds\"\\s*:\\s*\\[([^\\]]+)]")
         val shared by lazy { EptTileBuilder() }
 
         /** EPT resource names to try for a TNM tile URL, most specific first. */
@@ -216,7 +335,7 @@ class EptTileBuilder(
             if (laz > 0) out += segs[laz - 1]
             val proj = segs.indexOfFirst { it.equals("Projects", true) }
             if (proj >= 0 && proj + 1 < segs.size && proj + 1 < laz) out += segs[proj + 1]
-            return out.filter { it.matches(Regex("[A-Za-z0-9_\\-]+")) }
+            return out.filter { it.matches(RESOURCE_NAME) }
         }
 
         fun utmFromWkt(wkt: String): Utm? {
