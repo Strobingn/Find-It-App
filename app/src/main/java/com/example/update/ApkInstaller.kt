@@ -48,7 +48,7 @@ object ApkInstaller {
             return VerifyResult(
                 ok = false,
                 needsUninstall = true,
-                message = "This update is signed with a different key. Export a backup from Tools → App backup, uninstall Find It, install the new APK, then restore.",
+                message = "This update is signed with a different key. Export a backup from Tools → App backup, uninstall Find It Grok, install the new APK, then restore.",
             )
         }
         return VerifyResult(true, "APK verified")

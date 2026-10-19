@@ -58,6 +58,7 @@ class EptTileBuilder(
          */
         resourcesFor: ((DoubleArray) -> List<String>)? = null,
     ): Result? {
+        if (!shouldContinue()) throw CancellationException("EPT cancelled")
         if (!available()) return null
         val name = URL(tileUrl).path.substringAfterLast('/')
         if (!name.endsWith(".laz", true) && !name.endsWith(".las", true)) return null
@@ -174,7 +175,18 @@ class EptTileBuilder(
                     f
                 }
             }
-            return futures.map { it.get() }
+            return futures.map { f ->
+                try {
+                    f.get()
+                } catch (e: java.util.concurrent.ExecutionException) {
+                    // A worker's cancel arrives wrapped; surface it as a cancel, not a failure.
+                    val cause = e.cause
+                    if (cause is CancellationException || !shouldContinue()) {
+                        throw CancellationException("EPT cancelled")
+                    }
+                    throw (cause as? Exception) ?: e
+                }
+            }
         } finally {
             pool.shutdownNow()
         }

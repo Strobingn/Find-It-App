@@ -42,7 +42,7 @@ object AppUpdateChecker {
     fun statusLabel(result: UpdateCheckResult): String = when (result) {
         is UpdateCheckResult.Available ->
             "Update ${result.release.name} (versionCode ${result.release.versionCode}) is ready"
-        UpdateCheckResult.UpToDate -> "You are on the latest Find It build"
+        UpdateCheckResult.UpToDate -> "You are on the latest Find It Grok build"
         is UpdateCheckResult.TokenMissing -> result.message
         is UpdateCheckResult.TokenInvalid -> result.message
         is UpdateCheckResult.RateLimited -> result.message

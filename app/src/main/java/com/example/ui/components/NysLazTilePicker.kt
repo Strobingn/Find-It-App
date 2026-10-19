@@ -269,11 +269,17 @@ fun NysLazTilePicker(
             if (tiles != found) return@launch // a newer search replaced these results
             datasets = ranked
             val best = ranked.firstOrNull() ?: return@launch
-            if (ranked.size > 1) {
+            // Ranking reads headers over the network; never clobber ticks the user made meanwhile.
+            val auto = LidarDatasetRanking.autoSelection(
+                current = selectedUrls,
+                allFound = found.map { it.downloadUrl }.toSet(),
+                ranked = ranked,
+            )
+            if (auto != null) {
                 chosenDatasetKey = best.key
-                selectedUrls = best.tiles.map { it.downloadUrl }.toSet()
+                selectedUrls = auto
                 downloadEstimate = null
-            } else {
+            } else if (ranked.size == 1 || selectedUrls == best.tiles.map { it.downloadUrl }.toSet()) {
                 chosenDatasetKey = best.key
             }
         }

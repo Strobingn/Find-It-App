@@ -46,7 +46,24 @@ object LazDownloadQueue {
     /** Latest download-source fallback message (e.g. Amazon EPT unavailable), shown on the picker. */
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
-    fun postNotice(message: String?) { _notice.value = message }
+    /** Per-tile notices, so a new attempt clears only its own stale message. */
+    private val noticeByUrl = LinkedHashMap<String, String>()
+
+    /** [message] null clears everything (e.g. the user picked another source). */
+    fun postNotice(message: String?) = synchronized(noticeByUrl) {
+        if (message == null) noticeByUrl.clear()
+        _notice.value = message ?: noticeByUrl.values.lastOrNull()
+    }
+
+    fun postNotice(url: String, message: String) = synchronized(noticeByUrl) {
+        noticeByUrl.remove(url)
+        noticeByUrl[url] = message
+        _notice.value = message
+    }
+
+    fun clearNotice(url: String) = synchronized(noticeByUrl) {
+        if (noticeByUrl.remove(url) != null || noticeByUrl.isEmpty()) _notice.value = noticeByUrl.values.lastOrNull()
+    }
 
     /** Cancellation requests, read by the running transfer between buffer writes. */
     private val cancelled = mutableSetOf<String>()
@@ -86,7 +103,11 @@ object LazDownloadQueue {
         return next
     }
 
-    fun markRunning(url: String) = update(url) { it.copy(state = LazDownloadState.RUNNING) }
+    fun markRunning(url: String) {
+        // A fresh attempt: the previous attempt's fallback message no longer applies.
+        clearNotice(url)
+        update(url) { it.copy(state = LazDownloadState.RUNNING) }
+    }
 
     fun markProgress(url: String, downloaded: Long, total: Long) = update(url) {
         it.copy(downloadedBytes = downloaded, totalBytes = total)
@@ -123,6 +144,7 @@ object LazDownloadQueue {
     fun dismiss(url: String) {
         synchronized(cancelled) { cancelled.remove(url) }
         _tasks.update { current -> current.filterNot { it.url == url && it.isFinished } }
+        clearNotice(url)
     }
 
     fun clearFinished() {

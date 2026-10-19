@@ -126,6 +126,15 @@ object LidarDatasetRanking {
     }
 
     /**
+     * Tiles to pre-select once ranking finishes, or null to leave the user's selection alone.
+     * Only replaces the untouched default (every found tile selected); a manual change wins.
+     */
+    fun autoSelection(current: Set<String>, allFound: Set<String>, ranked: List<Dataset>): Set<String>? {
+        if (ranked.size < 2 || current != allFound) return null
+        return ranked.first().tiles.map { it.downloadUrl }.toSet()
+    }
+
+    /**
      * Density (pts/m², unknown last) descending, then year descending, then name for stability.
      * Densities within ~15% of each other share a bucket so header noise does not beat a newer survey.
      */

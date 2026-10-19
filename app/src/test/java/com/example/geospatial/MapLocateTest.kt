@@ -25,3 +25,21 @@ class MapLocateTest {
     @Test
     fun noFixHasFriendlyMessage() = assertTrue(MapLocate.message(null).contains("GPS fix"))
 }
+
+class MapLocateApproximateTest {
+    @Test
+    fun approximateOnlyWithGpsOnlyAsksForPrecise() {
+        assertEquals(Outcome.NEED_PRECISE, MapLocate.decide(true, gpsEnabled = true, networkEnabled = false, hasFine = false))
+        assertTrue(MapLocate.message(Outcome.NEED_PRECISE).contains("precise"))
+    }
+
+    @Test
+    fun approximateWithNetworkIsReady() =
+        assertEquals(Outcome.READY, MapLocate.decide(true, gpsEnabled = true, networkEnabled = true, hasFine = false))
+
+    @Test
+    fun approximateNeverReadsGpsLastKnown() {
+        assertEquals(listOf(android.location.LocationManager.NETWORK_PROVIDER), MapLocate.lastKnownProviders(false))
+        assertEquals(2, MapLocate.lastKnownProviders(true).size)
+    }
+}

@@ -204,7 +204,7 @@ class AppUpdateController(
             return
         }
         if (!ApkInstaller.canRequestInstalls(context)) {
-            setInstallHelp("Allow Find It to install unknown apps, then tap Install again.")
+            setInstallHelp("Allow Find It Grok to install unknown apps, then tap Install again.")
             runCatching { context.startActivity(ApkInstaller.unknownAppsSettingsIntent(context)) }
             return
         }
@@ -258,7 +258,7 @@ fun AppUpdateButtons(
                 lidarDir = File(context.filesDir, "lidar"),
                 beforeReplace = { com.example.data.local.AppDatabase.closeInstance() },
             )
-            controller.report("Restored $count file(s). Restart Find It.")
+            controller.report("Restored $count file(s). Restart Find It Grok.")
         }.onFailure {
             controller.report("Restore failed: ${it.message}")
         }
@@ -308,7 +308,7 @@ fun AppUpdateButtons(
                     buildString {
                         append("Current: ").append(AppUpdateChecker.installedBuildLabel()).append('\n')
                         append("Available: ").append(AppUpdateChecker.buildLabel(release.name, release.versionCode)).append('\n')
-                        append(release.notesForUi.ifBlank { "Newer Find It APK from GitHub Releases." })
+                        append(release.notesForUi.ifBlank { "Newer Find It Grok APK from GitHub Releases." })
                     },
                 )
             },

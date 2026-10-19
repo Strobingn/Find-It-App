@@ -3,7 +3,6 @@ package com.example.data
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Per-chunk XY bounds of a local LAZ/LAS file plus a coarse point-density histogram, recorded
@@ -119,7 +118,23 @@ internal class LazChunkIndex(
         const val HIST = 256
         private const val MAGIC = 0x46494348 // "FICH"
         private const val VERSION = 1
-        private val memory = ConcurrentHashMap<String, LazChunkIndex>()
+        /** Each index holds ~512 KB of histograms; keep only the most recently used few in heap. */
+        const val MEMORY_ENTRIES = 8
+        private val memory = LruMemory(MEMORY_ENTRIES)
+
+        /** Thread-safe access-ordered LRU (the sidecar on disk stays; a miss just re-reads it). */
+        internal class LruMemory(private val max: Int) {
+            private val map = object : LinkedHashMap<String, LazChunkIndex>(16, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LazChunkIndex>?) = size > max
+            }
+            operator fun get(key: String): LazChunkIndex? = synchronized(map) { map[key] }
+            operator fun set(key: String, value: LazChunkIndex) = synchronized(map) { map[key] = value }
+            fun clear() = synchronized(map) { map.clear() }
+            val size: Int get() = synchronized(map) { map.size }
+        }
+
+        /** Test hook. */
+        internal val memoryEntries: Int get() = memory.size
 
         /** Fallback directory when the LAZ folder is not writable (set by the app at start-up). */
         @Volatile var fallbackDir: File? = null
