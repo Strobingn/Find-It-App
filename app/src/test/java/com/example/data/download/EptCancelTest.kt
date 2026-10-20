@@ -39,7 +39,9 @@ class EptCancelTest {
             when {
                 url.endsWith("NY_SE4County_1_A22/ept.json") -> eptJson.toByteArray()
                 url.endsWith("ept.json") -> null
-                url.contains("ept-hierarchy/0-0-0-0") -> """{"0-0-0-0":5,"1-0-0-0":3}""".toByteArray()
+                // Counts stay inside [header point count, 3x] so the hierarchy gate still downloads
+                // both nodes; cancel is observed on the second node fetch.
+                url.contains("ept-hierarchy/0-0-0-0") -> """{"0-0-0-0":1000,"1-0-0-0":3}""".toByteArray()
                 url.contains("ept-data/") -> { running.set(false); Thread.sleep(50); ByteArray(10) }
                 range != null -> hdr.copyOfRange(range.first.toInt(), minOf(hdr.size, range.last.toInt() + 1))
                 else -> null
