@@ -4,9 +4,9 @@ name: Find-it-appAPK
 # Pull requests still run unit tests. Do not add extra release branches.
 on:
   push:
-    branches: [main]
+    branches: [main, "perf-*", "jules-*", "perf-historicmapcatalogclient-thread-sleep"]
   pull_request:
-    branches: [main]
+    branches: [main, "perf-*", "jules-*", "perf-historicmapcatalogclient-thread-sleep"]
   workflow_dispatch:
 
 env:
@@ -91,7 +91,7 @@ jobs:
           retention-days: 14
 
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
     permissions:
