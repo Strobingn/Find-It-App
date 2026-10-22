@@ -85,6 +85,7 @@ fun AiAnalysisWorkspace(
     val isRefining by viewModel.isRefiningTerrain.collectAsStateWithLifecycle()
     val refinementProgress by viewModel.terrainRefinementProgress.collectAsStateWithLifecycle()
     val canRefine by viewModel.canRefineTerrain.collectAsStateWithLifecycle()
+    val viewportResetKey by viewModel.viewportResetKey.collectAsStateWithLifecycle()
     val signals by viewModel.loggedSignals.collectAsStateWithLifecycle()
     val excavationLogs by viewModel.excavationLogs.collectAsStateWithLifecycle()
     val breadcrumbTracks by viewModel.breadcrumbTracks.collectAsStateWithLifecycle()
@@ -442,8 +443,8 @@ fun AiAnalysisWorkspace(
                             when {
                                 localLayerPending -> "Rendering ${pendingLocalLayer.value?.label ?: "AI layer"}…"
                                 centerMarkerMode.value -> "Pan/zoom until the target is centered, then save it"
-                                isRefining -> "Reloading original LAZ detail without changing your zoom…"
-                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · tap Refine for source detail"
+                                isRefining -> "Decoding the visible area at native point density…"
+                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · tap Refine for a sharper local mesh"
                                 else -> "Pre-1900 silver-site profile · pinch and drag"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -761,7 +762,7 @@ fun AiAnalysisWorkspace(
             currentLat = null,
             currentLon = null,
             mode = LidarCanvasMode.EXPLORE,
-            viewportResetKey = 0,
+            viewportResetKey = viewportResetKey,
             showSurveyCursor = false,
             showCoordinateHud = false,
             overlayTargets = classifiedTargetOverlays + cloudTargetOverlays +

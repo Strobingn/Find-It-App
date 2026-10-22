@@ -294,6 +294,7 @@ fun LidarMapCanvas(
         if (useGpuTerrain && activeGpuScene != null) {
             GpuTerrainSurface(
                 scene = activeGpuScene,
+                viewportResetKey = viewportResetKey,
                 modifier = Modifier.fillMaxSize().testTag("gpu_terrain_surface"),
             )
             Text(
