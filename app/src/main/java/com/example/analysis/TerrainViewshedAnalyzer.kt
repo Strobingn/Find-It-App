@@ -94,6 +94,9 @@ object TerrainViewshedAnalyzer {
         val visibility = BooleanArray(grid.width * grid.height)
         val cancelScan = AtomicBoolean(false)
 
+        // Pre-calculate dx for all columns once for the entire grid scan
+        val dxObs = DoubleArray(grid.width) { (it - observerX).toDouble() }
+
         // Cells are independent, so row ranges scan in parallel with identical results.
         // Cancellation is polled once per row for responsive aborts on any worker count.
         fun scanRows(startRow: Int, endRow: Int, counts: IntArray) {
@@ -103,13 +106,14 @@ object TerrainViewshedAnalyzer {
                     cancelScan.set(true)
                     break
                 }
+                val dy = (row - observerY).toDouble()
+                val dySq = dy * dy
+                val rowOffset = row * grid.width
                 for (col in 0 until grid.width) {
-                    val distanceCells = hypot(
-                        (col - observerX).toDouble(),
-                        (row - observerY).toDouble(),
-                    ).toFloat()
+                    val dx = dxObs[col]
+                    val distanceCells = Math.sqrt(dx * dx + dySq).toFloat()
                     if (distanceCells > maxRadiusCells) continue
-                    val index = row * grid.width + col
+                    val index = rowOffset + col
                     if (!grid.validData[index]) continue
                     counts[0]++
                     val isVisible = isLineOfSightClear(
@@ -120,7 +124,6 @@ object TerrainViewshedAnalyzer {
                         targetCol = col,
                         targetRow = row,
                         targetDistanceCells = distanceCells,
-                        cellSize = cellSize,
                         vegetationFilter = vegetationFilter,
                     )
                     if (isVisible) {
@@ -295,38 +298,43 @@ object TerrainViewshedAnalyzer {
         targetCol: Int,
         targetRow: Int,
         targetDistanceCells: Float,
-        cellSize: Float,
         vegetationFilter: Float,
     ): Boolean {
         if (targetDistanceCells < 0.5f) return true
+        val deltaX = targetCol - observerX
+        val deltaY = targetRow - observerY
         val steps = ceil(
             maxOf(
-                abs(targetCol - observerX).toDouble(),
-                abs(targetRow - observerY).toDouble(),
+                abs(deltaX.toDouble()),
+                abs(deltaY.toDouble()),
             ),
         ).toInt().coerceAtLeast(1)
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
-        val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
+        // Slope in cell-distance units. Since cellSize is positive scalar constant across the grid,
+        // (targetElevation - eyeElevation) / (targetDistance * cellSize) > maxBlockingAngle
+        // is mathematically identical to targetSlope > maxBlockingSlope.
+        val targetSlope = (targetElevation - eyeElevation) / targetDistanceCells
 
-        var maxBlockingAngle = Float.NEGATIVE_INFINITY
+        var maxBlockingSlope = Float.NEGATIVE_INFINITY
+        val gridWidth = grid.width
+        val gridHeight = grid.height
+        val invSteps = 1f / steps
         for (step in 1 until steps) {
-            val fraction = step.toFloat() / steps
-            val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
-                .coerceIn(0, grid.width - 1)
-            val row = (observerY + (targetRow - observerY) * fraction).roundToInt()
-                .coerceIn(0, grid.height - 1)
-            val index = row * grid.width + col
+            val fraction = step * invSteps
+            val col = (observerX + deltaX * fraction).roundToInt()
+                .coerceIn(0, gridWidth - 1)
+            val row = (observerY + deltaY * fraction).roundToInt()
+                .coerceIn(0, gridHeight - 1)
+            val index = row * gridWidth + col
             if (!grid.validData[index]) continue
             if (col == targetCol && row == targetRow) continue
-            val distanceCells = hypot(
-                (col - observerX).toDouble(),
-                (row - observerY).toDouble(),
-            ).toFloat()
+            val curDx = (col - observerX).toDouble()
+            val curDy = (row - observerY).toDouble()
+            val distanceCells = Math.sqrt(curDx * curDx + curDy * curDy).toFloat()
             if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
-            val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
-                (distanceCells * cellSize)
-            if (angle > maxBlockingAngle) maxBlockingAngle = angle
+            val slope = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) / distanceCells
+            if (slope > maxBlockingSlope) maxBlockingSlope = slope
         }
-        return targetAngle > maxBlockingAngle
+        return targetSlope > maxBlockingSlope
     }
 }
