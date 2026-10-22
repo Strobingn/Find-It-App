@@ -1117,7 +1117,7 @@ private fun TerrainQuickAction(
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
     ) {
         val contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-        Icon(icon, contentDescription = label, tint = contentColor, modifier = Modifier.width(19.dp))
+        Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.width(19.dp))
         Spacer(Modifier.width(4.dp))
         Text(
             label,
