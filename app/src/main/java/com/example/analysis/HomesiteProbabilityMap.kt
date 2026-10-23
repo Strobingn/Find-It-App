@@ -156,10 +156,9 @@ object HomesiteProbabilityMap {
         val finite = FloatArray(values.size)
         for (value in values) if (value.isFinite() && value >= 0f) finite[count++] = value
         if (count == 0) return FloatArray(values.size)
-        val sorted = finite.copyOf(count)
-        sorted.sort()
+        // Bolt: O(N) in-place QuickSelect scale lookup without allocating array copy or full O(N log N) sort.
         val index = ((count - 1) * 0.96f).roundToInt().coerceIn(0, count - 1)
-        val scale = sorted[index].coerceAtLeast(1e-6f)
+        val scale = PercentileNormalizer.computeScaleAtIndex(finite, count, index)
         // No-data cells are NaN; they must become 0, or the summed-area tables below turn every
         // ring mean NaN and all targets silently disappear.
         return FloatArray(values.size) { val v = values[it]; if (v.isFinite()) (v.coerceAtLeast(0f) / scale).coerceIn(0f, 1f) else 0f }
@@ -170,10 +169,9 @@ object HomesiteProbabilityMap {
         val finite = FloatArray(values.size)
         for (value in values) if (value.isFinite()) finite[count++] = abs(value)
         if (count == 0) return FloatArray(values.size)
-        val sorted = finite.copyOf(count)
-        sorted.sort()
+        // Bolt: O(N) in-place QuickSelect scale lookup without allocating array copy or full O(N log N) sort.
         val index = ((count - 1) * 0.96f).roundToInt().coerceIn(0, count - 1)
-        val scale = sorted[index].coerceAtLeast(1e-6f)
+        val scale = PercentileNormalizer.computeScaleAtIndex(finite, count, index)
         return FloatArray(values.size) { val v = values[it]; if (v.isFinite()) (v / scale).coerceIn(-1f, 1f) else 0f }
     }
 }

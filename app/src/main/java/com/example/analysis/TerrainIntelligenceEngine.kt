@@ -759,15 +759,10 @@ class TerrainIntelligenceEngine(
             var count = 0
             val finite = FloatArray(values.size)
             for (value in values) if (value.isFinite() && value >= 0f) finite[count++] = value
-            val scale = (
-                if (count == 0) {
-                    1f
-                } else {
-                    val sorted = finite.copyOf(count)
-                    sorted.sort()
-                    sorted[(count * 0.96).toInt().coerceIn(0, count - 1)]
-                }
-                ).coerceAtLeast(1e-6f)
+            if (count == 0) return FloatArray(values.size)
+            val index = (count * 0.96).toInt().coerceIn(0, count - 1)
+            // Bolt: O(N) in-place QuickSelect scale lookup without allocating array copy or full O(N log N) sort.
+            val scale = PercentileNormalizer.computeScaleAtIndex(finite, count, index)
             return FloatArray(values.size) { (values[it].coerceAtLeast(0f) / scale).coerceIn(0f, 1f) }
         }
 
@@ -778,15 +773,10 @@ class TerrainIntelligenceEngine(
                 val magnitude = abs(value)
                 if (magnitude.isFinite()) magnitudes[count++] = magnitude
             }
-            val scale = (
-                if (count == 0) {
-                    1f
-                } else {
-                    val sorted = magnitudes.copyOf(count)
-                    sorted.sort()
-                    sorted[(count * 0.96).toInt().coerceIn(0, count - 1)]
-                }
-                ).coerceAtLeast(1e-6f)
+            if (count == 0) return FloatArray(values.size)
+            val index = (count * 0.96).toInt().coerceIn(0, count - 1)
+            // Bolt: O(N) in-place QuickSelect scale lookup without allocating array copy or full O(N log N) sort.
+            val scale = PercentileNormalizer.computeScaleAtIndex(magnitudes, count, index)
             return FloatArray(values.size) { (values[it] / scale).coerceIn(-1f, 1f) }
         }
 
@@ -1237,15 +1227,10 @@ object TerrainIntelligenceRenderer {
             val candidate = if (signed) abs(value) else max(0f, value)
             if (candidate.isFinite()) scaleValues[count++] = candidate
         }
-        val scale = (
-            if (count == 0) {
-                1f
-            } else {
-                val sorted = scaleValues.copyOf(count)
-                sorted.sort()
-                sorted[(count * 0.97).toInt().coerceIn(0, count - 1)]
-            }
-            ).coerceAtLeast(1e-6f)
+        if (count == 0) return FloatArray(values.size)
+        val index = (count * 0.97).toInt().coerceIn(0, count - 1)
+        // Bolt: O(N) in-place QuickSelect scale lookup without allocating array copy or full O(N log N) sort.
+        val scale = PercentileNormalizer.computeScaleAtIndex(scaleValues, count, index)
         return FloatArray(values.size) {
             if (signed) (values[it] / scale).coerceIn(-1f, 1f) else (values[it] / scale).coerceIn(0f, 1f)
         }
