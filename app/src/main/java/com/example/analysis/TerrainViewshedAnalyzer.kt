@@ -96,6 +96,8 @@ object TerrainViewshedAnalyzer {
 
         // Cells are independent, so row ranges scan in parallel with identical results.
         // Cancellation is polled once per row for responsive aborts on any worker count.
+        val maxRadiusCellsSq = if (maxRadiusCells.isFinite()) maxRadiusCells * maxRadiusCells else Float.POSITIVE_INFINITY
+
         fun scanRows(startRow: Int, endRow: Int, counts: IntArray) {
             var row = startRow
             while (row < endRow && !cancelScan.get()) {
@@ -103,15 +105,17 @@ object TerrainViewshedAnalyzer {
                     cancelScan.set(true)
                     break
                 }
+                val dy = row - observerY
+                val dySq = dy * dy
+                val rowOffset = row * grid.width
                 for (col in 0 until grid.width) {
-                    val distanceCells = hypot(
-                        (col - observerX).toDouble(),
-                        (row - observerY).toDouble(),
-                    ).toFloat()
-                    if (distanceCells > maxRadiusCells) continue
-                    val index = row * grid.width + col
+                    val dx = col - observerX
+                    val distSq = dx * dx + dySq
+                    if (distSq > maxRadiusCellsSq) continue
+                    val index = rowOffset + col
                     if (!grid.validData[index]) continue
                     counts[0]++
+                    val distanceCells = kotlin.math.sqrt(distSq)
                     val isVisible = isLineOfSightClear(
                         grid = grid,
                         observerX = observerX,
@@ -299,29 +303,29 @@ object TerrainViewshedAnalyzer {
         vegetationFilter: Float,
     ): Boolean {
         if (targetDistanceCells < 0.5f) return true
-        val steps = ceil(
-            maxOf(
-                abs(targetCol - observerX).toDouble(),
-                abs(targetRow - observerY).toDouble(),
-            ),
-        ).toInt().coerceAtLeast(1)
+        val targetDx = targetCol - observerX
+        val targetDy = targetRow - observerY
+        val steps = ceil(maxOf(abs(targetDx), abs(targetDy)).toDouble()).toInt().coerceAtLeast(1)
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
         val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
 
+        val invSteps = 1f / steps
+
         var maxBlockingAngle = Float.NEGATIVE_INFINITY
         for (step in 1 until steps) {
-            val fraction = step.toFloat() / steps
-            val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
-                .coerceIn(0, grid.width - 1)
-            val row = (observerY + (targetRow - observerY) * fraction).roundToInt()
-                .coerceIn(0, grid.height - 1)
+            val fraction = step * invSteps
+            val col = (observerX + targetDx * fraction).roundToInt().coerceIn(0, grid.width - 1)
+            val row = (observerY + targetDy * fraction).roundToInt().coerceIn(0, grid.height - 1)
+            if (col == targetCol && row == targetRow) continue
             val index = row * grid.width + col
             if (!grid.validData[index]) continue
-            if (col == targetCol && row == targetRow) continue
-            val distanceCells = hypot(
-                (col - observerX).toDouble(),
-                (row - observerY).toDouble(),
-            ).toFloat()
+
+            // Exact Euclidean distance to intermediate sampled cell (col, row).
+            // Replaces Math.hypot(cellDx, cellDy) with fast Float sqrt.
+            val cellDx = col - observerX
+            val cellDy = row - observerY
+            val distanceCells = kotlin.math.sqrt(cellDx * cellDx + cellDy * cellDy)
+
             if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
             val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
                 (distanceCells * cellSize)
