@@ -1,3 +1,6 @@
 ## 2025-02-14 - HuntZoneClusterer group aggregation allocations
 **Learning:** Using functional Kotlin idioms (`members.map { ... }.average()`, `groupBy`, `maxWith`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`) for each cluster. Replacing these with single-pass primitive arrays (`DoubleArray`, `BooleanArray`) eliminates thousands of allocations in dense target sets.
 **Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations.
+## 2025-02-14 - FindSiteClusterer group aggregation allocations
+**Learning:** Using functional Kotlin idioms (`groupBy`, `.map { ... }.average()`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`, `List`) for each cluster. Replacing these with single-pass primitive arrays (`IntArray`, `DoubleArray`) eliminates thousands of allocations in dense target sets.
+**Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations. This is especially true for geographic clustering like FindSiteClusterer.

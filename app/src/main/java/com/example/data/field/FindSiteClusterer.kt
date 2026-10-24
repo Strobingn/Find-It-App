@@ -71,24 +71,72 @@ object FindSiteClusterer {
             }
         }
 
-        val groups = positioned.indices.groupBy { root(it) }.values
-        val ordered = groups.sortedWith(
-            compareByDescending<List<Int>> { it.size }.thenBy { group ->
-                group.map { positioned[it].latitude!! }.average()
-            },
-        )
-        return ordered.mapIndexed { index, group ->
-            val members = group.map { positioned[it] }
+        // Single pass per cluster group to compute metrics without extra object allocations.
+        // Avoids `groupBy` and `.map { ... }.average()` which allocate intermediate collections and boxed doubles.
+        val n = positioned.size
+        val roots = IntArray(n)
+        val groupSizes = IntArray(n)
+        val latSums = DoubleArray(n)
+        val lonSums = DoubleArray(n)
+
+        for (i in 0 until n) {
+            val r = root(i)
+            roots[i] = r
+            groupSizes[r]++
+            val pos = positioned[i]
+            latSums[r] += pos.latitude!!
+            lonSums[r] += pos.longitude!!
+        }
+
+        var numGroups = 0
+        for (i in 0 until n) {
+            if (groupSizes[i] > 0) numGroups++
+        }
+
+        val activeRoots = IntArray(numGroups)
+        var activeIdx = 0
+        for (i in 0 until n) {
+            if (groupSizes[i] > 0) {
+                activeRoots[activeIdx++] = i
+            }
+        }
+
+        val activeLatAverages = DoubleArray(n)
+        val activeLonAverages = DoubleArray(n)
+        for (i in 0 until numGroups) {
+            val r = activeRoots[i]
+            activeLatAverages[r] = latSums[r] / groupSizes[r]
+            activeLonAverages[r] = lonSums[r] / groupSizes[r]
+        }
+
+        val sortedRoots = activeRoots.toTypedArray()
+        sortedRoots.sortWith { a, b ->
+            val sizeDiff = groupSizes[b].compareTo(groupSizes[a])
+            if (sizeDiff != 0) sizeDiff
+            else activeLatAverages[a].compareTo(activeLatAverages[b])
+        }
+
+        return sortedRoots.mapIndexed { index, r ->
+            val size = groupSizes[r]
+            val members = ArrayList<TargetSignal>(size)
+            for (i in 0 until n) {
+                if (roots[i] == r) {
+                    members.add(positioned[i])
+                }
+            }
+            members.sortBy { it.id }
+
             FindSite(
                 label = if (index < MAX_LABELLED_SITES) {
                     "Site ${'A' + index}"
                 } else {
                     "Site ${index + 1}"
                 },
-                centerLatitude = members.map { it.latitude!! }.average(),
-                centerLongitude = members.map { it.longitude!! }.average(),
-                signals = members.sortedBy { it.id },
+                centerLatitude = activeLatAverages[r],
+                centerLongitude = activeLonAverages[r],
+                signals = members,
             )
         }
+
     }
 }
