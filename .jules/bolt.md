@@ -1,3 +1,7 @@
 ## 2025-02-14 - HuntZoneClusterer group aggregation allocations
 **Learning:** Using functional Kotlin idioms (`members.map { ... }.average()`, `groupBy`, `maxWith`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`) for each cluster. Replacing these with single-pass primitive arrays (`DoubleArray`, `BooleanArray`) eliminates thousands of allocations in dense target sets.
 **Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations.
+
+## 2026-10-24 - Precomputing ray horizon bounds and index offsets in TerrainIntelligenceEngine
+**Learning:** In 2D grid raycasting algorithms (such as Openness and Sky View Factor calculations), performing per-step coordinate multiplication (`py * width + px`) and bounds checking (`px !in 0 until width...`) across 8 ray directions for every pixel executes millions of redundant conditional branches. Pre-calculating `maxSteps` based on grid boundaries and stepping flat 1D array offsets (`currIdx += offset`) eliminates bounds check overhead entirely while keeping calculations exact.
+**Action:** For directional grid traversal loops with fixed ray step vectors, precalculate `maxSteps` and flat index offsets per cell to eliminate branch mispredictions and arithmetic in innermost loops.
