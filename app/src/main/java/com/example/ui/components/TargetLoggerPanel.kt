@@ -1132,7 +1132,7 @@ private fun SignalCard(
                 Icon(Icons.Default.Navigation, contentDescription = "Navigate to find")
             }
             IconButton(onClick = onOpenDigLogs, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.Construction, contentDescription = "Dig logs")
+                Icon(Icons.Default.Construction, contentDescription = "Open dig logs")
             }
             IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Delete, contentDescription = "Delete find")

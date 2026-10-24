@@ -135,7 +135,7 @@ fun AiChatSheet(
                         },
                         enabled = inputText.isNotBlank() && !isStreaming,
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send message")
                     }
                 },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
