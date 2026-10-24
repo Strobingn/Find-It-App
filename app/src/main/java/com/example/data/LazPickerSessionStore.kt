@@ -32,6 +32,7 @@ data class LazPickerSession(
     val selectedUrls: Set<String> = emptySet(),
     val selectedAreaDescription: String? = null,
     val lastSearchBounds: GeoSpatialLibrary.GeographicBounds? = null,
+    val selectedSource: String = LidarDownloadSource.FAST_AZURE.name,
 )
 
 object LazPickerSessionStore {
@@ -75,6 +76,7 @@ object LazPickerSessionStore {
         session.lastSearchBounds?.let { bounds ->
             put("lastSearchBounds", encode(bounds))
         }
+        put("selectedSource", session.selectedSource)
     }
 
     private fun decode(json: JSONObject): LazPickerSession = LazPickerSession(
@@ -98,6 +100,13 @@ object LazPickerSessionStore {
         }.orEmpty(),
         selectedAreaDescription = json.optString("selectedAreaDescription").takeIf(String::isNotBlank),
         lastSearchBounds = json.optJSONObject("lastSearchBounds")?.let(::decodeBounds),
+        selectedSource = json.optString("selectedSource").ifBlank {
+            if ((json.optJSONArray("tiles")?.length() ?: 0) > 0) {
+                LidarDownloadSource.USGS_TNM.name
+            } else {
+                LidarDownloadSource.FAST_AZURE.name
+            }
+        },
     )
 
     private fun encode(tile: NysHistoricLazTileCatalog.Tile): JSONObject = JSONObject().apply {
@@ -109,6 +118,11 @@ object LazPickerSessionStore {
         putNullable("maxLongitude", tile.maxLongitude)
         putNullable("maxLatitude", tile.maxLatitude)
         put("project", tile.project)
+        put("source", tile.source.name)
+        put("hostLabel", tile.hostLabel)
+        tile.sizeBytes?.let { put("sizeBytes", it) }
+        tile.pointCount?.let { put("pointCount", it) }
+        tile.acquiredYear?.let { put("acquiredYear", it) }
     }
 
     private fun decodeTiles(values: JSONArray): List<NysHistoricLazTileCatalog.Tile> = buildList {
@@ -127,6 +141,13 @@ object LazPickerSessionStore {
                     maxLongitude = item.optDoubleOrNull("maxLongitude"),
                     maxLatitude = item.optDoubleOrNull("maxLatitude"),
                     project = item.optString("project"),
+                    source = LidarDownloadSource.entries.firstOrNull {
+                        it.name == item.optString("source")
+                    } ?: LidarDownloadSource.USGS_TNM,
+                    hostLabel = item.optString("hostLabel"),
+                    sizeBytes = item.optLongOrNull("sizeBytes"),
+                    pointCount = item.optLongOrNull("pointCount"),
+                    acquiredYear = item.optInt("acquiredYear", 0).takeIf { it > 0 },
                 ),
             )
         }
@@ -137,6 +158,8 @@ object LazPickerSessionStore {
         put("title", asset.title)
         put("href", asset.href)
         asset.bounds?.let { put("bounds", encode(it)) }
+        asset.pointCount?.let { put("pointCount", it) }
+        asset.datetime?.let { put("datetime", it) }
     }
 
     private fun decodeCopcAssets(values: JSONArray): List<CopcAsset> = buildList {
@@ -150,6 +173,8 @@ object LazPickerSessionStore {
                     title = item.optString("title").ifBlank { href.substringAfterLast('/') },
                     href = href,
                     bounds = item.optJSONObject("bounds")?.let(::decodeBounds),
+                    pointCount = item.optLongOrNull("pointCount"),
+                    datetime = item.optString("datetime").takeIf(String::isNotBlank),
                 ),
             )
         }
@@ -177,4 +202,7 @@ object LazPickerSessionStore {
 
     private fun JSONObject.optDoubleOrNull(key: String): Double? =
         if (!has(key) || isNull(key)) null else optDouble(key).takeIf(Double::isFinite)
+
+    private fun JSONObject.optLongOrNull(key: String): Long? =
+        if (!has(key) || isNull(key)) null else optLong(key).takeIf { it > 0L }
 }

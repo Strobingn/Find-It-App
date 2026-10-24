@@ -1,6 +1,7 @@
 package com.example.data
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -24,6 +25,24 @@ class LazDownloadValidationTest {
 
     private fun lasBytes(payload: String = "rest of the header"): ByteArray =
         "LASF".toByteArray(Charsets.US_ASCII) + payload.toByteArray(Charsets.US_ASCII)
+
+    @Test
+    fun cropApiPathsUseThePreferredLazName() {
+        val name = LazDownloadManager.resolveDownloadFileName(
+            urlPathName = "pointcloud",
+            preferredFileName = "UGS_Wasatch_crop.laz",
+        )
+
+        assertTrue(name.endsWith(".laz"))
+        assertEquals("UGS_Wasatch_crop.laz", name)
+    }
+
+    @Test
+    fun aPathWithoutLidarExtensionIsRejectedWithoutAPreferredName() {
+        assertThrows(IllegalArgumentException::class.java) {
+            LazDownloadManager.resolveDownloadFileName("pointcloud")
+        }
+    }
 
     @Test
     fun aRealPointCloudPasses() {

@@ -32,6 +32,11 @@ class NysHistoricLazTileCatalog(
         val maxLatitude: Double?,
         /** Source acquisition project, so the picker can show which survey a tile came from. */
         val project: String = "",
+        val source: LidarDownloadSource = LidarDownloadSource.USGS_TNM,
+        val hostLabel: String = "",
+        val sizeBytes: Long? = null,
+        val pointCount: Long? = null,
+        val acquiredYear: Int? = null,
     )
 
     data class DownloadEstimate(
@@ -75,7 +80,8 @@ class NysHistoricLazTileCatalog(
         var knownBytes = 0L
         var unknownTiles = 0
         tiles.distinctBy(Tile::downloadUrl).forEach { tile ->
-            val bytes = runCatching { contentLength(tile.downloadUrl) }.getOrNull()
+            val known = tile.sizeBytes?.takeIf { it > 0L }
+            val bytes = known ?: runCatching { contentLength(tile.downloadUrl) }.getOrNull()
             if (bytes == null || bytes < 0L) unknownTiles++ else knownBytes += bytes
         }
         DownloadEstimate(knownBytes, unknownTiles)
@@ -132,8 +138,7 @@ class NysHistoricLazTileCatalog(
             if (page.rawItemCount < NATIONAL_MAP_PAGE_SIZE) break
             offset += NATIONAL_MAP_PAGE_SIZE
         }
-        return collected
-            .distinctBy(Tile::downloadUrl)
+        return rankLidarTiles(collected.distinctBy(Tile::downloadUrl))
             .sortedBy { if (it.project.contains(NATIONAL_MAP_PROJECT_ID, ignoreCase = true)) 0 else 1 }
     }
 
@@ -204,6 +209,9 @@ class NysHistoricLazTileCatalog(
                 val maxY = bounds.optDouble("maxY", Double.NaN)
                 if (!listOf(minX, minY, maxX, maxY).all(Double::isFinite)) continue
                 if (maxX < west || minX > east || maxY < south || minY > north) continue
+                val sizeBytes = item.optLong("sizeInBytes", -1L).takeIf { it > 0L }
+                val year = yearFrom(item.optString("publicationDate"))
+                    ?: yearFrom(title)
                 add(
                     Tile(
                         objectId = downloadUrl.hashCode().toLong(),
@@ -214,15 +222,17 @@ class NysHistoricLazTileCatalog(
                         maxLongitude = maxX,
                         maxLatitude = maxY,
                         project = title,
+                        source = LidarDownloadSource.USGS_TNM,
+                        hostLabel = LidarDownloadSource.USGS_TNM.shortHost,
+                        sizeBytes = sizeBytes,
+                        acquiredYear = year,
                     ),
                 )
             }
         }
             .distinctBy(Tile::downloadUrl)
-            // Any LPC tile whose footprint covers the query is usable. Restricting results to the
-            // Hudson Valley SE 4-county 2022 project meant every coordinate outside that one
-            // survey returned nothing at all; it is now merely ranked first as the best-known
-            // source for this app's primary search area.
+            .let(::rankLidarTiles)
+            // Keep the well-known SE 4-county survey ahead of other equal-year TNM hits.
             .sortedBy { if (it.project.contains(NATIONAL_MAP_PROJECT_ID, ignoreCase = true)) 0 else 1 }
     }
 
@@ -306,6 +316,11 @@ class NysHistoricLazTileCatalog(
     }
 
     private fun firstNonBlank(vararg values: String): String? = values.firstOrNull { it.isNotBlank() }
+
+    internal fun yearFrom(value: String): Int? {
+        val match = Regex("(20\\d{2}|19\\d{2})").find(value) ?: return null
+        return match.value.toIntOrNull()
+    }
 
     private fun extractHttpUrl(value: String): String? {
         val unescaped = value.replace("&amp;", "&").replace("\\/", "/")

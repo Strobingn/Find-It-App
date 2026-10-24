@@ -11,7 +11,10 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import com.example.MainActivity
+import com.example.data.CopcStacCatalog
 import com.example.data.LazDownloadManager
+import com.example.data.OpenTopographyApiKey
+import com.example.data.signPublicLidarDownloadUrl
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +39,7 @@ class LazDownloadService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downloader = LazDownloadManager()
+    private val copcCatalog = CopcStacCatalog()
     private var worker: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -89,14 +93,20 @@ class LazDownloadService : Service() {
         }
     }
 
-    private fun runTask(task: LazDownloadTask) {
+    private suspend fun runTask(task: LazDownloadTask) {
         LazDownloadQueue.markRunning(task.url)
         notify(buildNotification(LazDownloadQueue.taskFor(task.url)))
         var lastNotifiedAt = 0L
         try {
+            val sourceUrl = signPublicLidarDownloadUrl(
+                url = task.url,
+                copcCatalog = copcCatalog,
+                openTopographyApiKey = OpenTopographyApiKey.load(this),
+            )
             val file = downloader.download(
-                sourceUrl = task.url,
+                sourceUrl = sourceUrl,
                 destinationDirectory = LazDownloadQueue.store(this).directory,
+                preferredFileName = task.displayName,
                 progress = { downloaded, total ->
                     LazDownloadQueue.markProgress(task.url, downloaded, total)
                     // The transfer reports every few megabytes; throttle the notification so a

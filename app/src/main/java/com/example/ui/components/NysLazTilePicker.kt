@@ -45,6 +45,14 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
 import com.example.data.CopcAsset
 import com.example.data.CopcStacCatalog
+import com.example.data.LidarDownloadSource
+import com.example.data.NoaaCoastalLidarCatalog
+import com.example.data.OpenTopographyApiKey
+import com.example.data.OpenTopographyCatalog
+import com.example.data.lidarTileSubtitle
+import com.example.data.searchPublicLidarTiles
+import com.example.data.signPublicLidarDownloadUrl
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import com.example.data.DemGenerator
 import com.example.data.GroundSurfaceMode
 import com.example.data.LazTerrainCache
@@ -77,8 +85,6 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
@@ -117,6 +123,8 @@ fun NysLazTilePicker(
     val scope = rememberCoroutineScope()
     val catalog = remember { NysHistoricLazTileCatalog() }
     val copcCatalog = remember { CopcStacCatalog() }
+    val noaaCatalog = remember { NoaaCoastalLidarCatalog() }
+    val openTopographyCatalog = remember { OpenTopographyCatalog() }
     val store = remember(context) { LazDownloadQueue.store(context) }
     val diskCache = remember(context) { LazTerrainDiskCache(File(context.cacheDir, "decoded-terrain")) }
     val terrainCache = remember(diskCache) { LazTerrainCache(LazTerrainMemoryCache(), diskCache) }
@@ -136,6 +144,9 @@ fun NysLazTilePicker(
     var radiusMiles by remember { mutableStateOf("") }
     var polygonVertices by remember { mutableStateOf("") }
     var selectedRegion by remember { mutableStateOf<NortheastLidarRegion?>(null) }
+    var selectedSource by rememberSaveable { mutableStateOf(LidarDownloadSource.FAST_AZURE.name) }
+    val downloadSource = LidarDownloadSource.entries.firstOrNull { it.name == selectedSource }
+        ?: LidarDownloadSource.FAST_AZURE
     var mosaicProjectName by remember { mutableStateOf("") }
     var tiles by remember { mutableStateOf<List<NysHistoricLazTileCatalog.Tile>>(emptyList()) }
     var copcAssets by remember { mutableStateOf<List<CopcAsset>>(emptyList()) }
@@ -153,6 +164,8 @@ fun NysLazTilePicker(
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var sessionRestored by remember { mutableStateOf(false) }
+    var openTopoKeyDraft by rememberSaveable { mutableStateOf("") }
+    var openTopoKeySaved by remember { mutableStateOf(OpenTopographyApiKey.isConfigured(context)) }
     // Downloads live in LazDownloadService, so they survive leaving this screen. The picker only
     // observes them and opens a tile once its bytes have landed.
     val downloadTasks by LazDownloadQueue.tasks.collectAsStateWithLifecycle()
@@ -185,6 +198,7 @@ fun NysLazTilePicker(
         selectedUrls = saved.selectedUrls
         selectedAreaDescription = saved.selectedAreaDescription
         lastSearchBounds = saved.lastSearchBounds
+        selectedSource = saved.selectedSource.ifBlank { LidarDownloadSource.FAST_AZURE.name }
         sessionRestored = true
     }
 
@@ -208,6 +222,7 @@ fun NysLazTilePicker(
         selectedUrls,
         selectedAreaDescription,
         lastSearchBounds,
+        selectedSource,
     ) {
         if (!sessionRestored) return@LaunchedEffect
         LazPickerSessionStore.save(
@@ -231,6 +246,7 @@ fun NysLazTilePicker(
                 selectedUrls = selectedUrls,
                 selectedAreaDescription = selectedAreaDescription,
                 lastSearchBounds = lastSearchBounds,
+                selectedSource = selectedSource,
             ),
         )
     }
@@ -270,14 +286,32 @@ fun NysLazTilePicker(
         copcAssets = emptyList()
         lastSearchBounds = null
         status = "Finding the exact LiDAR tile…"
+        val pointBounds = com.example.geospatial.GeoSpatialLibrary.GeographicBounds(
+            minLat = lat - 0.002,
+            maxLat = lat + 0.002,
+            minLon = lon - 0.002,
+            maxLon = lon + 0.002,
+        )
         scope.launch {
             try {
-                tiles = catalog.tilesAt(lon, lat)
+                val found = searchPublicLidarTiles(
+                    source = downloadSource,
+                    bounds = pointBounds,
+                    usgsCatalog = catalog,
+                    copcCatalog = copcCatalog,
+                    noaaCatalog = noaaCatalog,
+                    openTopographyCatalog = openTopographyCatalog,
+                )
+                tiles = found.tiles
+                copcAssets = found.copc
+                lastSearchBounds = pointBounds
                 selectedUrls = tiles.map { it.downloadUrl }.toSet()
-                status = if (tiles.isEmpty()) {
-                    "No published LiDAR tile covers that coordinate."
-                } else {
-                    "Found ${tiles.size} matching tile${if (tiles.size == 1) "" else "s"}."
+                status = found.status.ifBlank {
+                    if (tiles.isEmpty()) {
+                        "No published LiDAR tile covers that coordinate."
+                    } else {
+                        "Found ${tiles.size} matching tile${if (tiles.size == 1) "" else "s"}."
+                    }
                 }
             } catch (t: Throwable) {
                 tiles = emptyList()
@@ -303,7 +337,11 @@ fun NysLazTilePicker(
         ).takeIf { minLat < maxLat && minLon < maxLon }
     }
 
-    fun lookupArea(selection: LidarAreaSelection, description: String) {
+    fun lookupArea(
+        selection: LidarAreaSelection,
+        description: String,
+        source: LidarDownloadSource = downloadSource,
+    ) {
         isLookingUp = true
         error = null
         downloadEstimate = null
@@ -313,41 +351,32 @@ fun NysLazTilePicker(
             try {
                 val bounds = selection.bounds
                 lastSearchBounds = bounds
-                val (lazResult, copcResult) = coroutineScope {
-                    val laz = async {
-                        runCatching {
-                            catalog.tilesInBounds(
-                                west = bounds.minLon,
-                                south = bounds.minLat,
-                                east = bounds.maxLon,
-                                north = bounds.maxLat,
-                            )
-                        }
-                    }
-                    val copc = async { runCatching { copcCatalog.search(bounds) } }
-                    laz.await() to copc.await()
-                }
-                val resolved = lazResult.getOrDefault(emptyList())
+                val found = searchPublicLidarTiles(
+                    source = source,
+                    bounds = bounds,
+                    usgsCatalog = catalog,
+                    copcCatalog = copcCatalog,
+                    noaaCatalog = noaaCatalog,
+                    openTopographyCatalog = openTopographyCatalog,
+                )
                 // Providers only accept envelopes. Preserve a tile with no returned footprint so
                 // the server's spatial intersection remains authoritative, but precisely filter
                 // every tile whose metadata gives us a usable geographic rectangle.
-                tiles = resolved.filter { tile -> tileBounds(tile)?.let(selection::intersects) ?: true }
-                copcAssets = copcResult.getOrDefault(emptyList()).filter { asset ->
+                tiles = found.tiles.filter { tile -> tileBounds(tile)?.let(selection::intersects) ?: true }
+                copcAssets = found.copc.filter { asset ->
                     asset.bounds?.let(selection::intersects) ?: true
                 }
-                if (tiles.isEmpty() && copcAssets.isEmpty()) {
-                    lazResult.exceptionOrNull()?.let { throw it }
-                    copcResult.exceptionOrNull()?.let { throw it }
+                if (tiles.isEmpty() && copcAssets.isEmpty() && found.error != null) {
+                    throw found.error
                 }
                 selectedUrls = tiles.map { it.downloadUrl }.toSet()
-                status = when {
-                    tiles.isEmpty() && copcAssets.isEmpty() ->
-                        "No published LiDAR tiles intersect that area."
-                    resolved.size >= NysHistoricLazTileCatalog.MAX_NATIONAL_MAP_RESULTS ->
-                        "Found ${copcAssets.size} streamable COPC and ${tiles.size} downloadable LAZ files — " +
-                            "the LAZ search hit its cap. Narrow the box to see the rest."
-                    else ->
-                        "Found ${copcAssets.size} streamable COPC and ${tiles.size} downloadable LAZ files."
+                status = found.status.ifBlank {
+                    when {
+                        tiles.isEmpty() && copcAssets.isEmpty() ->
+                            "No published LiDAR tiles intersect that area."
+                        else ->
+                            "Found ${copcAssets.size} streamable COPC and ${tiles.size} downloadable LAZ files."
+                    }
                 }
             } catch (t: Throwable) {
                 tiles = emptyList()
@@ -459,7 +488,17 @@ fun NysLazTilePicker(
                 val estimate = if (needed.isEmpty()) {
                     NysHistoricLazTileCatalog.DownloadEstimate(knownBytes = 0L, unknownTileCount = 0)
                 } else {
-                    catalog.estimateDownloadBytes(needed)
+                    val sized = needed.map { tile ->
+                        val url = runCatching {
+                            signPublicLidarDownloadUrl(
+                                url = tile.downloadUrl,
+                                copcCatalog = copcCatalog,
+                                openTopographyApiKey = OpenTopographyApiKey.load(context),
+                            )
+                        }.getOrDefault(tile.downloadUrl)
+                        if (url == tile.downloadUrl) tile else tile.copy(downloadUrl = url)
+                    }
+                    catalog.estimateDownloadBytes(sized)
                 }
                 downloadEstimate = estimate
                 status = when {
@@ -870,10 +909,87 @@ fun NysLazTilePicker(
                 Column {
                     Text("Public LiDAR tiles", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "USGS 3DEP point clouds · nationwide coverage",
+                        downloadSource.description,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+            Text(
+                "USGS rockyweb is slow. Fast Azure serves the same 3DEP points as COPC. OpenTopography crops hosted high-res clouds to your box. NOAA Digital Coast is for shoreline surveys. Pick a source, then search.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            ) {
+                LidarDownloadSource.entries.forEach { source ->
+                    FilterChip(
+                        selected = downloadSource == source,
+                        onClick = {
+                            selectedSource = source.name
+                            error = null
+                            val bounds = lastSearchBounds
+                            if (bounds != null && !isLookingUp) {
+                                lookupArea(
+                                    LidarAreaSelection.Rectangle(bounds),
+                                    description = "saved box",
+                                    source = source,
+                                )
+                            }
+                        },
+                        label = { Text(source.chipLabel) },
+                        modifier = Modifier.testTag("lidar_source_${source.name}"),
+                    )
+                }
+            }
+            if (downloadSource == LidarDownloadSource.OPEN_TOPOGRAPHY) {
+                Text(
+                    if (openTopoKeySaved) {
+                        "Crop downloads will attach your myOpenTopo API key. Search does not need it."
+                    } else {
+                        "Crop downloads need a free API key from portal.opentopography.org/myopentopo. Catalog search still works without one."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = openTopoKeyDraft,
+                    onValueChange = { openTopoKeyDraft = it },
+                    label = { Text("OpenTopography API key") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("opentopo_api_key_field"),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (OpenTopographyApiKey.hasDeviceKey(context)) {
+                        TextButton(
+                            onClick = {
+                                OpenTopographyApiKey.clear(context)
+                                openTopoKeyDraft = ""
+                                openTopoKeySaved = OpenTopographyApiKey.isConfigured(context)
+                            },
+                        ) { Text("Remove key") }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (OpenTopographyApiKey.save(context, openTopoKeyDraft)) {
+                                openTopoKeyDraft = ""
+                                openTopoKeySaved = true
+                                error = null
+                            } else {
+                                error = "Paste a myOpenTopo API key, then Save."
+                            }
+                        },
+                        enabled = openTopoKeyDraft.isNotBlank(),
+                        modifier = Modifier.testTag("save_opentopo_api_key"),
+                    ) {
+                        Text(if (openTopoKeySaved && openTopoKeyDraft.isBlank()) "Key saved" else "Save key")
+                    }
                 }
             }
             Text(
@@ -1121,7 +1237,7 @@ fun NysLazTilePicker(
             if (copcAssets.isNotEmpty()) {
                 Text("Fast COPC streaming", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Streams the byte ranges needed for the selected area. Downloadable LAZ files remain available below for offline use.",
+                    "Streams the byte ranges needed for the selected area from Azure. Full COPC files below download the same points for offline use, without USGS rockyweb.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1178,9 +1294,9 @@ fun NysLazTilePicker(
                         Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                             Text(tile.name, maxLines = 1)
                             Text(
-                                tile.project.ifBlank { "Open this one tile" },
+                                lidarTileSubtitle(tile).ifBlank { tile.project.ifBlank { "Open this one tile" } },
                                 style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1,
+                                maxLines = 2,
                             )
                         }
                         if (downloadTasks.any { it.url == tile.downloadUrl && !it.isFinished }) {

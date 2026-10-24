@@ -16,6 +16,8 @@ data class CopcAsset(
     val title: String,
     val href: String,
     val bounds: GeoSpatialLibrary.GeographicBounds?,
+    val pointCount: Long? = null,
+    val datetime: String? = null,
 )
 
 /** Spatial search and access client for the public USGS 3DEP COPC collection. */
@@ -56,6 +58,12 @@ class CopcStacCatalog(private val httpClient: OkHttpClient = OkHttpClient()) {
                 .put(bounds.maxLat),
         )
         .put("limit", limit.coerceIn(1, 500))
+        .put(
+            "sortby",
+            JSONArray().put(
+                JSONObject().put("field", "datetime").put("direction", "desc"),
+            ),
+        )
 
     internal fun parseSearchResponse(json: String): List<CopcAsset> {
         val features = JSONObject(json).optJSONArray("features") ?: return emptyList()
@@ -75,15 +83,20 @@ class CopcStacCatalog(private val httpClient: OkHttpClient = OkHttpClient()) {
                 }
                 val geographicBounds = parseBounds(feature.optJSONArray("bbox"))
                 val id = feature.optString("id").ifBlank { href.substringAfterLast('/') }
+                val properties = feature.optJSONObject("properties")
+                val title = properties?.optString("title")?.takeIf(String::isNotBlank) ?: id
+                val pointCount = properties?.optLong("pc:count", -1L)?.takeIf { it > 0L }
+                val datetime = sequenceOf("datetime", "start_datetime", "end_datetime")
+                    .mapNotNull { key -> properties?.optString(key)?.takeIf(String::isNotBlank) }
+                    .firstOrNull()
                 add(
                     CopcAsset(
                         id = id,
-                        title = feature.optJSONObject("properties")
-                            ?.optString("title")
-                            ?.takeIf(String::isNotBlank)
-                            ?: id,
+                        title = title,
                         href = href,
                         bounds = geographicBounds,
+                        pointCount = pointCount,
+                        datetime = datetime,
                     ),
                 )
             }
@@ -92,14 +105,23 @@ class CopcStacCatalog(private val httpClient: OkHttpClient = OkHttpClient()) {
 
     /** Adds a short-lived Planetary Computer SAS token before Azure Blob access. */
     suspend fun signedAsset(asset: CopcAsset): CopcAsset = withContext(Dispatchers.IO) {
-        asset.copy(href = signUrl(asset.href))
+        asset.copy(href = signIfNeeded(asset.href))
+    }
+
+    suspend fun signIfNeeded(url: String): String = withContext(Dispatchers.IO) {
+        signUrl(url)
+    }
+
+    fun needsSigning(url: String): Boolean {
+        val host = runCatching { java.net.URI(url).host.orEmpty().lowercase() }.getOrDefault("")
+        return host.endsWith(".blob.core.windows.net") && !url.contains("sig=")
     }
 
     internal fun appendToken(url: String, token: String): String =
         url + if (url.contains('?')) "&$token" else "?$token"
 
     private fun signUrl(url: String): String {
-        if (url.contains("sig=")) return url
+        if (!needsSigning(url)) return url
         return appendToken(url, sasToken())
     }
 
