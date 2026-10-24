@@ -29,6 +29,54 @@ class HistoricMapAgreementScorerTest {
         return pixels
     }
 
+    private fun testInkCells(
+        pixels: IntArray,
+        imageWidth: Int = 10,
+        imageHeight: Int = 10,
+        centerLatitude: Double = 41.0,
+        centerLongitude: Double = -74.0,
+        widthMeters: Float = 100f,
+        heightMeters: Float = 100f,
+        bearingDegrees: Float = 0f,
+        gridMinLatitude: Double = 40.999,
+        gridMaxLatitude: Double = 41.001,
+        gridMinLongitude: Double = -74.001,
+        gridMaxLongitude: Double = -73.999,
+        evidenceWidth: Int = 4,
+        evidenceHeight: Int = 4,
+        sampleStep: Int = 1,
+    ): Set<Int> = HistoricMapAgreementScorer.inkCells(
+        pixels = pixels, imageWidth = imageWidth, imageHeight = imageHeight,
+        centerLatitude = centerLatitude, centerLongitude = centerLongitude,
+        widthMeters = widthMeters, heightMeters = heightMeters, bearingDegrees = bearingDegrees,
+        gridMinLatitude = gridMinLatitude, gridMaxLatitude = gridMaxLatitude,
+        gridMinLongitude = gridMinLongitude, gridMaxLongitude = gridMaxLongitude,
+        evidenceWidth = evidenceWidth, evidenceHeight = evidenceHeight, sampleStep = sampleStep
+    )
+
+    private fun testScoreOverlay(
+        pixels: IntArray,
+        evidence: HistoricMapAgreementScorer.EvidenceGrid,
+        imageWidth: Int,
+        imageHeight: Int,
+        centerLatitude: Double = 41.0005,
+        centerLongitude: Double = -74.0005,
+        widthMeters: Float = 84f,
+        heightMeters: Float = 111f,
+        bearingDegrees: Float = 0f,
+        gridMinLatitude: Double = 41.0,
+        gridMaxLatitude: Double = 41.001,
+        gridMinLongitude: Double = -74.001,
+        gridMaxLongitude: Double = -74.0,
+    ): MapFeatureAgreement = HistoricMapAgreementScorer.scoreOverlay(
+        pixels = pixels, imageWidth = imageWidth, imageHeight = imageHeight,
+        centerLatitude = centerLatitude, centerLongitude = centerLongitude,
+        widthMeters = widthMeters, heightMeters = heightMeters, bearingDegrees = bearingDegrees,
+        gridMinLatitude = gridMinLatitude, gridMaxLatitude = gridMaxLatitude,
+        gridMinLongitude = gridMinLongitude, gridMaxLongitude = gridMaxLongitude,
+        evidence = evidence
+    )
+
     @Test
     fun reliefEvidenceHighlightsRoughBlocks() {
         // Left half perfectly flat, right half bumpy; 4 blocks per side at maxSide 4.
@@ -60,22 +108,12 @@ class HistoricMapAgreementScorerTest {
     @Test
     fun inkCellsMapsCenterPixelToExpectedCell() {
         // One dark pixel at (5,5) of a 10x10 image over a 100 m overlay centered in the grid.
-        val cells = HistoricMapAgreementScorer.inkCells(
+        val cells = testInkCells(
             pixels = pixels(10, 10, setOf(5 to 5)),
-            imageWidth = 10,
-            imageHeight = 10,
-            centerLatitude = 41.0,
-            centerLongitude = -74.0,
-            widthMeters = 100f,
-            heightMeters = 100f,
-            bearingDegrees = 0f,
             gridMinLatitude = 40.9995,
             gridMaxLatitude = 41.0005,
             gridMinLongitude = -74.0005,
             gridMaxLongitude = -73.9995,
-            evidenceWidth = 4,
-            evidenceHeight = 4,
-            sampleStep = 1,
         )
         assertEquals(setOf(2 * 4 + 2), cells)
     }
@@ -83,63 +121,18 @@ class HistoricMapAgreementScorerTest {
     @Test
     fun inkCellsIgnoresPaperAndHonorsBearing() {
         // Dark pixel at top-center (5,0): 45 m north of center when unrotated.
-        val base = HistoricMapAgreementScorer.inkCells(
-            pixels = pixels(10, 10, setOf(5 to 0)),
-            imageWidth = 10,
-            imageHeight = 10,
-            centerLatitude = 41.0,
-            centerLongitude = -74.0,
-            widthMeters = 100f,
-            heightMeters = 100f,
-            bearingDegrees = 0f,
-            gridMinLatitude = 40.999,
-            gridMaxLatitude = 41.001,
-            gridMinLongitude = -74.001,
-            gridMaxLongitude = -73.999,
-            evidenceWidth = 4,
-            evidenceHeight = 4,
-            sampleStep = 1,
-        )
+        val base = testInkCells(pixels = pixels(10, 10, setOf(5 to 0)))
         // Same ink with the overlay rotated 90 degrees clockwise: the ink moves east.
-        val rotated = HistoricMapAgreementScorer.inkCells(
+        val rotated = testInkCells(
             pixels = pixels(10, 10, setOf(5 to 0)),
-            imageWidth = 10,
-            imageHeight = 10,
-            centerLatitude = 41.0,
-            centerLongitude = -74.0,
-            widthMeters = 100f,
-            heightMeters = 100f,
             bearingDegrees = 90f,
-            gridMinLatitude = 40.999,
-            gridMaxLatitude = 41.001,
-            gridMinLongitude = -74.001,
-            gridMaxLongitude = -73.999,
-            evidenceWidth = 4,
-            evidenceHeight = 4,
-            sampleStep = 1,
         )
         assertEquals(setOf(1 * 4 + 2), base)
         assertEquals(setOf(2 * 4 + 3), rotated)
 
         // Sepia paper (luminance well above threshold) yields no cells at all.
         val sepia = IntArray(100) { 0xFFB0A090.toInt() }
-        val none = HistoricMapAgreementScorer.inkCells(
-            pixels = sepia,
-            imageWidth = 10,
-            imageHeight = 10,
-            centerLatitude = 41.0,
-            centerLongitude = -74.0,
-            widthMeters = 100f,
-            heightMeters = 100f,
-            bearingDegrees = 0f,
-            gridMinLatitude = 40.999,
-            gridMaxLatitude = 41.001,
-            gridMinLongitude = -74.001,
-            gridMaxLongitude = -73.999,
-            evidenceWidth = 4,
-            evidenceHeight = 4,
-            sampleStep = 1,
-        )
+        val none = testInkCells(pixels = sepia)
         assertTrue(none.isEmpty())
     }
 
@@ -153,38 +146,20 @@ class HistoricMapAgreementScorerTest {
             supportThreshold = 0.5f,
         )
         // 2x2 image, single dark pixel in the NW corner, overlay exactly covering the grid.
-        val onEvidence = HistoricMapAgreementScorer.scoreOverlay(
+        val onEvidence = testScoreOverlay(
             pixels = pixels(2, 2, setOf(0 to 0)),
             imageWidth = 2,
             imageHeight = 2,
-            centerLatitude = 41.0005,
-            centerLongitude = -74.0005,
-            widthMeters = 84f,
-            heightMeters = 111f,
-            bearingDegrees = 0f,
-            gridMinLatitude = 41.0,
-            gridMaxLatitude = 41.001,
-            gridMinLongitude = -74.001,
-            gridMaxLongitude = -74.0,
             evidence = evidence,
         )
         assertEquals(1f, onEvidence.score, 1e-4f)
 
         // Ink in the SE quadrant (pixel (2,2) of a 4x4 image, so the default step-2 sampling
         // still sees it) sits on the weakest evidence cell and scores zero.
-        val offEvidence = HistoricMapAgreementScorer.scoreOverlay(
+        val offEvidence = testScoreOverlay(
             pixels = pixels(4, 4, setOf(2 to 2)),
             imageWidth = 4,
             imageHeight = 4,
-            centerLatitude = 41.0005,
-            centerLongitude = -74.0005,
-            widthMeters = 84f,
-            heightMeters = 111f,
-            bearingDegrees = 0f,
-            gridMinLatitude = 41.0,
-            gridMaxLatitude = 41.001,
-            gridMinLongitude = -74.001,
-            gridMaxLongitude = -74.0,
             evidence = evidence,
         )
         assertEquals(0f, offEvidence.score, 1e-4f)
