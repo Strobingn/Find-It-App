@@ -273,11 +273,11 @@ class TerrainIntelligenceEngine(
         val negativeOpenness = FloatArray(size)
         val skyView = FloatArray(size)
         val horizonRadius = (24f / cell).roundToInt().coerceIn(5, 18)
-        val directions = arrayOf(
-            -1 to -1, 0 to -1, 1 to -1,
-            -1 to 0, 1 to 0,
-            -1 to 1, 0 to 1, 1 to 1,
-        )
+        val dirOffsetX = intArrayOf(-1, 0, 1, -1, 1, -1, 0, 1)
+        val dirOffsetY = intArrayOf(-1, -1, -1, 0, 0, 1, 1, 1)
+        val dirOffset = IntArray(8) { dirOffsetY[it] * width + dirOffsetX[it] }
+        val dirHorizUnit = FloatArray(8) { cell * (if (dirOffsetX[it] != 0 && dirOffsetY[it] != 0) 1.41421356f else 1f) }
+
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val i = y * width + x
@@ -285,20 +285,25 @@ class TerrainIntelligenceEngine(
                 var positiveAngleSum = 0.0
                 var negativeAngleSum = 0.0
                 var skySum = 0.0
-                for ((stepX, stepY) in directions) {
-                    // atan is monotonic, so max/min of atan(ratio) over all steps equals
-                    // atan(max/min ratio); tracking the raw rise/run ratio and applying atan
-                    // once per direction (instead of once per step) gives the identical result
-                    // with up to horizonRadius times fewer atan() calls.
+                for (d in 0 until 8) {
+                    val stepX = dirOffsetX[d]
+                    val stepY = dirOffsetY[d]
+                    val limitX = if (stepX > 0) width - 1 - x else if (stepX < 0) x else horizonRadius
+                    val limitY = if (stepY > 0) height - 1 - y else if (stepY < 0) y else horizonRadius
+                    val maxSteps = min(horizonRadius, min(limitX, limitY))
+
                     var highestRatio = 0.0
                     var lowestRatio = 0.0
-                    val horizontalUnit = cell * (if (stepX != 0 && stepY != 0) 1.41421356f else 1f)
-                    for (step in 1..horizonRadius) {
-                        val px = x + stepX * step
-                        val py = y + stepY * step
-                        if (px !in 0 until width || py !in 0 until height) break
+                    val offset = dirOffset[d]
+                    val horizontalUnit = dirHorizUnit[d]
+                    var currIdx = i
+
+                    // Pre-calculating maxSteps and indexing elevation via flat step offsets avoids
+                    // per-step coordinate recalculation and bounds checks across ray directions.
+                    for (step in 1..maxSteps) {
+                        currIdx += offset
                         val horizontal = horizontalUnit * step
-                        val ratio = ((elevation[py * width + px] - center) / horizontal).toDouble()
+                        val ratio = ((elevation[currIdx] - center) / horizontal).toDouble()
                         highestRatio = max(highestRatio, ratio)
                         lowestRatio = min(lowestRatio, ratio)
                     }
@@ -308,7 +313,7 @@ class TerrainIntelligenceEngine(
                     negativeAngleSum += -lowest
                     skySum += cos(highest).let { it * it }
                 }
-                val count = directions.size.toDouble()
+                val count = 8.0
                 positiveOpenness[i] = (1.0 - positiveAngleSum / count / (PI / 2.0)).toFloat().coerceIn(0f, 1f)
                 negativeOpenness[i] = (1.0 - negativeAngleSum / count / (PI / 2.0)).toFloat().coerceIn(0f, 1f)
                 skyView[i] = (skySum / count).toFloat().coerceIn(0f, 1f)
