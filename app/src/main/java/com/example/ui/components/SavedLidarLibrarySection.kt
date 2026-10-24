@@ -88,6 +88,7 @@ fun SavedLidarLibrarySection(
     var renameDataset by remember { mutableStateOf<LazDataset?>(null) }
     var renameText by remember { mutableStateOf("") }
     var renameError by remember { mutableStateOf<String?>(null) }
+    var deleteConfirmDataset by remember { mutableStateOf<LazDataset?>(null) }
 
     fun refresh() {
         datasets = datasetStore.list()
@@ -337,16 +338,7 @@ fun SavedLidarLibrarySection(
                             renameError = null
                         },
                         onDelete = {
-                            terrainCache.remove(dataset.file)
-                            if (datasetStore.delete(dataset)) {
-                                TerrainPerformanceSession.clear()
-                                refresh()
-                                message = "Deleted ${dataset.displayName}."
-                                isError = false
-                            } else {
-                                message = "Could not delete ${dataset.displayName}."
-                                isError = true
-                            }
+                            deleteConfirmDataset = dataset
                         },
                     )
                 }
@@ -410,6 +402,48 @@ fun SavedLidarLibrarySection(
             },
         )
     }
+
+    deleteConfirmDataset?.let { dataset ->
+        AlertDialog(
+            onDismissRequest = { deleteConfirmDataset = null },
+            title = { Text("Delete LiDAR dataset?") },
+            text = {
+                Text(
+                    "Are you sure you want to delete \"${dataset.displayName}\" (${formatLidarBytes(dataset.sizeBytes)})? " +
+                        "This file will be permanently removed from app storage.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        terrainCache.remove(dataset.file)
+                        if (datasetStore.delete(dataset)) {
+                            TerrainPerformanceSession.clear()
+                            refresh()
+                            message = "Deleted ${dataset.displayName}."
+                            isError = false
+                        } else {
+                            message = "Could not delete ${dataset.displayName}."
+                            isError = true
+                        }
+                        deleteConfirmDataset = null
+                    },
+                    modifier = Modifier.testTag("confirm_delete_saved_dataset"),
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { deleteConfirmDataset = null },
+                    modifier = Modifier.testTag("dismiss_delete_saved_dataset"),
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -454,6 +488,7 @@ private fun SavedLidarRow(
         TextButton(
             onClick = onDelete,
             enabled = enabled,
+            modifier = Modifier.testTag("delete_saved_dataset_${dataset.displayName}"),
         ) {
             Icon(Icons.Default.Delete, contentDescription = "Delete ${dataset.displayName}")
         }
