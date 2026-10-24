@@ -720,36 +720,92 @@ internal class RectSumTable(values: FloatArray, private val width: Int, private 
         return w * h
     }
 
-    fun ringMean(cx: Int, cy: Int, innerRadius: Int, outerRadius: Int): Float {
-        val innerSq = innerRadius * innerRadius
-        val outerSq = outerRadius * outerRadius
+    fun ringMean(cx: Int, cy: Int, innerRadius: Int, outerRadius: Int): Float =
+        ringMean(cx, cy, RingBounds.get(innerRadius, outerRadius))
+
+    fun ringMean(cx: Int, cy: Int, bounds: RingBounds): Float {
         var sum = 0.0
         var count = 0
-        for (dy in -outerRadius..outerRadius) {
-            val y = cy + dy
+        val dys = bounds.dys
+        val minDxs = bounds.minDxs
+        val maxDxs = bounds.maxDxs
+        val len = dys.size
+        for (i in 0 until len) {
+            val y = cy + dys[i]
             if (y < 0 || y >= height) continue
-            val dySq = dy * dy
-            val outerRemaining = outerSq - dySq
-            if (outerRemaining < 0) continue
-            val maxDx = integerSqrtFloor(outerRemaining)
-            if (dySq < innerSq) {
-                val innerRemaining = innerSq - dySq
-                val minDx = integerSqrtCeil(innerRemaining)
-                if (minDx > maxDx) continue
-                sum += sum(cx - maxDx, y, cx - minDx + 1, y + 1)
-                count += count(cx - maxDx, y, cx - minDx + 1, y + 1)
-                sum += sum(cx + minDx, y, cx + maxDx + 1, y + 1)
-                count += count(cx + minDx, y, cx + maxDx + 1, y + 1)
+            val maxDx = maxDxs[i]
+            val minDx = minDxs[i]
+            val r0 = y * stride
+            val r1 = r0 + stride
+            if (minDx >= 0) {
+                val lx0 = (cx - maxDx).coerceIn(0, width)
+                val lx1 = (cx - minDx + 1).coerceIn(0, width)
+                if (lx1 > lx0) {
+                    sum += prefix[r1 + lx1] - prefix[r0 + lx1] - prefix[r1 + lx0] + prefix[r0 + lx0]
+                    count += lx1 - lx0
+                }
+                val rx0 = (cx + minDx).coerceIn(0, width)
+                val rx1 = (cx + maxDx + 1).coerceIn(0, width)
+                if (rx1 > rx0) {
+                    sum += prefix[r1 + rx1] - prefix[r0 + rx1] - prefix[r1 + rx0] + prefix[r0 + rx0]
+                    count += rx1 - rx0
+                }
             } else {
-                sum += sum(cx - maxDx, y, cx + maxDx + 1, y + 1)
-                count += count(cx - maxDx, y, cx + maxDx + 1, y + 1)
+                val x0 = (cx - maxDx).coerceIn(0, width)
+                val x1 = (cx + maxDx + 1).coerceIn(0, width)
+                if (x1 > x0) {
+                    sum += prefix[r1 + x1] - prefix[r0 + x1] - prefix[r1 + x0] + prefix[r0 + x0]
+                    count += x1 - x0
+                }
             }
         }
         return if (count == 0) 0f else (sum / count).toFloat().coerceIn(0f, 1f)
     }
+}
 
-    private companion object {
-        fun integerSqrtFloor(value: Int): Int {
+/** Precomputed y-offsets and x-range bounds for a given inner/outer ring annulus. */
+internal class RingBounds private constructor(
+    val dys: IntArray,
+    val minDxs: IntArray,
+    val maxDxs: IntArray,
+) {
+    companion object {
+        private val cache = java.util.concurrent.ConcurrentHashMap<Long, RingBounds>()
+
+        fun get(innerRadius: Int, outerRadius: Int): RingBounds {
+            val key = (innerRadius.toLong() shl 32) or (outerRadius.toLong() and 0xFFFFFFFFL)
+            return cache.computeIfAbsent(key) {
+                create(innerRadius, outerRadius)
+            }
+        }
+
+        private fun create(innerRadius: Int, outerRadius: Int): RingBounds {
+            val innerSq = innerRadius * innerRadius
+            val outerSq = outerRadius * outerRadius
+            val dys = ArrayList<Int>()
+            val minDxs = ArrayList<Int>()
+            val maxDxs = ArrayList<Int>()
+            for (dy in -outerRadius..outerRadius) {
+                val dySq = dy * dy
+                val outerRemaining = outerSq - dySq
+                if (outerRemaining < 0) continue
+                val maxDx = integerSqrtFloor(outerRemaining)
+                val minDx = if (dySq < innerSq) {
+                    val innerRemaining = innerSq - dySq
+                    integerSqrtCeil(innerRemaining)
+                } else {
+                    -1
+                }
+                if (minDx < 0 || minDx <= maxDx) {
+                    dys.add(dy)
+                    minDxs.add(minDx)
+                    maxDxs.add(maxDx)
+                }
+            }
+            return RingBounds(dys.toIntArray(), minDxs.toIntArray(), maxDxs.toIntArray())
+        }
+
+        private fun integerSqrtFloor(value: Int): Int {
             if (value <= 0) return 0
             var r = sqrt(value.toDouble()).toInt()
             while (r > 0 && r * r > value) r--
@@ -757,7 +813,7 @@ internal class RectSumTable(values: FloatArray, private val width: Int, private 
             return r
         }
 
-        fun integerSqrtCeil(value: Int): Int {
+        private fun integerSqrtCeil(value: Int): Int {
             if (value <= 0) return 0
             val floor = integerSqrtFloor(value)
             return if (floor * floor == value) floor else floor + 1
