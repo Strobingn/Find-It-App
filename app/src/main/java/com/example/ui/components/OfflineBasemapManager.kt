@@ -222,7 +222,9 @@ private fun OfflineRegionRow(
             }
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onDelete, enabled = enabled) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete ${region.displayName}")
+                Icon(Icons.Default.Delete, contentDescription = null)
+                Spacer(Modifier.width(4.dp))
+                Text("Delete")
             }
         }
     }
