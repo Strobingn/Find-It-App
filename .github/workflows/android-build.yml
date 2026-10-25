@@ -310,9 +310,10 @@ jobs:
           STORE_PASSWORD: android
           KEY_ALIAS: androiddebugkey
           KEY_PASSWORD: android
-          VERSION_CODE: ${{ 1000000 + github.run_number }}
-          VERSION_NAME: 2.0.${{ github.run_number }}-preview
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
+          export VERSION_CODE=$((1000000 + RUN_NUMBER))
+          export VERSION_NAME="2.0.${RUN_NUMBER}-preview"
           chmod +x ./gradlew
           ./gradlew assembleRelease --stacktrace --no-configuration-cache
           mkdir -p out
