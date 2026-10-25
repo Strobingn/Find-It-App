@@ -25,6 +25,16 @@ Find It uses the unmodified `mil.nga:tiff:3.0.0` library to decode TIFF and GeoT
 
 Android build tooling packages the dependency bytecode into the application output. The required MIT copyright and permission notice is retained in the repository and in the application assets.
 
+## Mapbox Maps SDK for Android
+
+- Project: https://github.com/mapbox/mapbox-maps-android (`com.mapbox.maps:android-ndk27`, `com.mapbox.extension:maps-compose-ndk27`)
+- License: Mapbox Terms of Service (https://www.mapbox.com/legal/tos). Use requires your own Mapbox access token (`MAPBOX_ACCESS_TOKEN`).
+
+## Map and elevation data
+
+- USGS 3DEP elevation (elevation.nationalmap.gov), USGS Historical Topographic Map Collection (prd-tnm.s3.amazonaws.com) and USGS National Map basemaps: U.S. Government works, public domain. Credit: U.S. Geological Survey.
+- Mapbox base maps and terrain: © Mapbox, © OpenStreetMap contributors, shown with the map's built-in attribution.
+
 ## Rebuilding with a modified laszip4j
 
 1. Clone the Find It source repository and check out the source revision corresponding to the distributed APK.

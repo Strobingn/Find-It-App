@@ -84,6 +84,7 @@ class HistoricMapCatalogClient(
                 val download = item.optString("downloadURL").ifBlank { item.optString("url") }
                 if (download.isBlank()) continue
                 val title = item.optString("title").ifBlank { item.optString("sourceId") }
+                val box = item.optJSONObject("boundingBox") ?: JSONObject()
                 add(
                     HistoricMapRecord(
                         id = "usgs-" + item.optString("sourceId", title.hashCode().toString()),
@@ -93,10 +94,11 @@ class HistoricMapCatalogClient(
                         attribution = "USGS The National Map — Historical Topographic Maps",
                         remoteUrl = download,
                         localFile = null,
-                        minLatitude = item.optDouble("minY", bbox[1]),
-                        maxLatitude = item.optDouble("maxY", bbox[3]),
-                        minLongitude = item.optDouble("minX", bbox[0]),
-                        maxLongitude = item.optDouble("maxX", bbox[2]),
+                        // The quad's footprint lives in "boundingBox"; the search box is only a fallback.
+                        minLatitude = box.optDouble("minY", item.optDouble("minY", bbox[1])),
+                        maxLatitude = box.optDouble("maxY", item.optDouble("maxY", bbox[3])),
+                        minLongitude = box.optDouble("minX", item.optDouble("minX", bbox[0])),
+                        maxLongitude = box.optDouble("maxX", item.optDouble("maxX", bbox[2])),
                         georeferenced = true,
                     ),
                 )
