@@ -2080,19 +2080,19 @@ private fun boundsCenteredAt(
     )
 }
 
-private data class NaturalOverlaySize(
+internal data class NaturalOverlaySize(
     val widthMeters: Float,
     val heightMeters: Float,
 )
 
-private data class TerrainMapAlignment(
+internal data class TerrainMapAlignment(
     val center: LatLng,
     val widthScale: Float = 1f,
     val heightScale: Float = 1f,
     val bearingDegrees: Float = 0f,
 )
 
-private fun naturalOverlaySize(
+internal fun naturalOverlaySize(
     metadata: GeoSpatialLibrary.GeoSpatialMetadata,
     grid: ElevationGrid,
 ): NaturalOverlaySize {
@@ -2121,7 +2121,7 @@ private fun naturalOverlaySize(
     )
 }
 
-private fun GeoSpatialLibrary.GeographicBounds.toDefaultAlignment() = TerrainMapAlignment(
+internal fun GeoSpatialLibrary.GeographicBounds.toDefaultAlignment() = TerrainMapAlignment(
     center = LatLng((minLat + maxLat) / 2.0, (minLon + maxLon) / 2.0),
 )
 
@@ -2167,7 +2167,7 @@ private fun nudgeCenter(center: LatLng, eastMeters: Float, northMeters: Float): 
     return LatLng(latitude, longitude)
 }
 
-private class TerrainMapAlignmentStore(context: Context) {
+internal class TerrainMapAlignmentStore(context: Context) {
     private val preferences = context.getSharedPreferences("terrain_map_alignments", Context.MODE_PRIVATE)
 
     fun contains(terrainKey: String): Boolean {

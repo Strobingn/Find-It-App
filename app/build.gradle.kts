@@ -48,6 +48,8 @@ val openAiProxyToken = projectSecret("OPENAI_PROXY_TOKEN").ifBlank { projectSecr
 val geminiApiKey = projectSecret("GEMINI_API_KEY")
 val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
 val mapsApiKey = projectSecret("MAPS_API_KEY")
+// Mapbox public token (pk.…) for the Mapbox terrain tab; the tab shows setup help when blank.
+val mapboxAccessToken = projectSecret("MAPBOX_ACCESS_TOKEN")
 // Optional: Sentry DSN for crash + AI performance monitoring (never commit real DSN to git).
 val sentryDsn = projectSecret("SENTRY_DSN")
 val finditUpdateToken = projectSecret("FINDIT_UPDATE_TOKEN")
@@ -92,6 +94,7 @@ android {
     buildConfigField("String", "GEMINI_API_KEY", quotedBuildConfig(geminiApiKey))
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
     buildConfigField("String", "MAPS_API_KEY", quotedBuildConfig(mapsApiKey))
+    buildConfigField("String", "MAPBOX_ACCESS_TOKEN", quotedBuildConfig(mapboxAccessToken))
     buildConfigField("String", "SENTRY_DSN", quotedBuildConfig(sentryDsn))
     buildConfigField("String", "FINDIT_UPDATE_TOKEN", quotedBuildConfig(finditUpdateToken))
     buildConfigField("String", "FINDIT_UPDATE_REPO", quotedBuildConfig(finditUpdateRepo))
@@ -182,6 +185,8 @@ dependencies {
   implementation(libs.nga.tiff)
   implementation(libs.google.generativeai)
   implementation(libs.maps.compose)
+  implementation(libs.mapbox.maps)
+  implementation(libs.mapbox.maps.compose)
   implementation(libs.okhttp)
   implementation(libs.play.services.maps)
   implementation(libs.androidx.camera.camera2)

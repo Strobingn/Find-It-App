@@ -46,6 +46,7 @@ laszip4j = "0.21"
 ngaTiff = "3.0.0"
 googleGenerativeAi = "0.9.0"
 mapsCompose = "6.12.0"
+mapbox = "11.33.0"
 profileInstaller = "1.4.1"
 
 [libraries]
@@ -103,6 +104,9 @@ laszip4j = { module = "com.github.mreutegg:laszip4j", version.ref = "laszip4j" }
 nga-tiff = { module = "mil.nga:tiff", version.ref = "ngaTiff" }
 google-generativeai = { module = "com.google.ai.client.generativeai:generativeai", version.ref = "googleGenerativeAi" }
 maps-compose = { module = "com.google.maps.android:maps-compose", version.ref = "mapsCompose" }
+# Mapbox -ndk27 artifacts ship 16 KB page-size native libs (required for targetSdk 35+ on Play).
+mapbox-maps = { module = "com.mapbox.maps:android-ndk27", version.ref = "mapbox" }
+mapbox-maps-compose = { module = "com.mapbox.extension:maps-compose-ndk27", version.ref = "mapbox" }
 androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileInstaller" }
 
 [plugins]

@@ -109,6 +109,7 @@ import com.example.ui.components.CustomFileLoader
 import com.example.ui.components.HOMESITE_BINS
 import com.example.ui.components.LidarCanvasMode
 import com.example.ui.components.LidarAreaPickerMapScreen
+import com.example.ui.components.MapboxTerrainMapScreen
 import com.example.ui.components.LidarControlPanel
 import com.example.ui.components.LidarMapCanvas
 import com.example.ui.components.NysLazTilePicker
@@ -248,6 +249,10 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 terrainFocusMode.value = false
             }
             AppDestination.MAP -> GoogleMapTab(viewModel, padding) { bounds ->
+                LidarSearchRequest.request(bounds)
+                navigate(AppDestination.LIBRARY)
+            }
+            AppDestination.MAPBOX -> MapboxMapTab(viewModel, padding) { bounds ->
                 LidarSearchRequest.request(bounds)
                 navigate(AppDestination.LIBRARY)
             }
@@ -1154,6 +1159,34 @@ private fun GoogleMapTab(
         routeTotalMeters = plannedRoute?.totalDistanceMeters?.toFloat() ?: 0f,
         onClearRoute = { viewModel.setPlannedRoute(null) },
         onHistoricMapAgreementScore = viewModel::setHistoricMapAgreementScore,
+        modifier = Modifier.fillMaxSize().padding(padding),
+    )
+}
+
+@Composable
+private fun MapboxMapTab(
+    viewModel: HillshadeViewModel,
+    padding: PaddingValues,
+    onFindLidarTiles: (GeoSpatialLibrary.GeographicBounds) -> Unit,
+) {
+    val bitmap by viewModel.hillshadeBitmap.collectAsStateWithLifecycle()
+    val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    val terrainKey by viewModel.activeTerrainKey.collectAsStateWithLifecycle()
+    val surveyLayers by viewModel.surveyLayers.collectAsStateWithLifecycle()
+    val breadcrumbTracks by viewModel.breadcrumbTracks.collectAsStateWithLifecycle()
+    val plannedRoute by viewModel.plannedRoute.collectAsStateWithLifecycle()
+    MapboxTerrainMapScreen(
+        terrainBitmap = bitmap,
+        grid = grid,
+        metadata = metadata,
+        terrainKey = terrainKey,
+        surveyFeatures = surveyLayers.flatMap { it.features },
+        breadcrumbTracks = breadcrumbTracks,
+        onFindLidarTiles = onFindLidarTiles,
+        routeWaypoints = plannedRoute?.waypoints ?: emptyList(),
+        routeTotalMeters = plannedRoute?.totalDistanceMeters?.toFloat() ?: 0f,
+        onClearRoute = { viewModel.setPlannedRoute(null) },
         modifier = Modifier.fillMaxSize().padding(padding),
     )
 }

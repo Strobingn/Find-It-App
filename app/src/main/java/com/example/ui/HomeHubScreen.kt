@@ -97,6 +97,7 @@ fun HomeHubScreen(
         AppDestination.AI,
         AppDestination.LIBRARY,
         AppDestination.MAP,
+        AppDestination.MAPBOX,
         AppDestination.LIDAR,
         AppDestination.COMPARE,
         AppDestination.TOOLS,

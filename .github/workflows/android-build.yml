@@ -25,6 +25,7 @@ jobs:
         shell: bash
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
@@ -37,6 +38,7 @@ jobs:
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'MAPBOX_ACCESS_TOKEN=%s\n' "$MAPBOX_ACCESS_TOKEN"
             printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
             printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
             printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
@@ -127,6 +129,7 @@ jobs:
       - name: Create local.properties
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
@@ -139,6 +142,7 @@ jobs:
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'MAPBOX_ACCESS_TOKEN=%s\n' "$MAPBOX_ACCESS_TOKEN"
             printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
             printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
             printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"

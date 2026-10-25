@@ -9,6 +9,7 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Landscape
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Terrain
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.ui.graphics.vector.ImageVector
 
@@ -63,6 +64,13 @@ enum class AppDestination(
         title = "Site map",
         subtitle = "Google Maps + historic overlays",
         icon = Icons.Default.Layers,
+        primary = false,
+    ),
+    MAPBOX(
+        label = "3D Map",
+        title = "Mapbox terrain map",
+        subtitle = "Satellite, 3D terrain, USGS topo",
+        icon = Icons.Default.Terrain,
         primary = false,
     ),
     LIDAR(
