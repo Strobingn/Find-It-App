@@ -306,9 +306,9 @@ object TerrainViewshedAnalyzer {
             ),
         ).toInt().coerceAtLeast(1)
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
-        val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
+        // Express slope in elevation delta per grid cell (cancels out constant cellSize factor).
+        val targetSlope = (targetElevation - eyeElevation) / targetDistanceCells
 
-        var maxBlockingAngle = Float.NEGATIVE_INFINITY
         for (step in 1 until steps) {
             val fraction = step.toFloat() / steps
             val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
@@ -323,10 +323,10 @@ object TerrainViewshedAnalyzer {
                 (row - observerY).toDouble(),
             ).toFloat()
             if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
-            val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
-                (distanceCells * cellSize)
-            if (angle > maxBlockingAngle) maxBlockingAngle = angle
+            val slope = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) / distanceCells
+            // Early exit: if any intermediate cell equals or exceeds target slope, line of sight is occluded.
+            if (slope >= targetSlope) return false
         }
-        return targetAngle > maxBlockingAngle
+        return true
     }
 }
