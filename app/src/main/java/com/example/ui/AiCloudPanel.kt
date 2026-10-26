@@ -62,6 +62,8 @@ import com.example.ai.FieldAiFeature
 import com.example.ai.FieldAiSessionPack
 import com.example.ai.FieldOfflineAssist
 import com.example.ai.GeminiApiClient
+import com.example.ai.GrokApiClient
+import com.example.ai.TerrainAiGateway
 import com.example.ai.OpenAiApiClient
 import com.example.ai.TerrainAiProvider
 import com.example.ai.TerrainVisionSession
@@ -236,9 +238,10 @@ fun AiCloudPanel(
     val viewport by TerrainVisionSession.snapshot.collectAsStateWithLifecycle()
     var packFilter by rememberSaveable { mutableStateOf(AiPackFilter.ALL) }
     var draft by rememberSaveable { mutableStateOf("") }
+    var grokKey by rememberSaveable { mutableStateOf("") }
     var openAiKey by rememberSaveable { mutableStateOf("") }
     var geminiKey by rememberSaveable { mutableStateOf("") }
-    var showKeys by rememberSaveable { mutableStateOf(!state.openAiConfigured && !state.geminiConfigured) }
+    var showKeys by rememberSaveable { mutableStateOf(!state.grokConfigured && !state.openAiConfigured && !state.geminiConfigured) }
     var attachImage by rememberSaveable { mutableStateOf(true) }
     var dismissedSuggestionMessageId by rememberSaveable { mutableStateOf<Long?>(null) }
     var selectedSuggestionSignalId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -385,10 +388,10 @@ fun AiCloudPanel(
                         Column(Modifier.weight(1f)) {
                             Text("AI analysis", fontWeight = FontWeight.Bold)
                             Text(
-                                when (state.activeProvider) {
-                                    TerrainAiProvider.OPENAI -> "OpenAI ${OpenAiApiClient.configuredModel()} primary · Gemini fallback ready"
-                                    TerrainAiProvider.GEMINI -> "Gemini ${GeminiApiClient.configuredModel()} active"
-                                    null -> "Add an OpenAI or Gemini key"
+                                if (state.activeProvider == null) {
+                                    "Add a Grok, OpenAI or Gemini key"
+                                } else {
+                                    TerrainAiGateway.activeSummary(context)
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -447,6 +450,13 @@ fun AiCloudPanel(
                             modifier = Modifier.height(CompactButtonHeight),
                         )
                         FilterChip(
+                            selected = state.providerPreference == TerrainAiProvider.GROK,
+                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.GROK) },
+                            enabled = state.grokConfigured && !state.isSending,
+                            label = { Text("Grok", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                        FilterChip(
                             selected = state.providerPreference == TerrainAiProvider.OPENAI,
                             onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.OPENAI) },
                             enabled = state.openAiConfigured && !state.isSending,
@@ -469,6 +479,35 @@ fun AiCloudPanel(
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = grokKey,
+                            onValueChange = { grokKey = it.trim().take(256) },
+                            label = { Text("Grok (xAI) API key") },
+                            supportingText = {
+                                Text("${GrokApiClient.configuredModel()} · ${GrokApiClient.configuredReasoningEffort()} reasoning · requests kept under 200K tokens")
+                            },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_grok_key"),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    assistantViewModel.saveGrokKey(grokKey)
+                                    grokKey = ""
+                                },
+                                enabled = grokKey.length >= 20,
+                                modifier = Modifier.height(CompactButtonHeight),
+                                contentPadding = CompactButtonPadding,
+                            ) { Text("Save Grok", style = MaterialTheme.typography.labelSmall) }
+                            if (state.hasDeviceGrokKey) {
+                                OutlinedButton(
+                                    onClick = assistantViewModel::clearGrokKey,
+                                    modifier = Modifier.height(CompactButtonHeight),
+                                    contentPadding = CompactButtonPadding,
+                                ) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
+                            }
+                        }
                         OutlinedTextField(
                             value = openAiKey,
                             onValueChange = { openAiKey = it.trim().take(256) },

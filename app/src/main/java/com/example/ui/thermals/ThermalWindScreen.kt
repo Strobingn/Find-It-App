@@ -590,6 +590,7 @@ private fun AiSheetContent(state: ThermalUiState, onAsk: (String?) -> Unit, onCl
         )
     }
     AiStatus(state)
+    state.aiStreamingText?.let { LiveAnswer(it) }
     state.aiExchanges.asReversed().forEach { exchange -> AiAnswer(exchange) }
     if (state.aiExchanges.isNotEmpty()) {
         IosSection {
@@ -746,7 +747,19 @@ private fun AiSection(state: ThermalUiState, onPlan: () -> Unit, onOpenChat: () 
     state.aiError?.let {
         Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp))
     }
-    state.aiExchanges.lastOrNull()?.let { AiAnswer(it) }
+    val live = state.aiStreamingText
+    if (live != null) {
+        LiveAnswer(live)
+    } else {
+        state.aiExchanges.lastOrNull()?.let { AiAnswer(it) }
+    }
+}
+
+@Composable
+private fun LiveAnswer(text: String) {
+    IosSection(header = "Writing…") {
+        Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(16.dp))
+    }
 }
 
 @Composable

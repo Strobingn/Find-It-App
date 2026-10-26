@@ -44,6 +44,10 @@ val openAiApiKey = projectSecret("OPENAI_API_KEY")
 val openAiModel = projectSecret("OPENAI_MODEL").ifBlank { "gpt-5.5" }
 val openAiBaseUrl = projectSecret("OPENAI_BASE_URL").ifBlank { "https://api.openai.com/v1/responses" }
 val openAiProxyToken = projectSecret("OPENAI_PROXY_TOKEN").ifBlank { projectSecret("PROXY_AUTH_TOKEN") }
+// xAI Grok — primary chat provider. XAI_API_KEY in local.properties / .env / CI secrets.
+val xaiApiKey = projectSecret("XAI_API_KEY").ifBlank { projectSecret("GROK_API_KEY") }
+val grokModel = projectSecret("GROK_MODEL").ifBlank { "grok-4.7" }
+val grokReasoningEffort = projectSecret("GROK_REASONING_EFFORT").ifBlank { "medium" }
 // Gemini only — use GEMINI_API_KEY in local.properties / .env / CI secrets.
 val geminiApiKey = projectSecret("GEMINI_API_KEY")
 val geminiModel = projectSecret("GEMINI_MODEL").ifBlank { "gemini-3.5-flash" }
@@ -91,6 +95,9 @@ android {
     buildConfigField("String", "OPENAI_MODEL", quotedBuildConfig(openAiModel))
     buildConfigField("String", "OPENAI_BASE_URL", quotedBuildConfig(openAiBaseUrl))
     buildConfigField("String", "OPENAI_PROXY_TOKEN", quotedBuildConfig(openAiProxyToken))
+    buildConfigField("String", "XAI_API_KEY", quotedBuildConfig(xaiApiKey))
+    buildConfigField("String", "GROK_MODEL", quotedBuildConfig(grokModel))
+    buildConfigField("String", "GROK_REASONING_EFFORT", quotedBuildConfig(grokReasoningEffort))
     buildConfigField("String", "GEMINI_API_KEY", quotedBuildConfig(geminiApiKey))
     buildConfigField("String", "GEMINI_MODEL", quotedBuildConfig(geminiModel))
     buildConfigField("String", "MAPS_API_KEY", quotedBuildConfig(mapsApiKey))

@@ -5,6 +5,7 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 
 enum class TerrainAiProvider(val label: String) {
+    GROK("Grok"),
     OPENAI("OpenAI"),
     GEMINI("Gemini"),
 }
@@ -16,14 +17,21 @@ data class TerrainAiAnswer(
 )
 
 /**
- * Provider order is intentional: OpenAI first, Gemini second.
- * Local terrain intelligence is separate and never depends on either cloud provider.
+ * Provider order is intentional: Grok first, then OpenAI, then Gemini. Each configured provider
+ * is tried in turn; a failure falls through to the next one with the reason attached.
+ * Local terrain intelligence is separate and never depends on any cloud provider.
  */
 internal class TerrainAiGateway(context: Context) {
     private val appContext = context.applicationContext
+    private val grok = GrokApiClient(appContext)
     private val openAi = OpenAiApiClient(appContext)
     private val gemini = GeminiApiClient(appContext)
 
+    /**
+     * @param fast quick-answer mode for short feature replies: Grok uses low reasoning effort.
+     *   Chat leaves this off so Grok runs at its configured effort (medium).
+     * @param onPartialText receives the answer as it streams in (Grok); other providers deliver it at the end.
+     */
     suspend fun generate(
         conversation: List<GeminiConversationTurn>,
         systemContext: String,
@@ -33,122 +41,119 @@ internal class TerrainAiGateway(context: Context) {
         /** Optional field-pack / feature label for Sentry gen_ai metadata (not prompt text). */
         featureName: String? = null,
         conversationId: String? = null,
+        fast: Boolean = false,
+        onPartialText: ((String) -> Unit)? = null,
     ): TerrainAiAnswer {
-        val openAiConfigured = OpenAiApiClient.isConfigured(appContext)
-        val geminiConfigured = GeminiApiClient.isConfigured(appContext)
+        val configured = configuredProviders(appContext)
 
-        suspend fun runOpenAi(): TerrainAiAnswer {
-            val model = OpenAiApiClient.configuredModel()
-            onProviderStage("Asking OpenAI $model…")
+        suspend fun run(provider: TerrainAiProvider, fallbackReason: String?): TerrainAiAnswer {
+            val model = modelFor(provider)
+            onProviderStage(
+                if (fallbackReason == null) "Asking ${provider.label} $model…" else "Trying ${provider.label} $model…",
+            )
             val text = SentryAiMonitor.traceLlmCall(
                 SentryAiMonitor.CallMeta(
                     model = model,
-                    provider = "openai",
+                    provider = sentryName(provider),
                     hasImage = image != null,
                     featureName = featureName,
                     messageCount = conversation.size,
                     conversationId = conversationId,
                 ),
             ) {
-                openAi.generate(conversation, systemContext, image)
+                when (provider) {
+                    TerrainAiProvider.GROK -> {
+                        val streamed = StringBuilder()
+                        grok.generate(
+                            conversation = conversation,
+                            systemContext = systemContext,
+                            image = image,
+                            reasoningEffort = if (fast) "low" else null,
+                            onDelta = onPartialText?.let { sink ->
+                                { delta: String ->
+                                    streamed.append(delta)
+                                    sink(streamed.toString())
+                                }
+                            },
+                        )
+                    }
+                    TerrainAiProvider.OPENAI -> openAi.generate(conversation, systemContext, image)
+                    TerrainAiProvider.GEMINI -> gemini.generate(conversation, systemContext, image)
+                }
             }
-            return TerrainAiAnswer(text = text, provider = TerrainAiProvider.OPENAI)
+            return TerrainAiAnswer(text = text, provider = provider, fallbackReason = fallbackReason)
         }
 
-        suspend fun runGemini(fallbackReason: String? = null): TerrainAiAnswer {
-            val model = GeminiApiClient.configuredModel()
-            onProviderStage("Asking Gemini $model…")
-            val text = SentryAiMonitor.traceLlmCall(
-                SentryAiMonitor.CallMeta(
-                    model = model,
-                    provider = "gemini",
-                    hasImage = image != null,
-                    featureName = featureName,
-                    messageCount = conversation.size,
-                    conversationId = conversationId,
-                ),
-            ) {
-                gemini.generate(conversation, systemContext, image)
-            }
-            return TerrainAiAnswer(
-                text = text,
-                provider = TerrainAiProvider.GEMINI,
-                fallbackReason = fallbackReason,
+        if (requestedProvider != null) {
+            check(requestedProvider in configured) { "${requestedProvider.label} is not configured on this device." }
+            return run(requestedProvider, null)
+        }
+
+        val order = fallbackOrder(configured)
+        if (order.isEmpty()) {
+            error(
+                "No cloud AI provider is configured. Add a Grok, OpenAI or Gemini key under AI settings. Offline terrain analysis still works without any key.",
             )
         }
-
-        if (requestedProvider == TerrainAiProvider.OPENAI) {
-            check(openAiConfigured) { "OpenAI is not configured on this device." }
-            return runOpenAi()
-        }
-
-        if (requestedProvider == TerrainAiProvider.GEMINI) {
-            check(geminiConfigured) { "Gemini is not configured on this device." }
-            return runGemini()
-        }
-
-        if (openAiConfigured) {
+        val failures = mutableListOf<String>()
+        for (provider in order) {
             try {
-                return runOpenAi()
+                return run(provider, failures.lastOrNull())
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (openAiError: Throwable) {
-                val openAiReason = openAiError.localizedMessage ?: "OpenAI request failed"
-                if (!geminiConfigured) {
-                    throw IOException(
-                        "OpenAI failed: $openAiReason. Gemini fallback is unavailable because no Gemini API key is configured in this APK or on this device.",
-                        openAiError,
-                    )
-                }
-                try {
-                    onProviderStage("OpenAI failed · trying Gemini ${GeminiApiClient.configuredModel()}…")
-                    return runGemini(fallbackReason = openAiReason)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (geminiError: Throwable) {
-                    val geminiReason = geminiError.localizedMessage ?: "Gemini fallback failed"
-                    throw IOException(
-                        "Both cloud providers failed. OpenAI: $openAiReason. Gemini: $geminiReason",
-                        geminiError,
-                    )
-                }
+            } catch (error: Throwable) {
+                failures += "${provider.label}: ${error.localizedMessage ?: "request failed"}"
+                onPartialText?.invoke("")
             }
         }
-
-        if (geminiConfigured) {
-            try {
-                return runGemini(fallbackReason = "OpenAI was not configured")
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (geminiError: Throwable) {
-                throw IOException(
-                    "OpenAI is not configured and Gemini failed: ${geminiError.localizedMessage ?: "unknown Gemini error"}",
-                    geminiError,
-                )
-            }
-        }
-
-        error(
-            "No cloud AI provider is configured. Add a provider key under AI settings. Offline terrain analysis still works without either key.",
+        throw IOException(
+            if (failures.size == 1) {
+                "${failures.first()}. No other AI provider is configured as a fallback."
+            } else {
+                "All cloud providers failed. ${failures.joinToString(". ")}"
+            },
         )
     }
 
     companion object {
-        fun preferredProvider(context: Context): TerrainAiProvider? = when {
-            OpenAiApiClient.isConfigured(context) -> TerrainAiProvider.OPENAI
-            GeminiApiClient.isConfigured(context) -> TerrainAiProvider.GEMINI
-            else -> null
+        /** Grok → OpenAI → Gemini, keeping only the configured ones. */
+        fun fallbackOrder(configured: Set<TerrainAiProvider>): List<TerrainAiProvider> =
+            listOf(TerrainAiProvider.GROK, TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI).filter { it in configured }
+
+        fun configuredProviders(context: Context): Set<TerrainAiProvider> = buildSet {
+            if (GrokApiClient.isConfigured(context)) add(TerrainAiProvider.GROK)
+            if (OpenAiApiClient.isConfigured(context)) add(TerrainAiProvider.OPENAI)
+            if (GeminiApiClient.isConfigured(context)) add(TerrainAiProvider.GEMINI)
         }
 
-        fun providerStatus(context: Context): String = buildString {
-            append("OpenAI ")
-            append(OpenAiApiClient.configuredModel())
-            append("=")
-            append(if (OpenAiApiClient.isConfigured(context)) "configured" else "missing")
-            append(" · Gemini ")
-            append(GeminiApiClient.configuredModel())
-            append("=")
-            append(if (GeminiApiClient.isConfigured(context)) "configured" else "missing")
+        fun isConfigured(context: Context, provider: TerrainAiProvider): Boolean = provider in configuredProviders(context)
+
+        fun preferredProvider(context: Context): TerrainAiProvider? = fallbackOrder(configuredProviders(context)).firstOrNull()
+
+        fun modelFor(provider: TerrainAiProvider): String = when (provider) {
+            TerrainAiProvider.GROK -> GrokApiClient.configuredModel()
+            TerrainAiProvider.OPENAI -> OpenAiApiClient.configuredModel()
+            TerrainAiProvider.GEMINI -> GeminiApiClient.configuredModel()
+        }
+
+        /** "Grok grok-4.7 (medium) primary · OpenAI gpt-5.5 fallback" style status line. */
+        fun activeSummary(context: Context): String {
+            val order = fallbackOrder(configuredProviders(context))
+            if (order.isEmpty()) return "Add a Grok, OpenAI or Gemini key"
+            return order.mapIndexed { i, p ->
+                val model = modelFor(p) + if (p == TerrainAiProvider.GROK) " (${GrokApiClient.configuredReasoningEffort()})" else ""
+                "${p.label} $model ${if (i == 0) "primary" else "fallback"}"
+            }.joinToString(" · ")
+        }
+
+        private fun sentryName(provider: TerrainAiProvider): String = when (provider) {
+            TerrainAiProvider.GROK -> "xai"
+            TerrainAiProvider.OPENAI -> "openai"
+            TerrainAiProvider.GEMINI -> "gemini"
+        }
+
+        fun providerStatus(context: Context): String = TerrainAiProvider.entries.joinToString(" · ") { p ->
+            "${p.label} ${modelFor(p)}=${if (isConfigured(context, p)) "configured" else "missing"}"
         }
     }
 }
