@@ -87,6 +87,16 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material3.Switch
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
+import com.example.ui.ios.IosDivider
+import com.example.ui.ios.IosIconRowDividerInset
+import com.example.ui.ios.IosRow
+import com.example.ui.ios.IosSection
+import com.example.ui.ios.IosSheet
 import com.example.ui.ios.IosNavBar
 import com.example.ui.ios.IosTabBar
 import com.example.ui.ios.IosTabItem
@@ -344,6 +354,7 @@ private fun TerrainTab(
         )
     }
     val showControls = rememberSaveable { mutableStateOf(false) }
+    var showMore by rememberSaveable { mutableStateOf(false) }
     val localViewportResetKey = rememberSaveable { mutableIntStateOf(0) }
     val viewportResetKey = vmViewportReset + localViewportResetKey.intValue
     val context = LocalContext.current
@@ -601,15 +612,14 @@ private fun TerrainTab(
         }
 
         Surface(
-            shape = RoundedCornerShape(15.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            tonalElevation = 4.dp,
-            shadowElevation = 7.dp,
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.9f),
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
                 .padding(horizontal = 8.dp, vertical = 6.dp)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .testTag("terrain_toolbar"),
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -637,24 +647,12 @@ private fun TerrainTab(
                         fontWeight = FontWeight.Bold,
                     )
                 }
-                TerrainQuickAction(
-                    "Hillshade",
-                    Icons.Default.Landscape,
-                    active = visualization == 0,
-                ) { viewModel.updateVisualizationMode(0) }
-                TerrainQuickAction("Light -", Icons.AutoMirrored.Filled.RotateLeft) { viewModel.rotateSunAzimuth(-45f) }
+                TerrainQuickAction("Light −", Icons.AutoMirrored.Filled.RotateLeft) { viewModel.rotateSunAzimuth(-45f) }
                 TerrainQuickAction("Light +", Icons.AutoMirrored.Filled.RotateRight) { viewModel.rotateSunAzimuth(45f) }
                 TerrainQuickAction("Fit", Icons.Default.CenterFocusStrong) { localViewportResetKey.intValue++ }
                 TerrainQuickAction(
-                    if (isExportingScreenshot) "Saving…" else "Screenshot",
-                    Icons.Default.Save,
-                    enabled = bitmap != null && !isRendering && !isExportingScreenshot,
-                    modifier = Modifier.testTag("terrain_screenshot_button"),
-                    onClick = ::exportScreenshot,
-                )
-                TerrainQuickAction(
                     when {
-                        !canRefine -> "No LAZ source"
+                        !canRefine -> "No LAZ"
                         isRefining -> "Loading"
                         isDetailed -> "Refresh"
                         else -> "Detail"
@@ -663,41 +661,16 @@ private fun TerrainTab(
                     active = isDetailed,
                     enabled = canRefine && !isRefining,
                 ) { viewModel.refineTerrain(visibleBounds.value) }
-                if (canRefine && surveyBoundaries.isNotEmpty()) {
-                    TerrainQuickAction(
-                        label = "Refine to boundary",
-                        icon = Icons.Default.CropFree,
-                        active = false,
-                        enabled = !isRefining && !isReloadingSurface,
-                        modifier = Modifier.testTag("refine_to_boundary_button"),
-                    ) { viewModel.refineToSurveyBoundary() }
-                }
-                if (canRefine) {
-                    TerrainQuickAction(
-                        label = "Refine viewport",
-                        icon = Icons.Default.CropFree,
-                        active = false,
-                        enabled = !isRefining && !isReloadingSurface,
-                        modifier = Modifier.testTag("refine_viewport_rect_button"),
-                    ) { viewModel.refineToNormalizedRect(visibleBounds.value) }
-                }
-                if (canRefine && isDetailed) {
-                    TerrainQuickAction("Whole", Icons.Default.ZoomOutMap) { viewModel.showWholeTerrain() }
-                }
                 TerrainQuickAction(
-                    if (homesiteOverlayEnabled) "Homesite on" else "Homesite",
-                    Icons.Default.HomeWork,
-                    active = homesiteOverlayEnabled,
-                ) { homesiteOverlayEnabled = !homesiteOverlayEnabled }
-                TerrainQuickAction(
-                    if (showControls.value) "Close" else "Analyze",
+                    "Analyze",
                     Icons.Default.Tune,
                     active = showControls.value,
+                    modifier = Modifier.testTag("terrain_analyze_button"),
                 ) { showControls.value = !showControls.value }
                 TerrainQuickAction(
                     when {
-                        isSelectingProfile && profileStartPoint == null -> "Profile: start"
-                        isSelectingProfile -> "Profile: end"
+                        isSelectingProfile && profileStartPoint == null -> "Start"
+                        isSelectingProfile -> "End"
                         else -> "Profile"
                     },
                     Icons.AutoMirrored.Filled.ShowChart,
@@ -713,7 +686,7 @@ private fun TerrainTab(
                     }
                 }
                 TerrainQuickAction(
-                    if (gpsEnabled) "GPS on" else "GPS",
+                    "GPS",
                     if (gpsEnabled && hasLocationPermission) Icons.Default.GpsFixed else Icons.Default.GpsNotFixed,
                     active = gpsEnabled && hasLocationPermission,
                 ) {
@@ -727,25 +700,11 @@ private fun TerrainTab(
                     viewModel.toggleGpsTracking(!gpsEnabled)
                 }
                 TerrainQuickAction(
-                    if (isBreadcrumbRecording) "Pause trail" else "Trail",
-                    Icons.Default.Flag,
-                    active = isBreadcrumbRecording,
-                ) {
-                    if (isBreadcrumbRecording) {
-                        viewModel.pauseBreadcrumbRecording()
-                    } else {
-                        viewModel.startBreadcrumbRecording()
-                        val granted = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (!granted) locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                    }
-                }
-                TerrainQuickAction(
-                    if (focusMode) "Exit" else "Full",
-                    if (focusMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                ) { onFocusModeChanged(!focusMode) }
+                    "More",
+                    Icons.Default.MoreHoriz,
+                    active = showMore,
+                    modifier = Modifier.testTag("terrain_more_button"),
+                ) { showMore = true }
             }
         }
 
@@ -986,60 +945,170 @@ private fun TerrainTab(
             }
         }
 
-        AnimatedVisibility(
-            visible = showControls.value,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
-                .padding(10.dp),
-        ) {
-            LidarControlPanel(
-                siteLatitude = metadata?.bounds?.let { (it.minLat + it.maxLat) / 2.0 },
-                sunAzimuth = azimuth,
-                onSunAzimuthChanged = viewModel::updateSunAzimuth,
-                sunAltitude = altitude,
-                onSunAltitudeChanged = viewModel::updateSunAltitude,
-                vegetationFilter = vegetation,
-                onVegetationFilterChanged = viewModel::updateVegetationFilter,
-                paletteType = palette,
-                onPaletteTypeChanged = viewModel::updatePalette,
-                contrast = contrast,
-                onContrastChanged = viewModel::updateContrast,
-                visualizationMode = visualization,
-                onVisualizationModeChanged = viewModel::updateVisualizationMode,
-                overlayType = overlay,
-                onOverlayTypeChanged = viewModel::updateOverlayType,
-                overlayOpacity = overlayOpacity,
-                onOverlayOpacityChanged = viewModel::updateOverlayOpacity,
-                gridSpacing = grid,
-                onGridSpacingChanged = viewModel::updateGridSpacing,
-                zScale = zScale,
-                onZScaleChanged = viewModel::updateZScale,
-                featureScaleMeters = featureScale,
-                onFeatureScaleChanged = viewModel::updateFeatureScale,
-                analysisSensitivity = sensitivity,
-                onAnalysisSensitivityChanged = viewModel::updateAnalysisSensitivity,
-                contourIntervalMeters = contourInterval,
-                onContourIntervalChanged = viewModel::updateContourInterval,
-                heatmapEnabled = heatmapEnabled,
-                onHeatmapEnabledChanged = viewModel::setHeatmapEnabled,
-                basemapEnabled = basemapEnabled,
-                onBasemapEnabledChanged = viewModel::setBasemapEnabled,
-                basemapOpacity = basemapOpacity,
-                onBasemapOpacityChanged = viewModel::setBasemapOpacity,
-                basemapStatus = basemapStatus,
-                groundMode = activeGroundMode,
-                onGroundModeChanged = viewModel::setGroundSurfaceMode,
-                classPreset = activeClassPreset,
-                onClassPresetChanged = viewModel::setPointClassPreset,
-                isReloadingSurface = isReloadingSurface,
-                surfaceReloadMessage = surfaceReloadMessage,
-                canChangeSurface = canRefine,
-                modifier = Modifier
-                    .fillMaxWidth(0.92f)
-                    .heightIn(max = controlsMaxHeight)
-                    .verticalScroll(rememberScrollState()),
-            )
+        if (showControls.value) {
+            // Half-height, no dimming: the terrain stays visible while sun, palette and filters change.
+            IosSheet(title = "Analyze & display", onDismiss = { showControls.value = false }, peek = true) {
+                LidarControlPanel(
+                    siteLatitude = metadata?.bounds?.let { (it.minLat + it.maxLat) / 2.0 },
+                    sunAzimuth = azimuth,
+                    onSunAzimuthChanged = viewModel::updateSunAzimuth,
+                    sunAltitude = altitude,
+                    onSunAltitudeChanged = viewModel::updateSunAltitude,
+                    vegetationFilter = vegetation,
+                    onVegetationFilterChanged = viewModel::updateVegetationFilter,
+                    paletteType = palette,
+                    onPaletteTypeChanged = viewModel::updatePalette,
+                    contrast = contrast,
+                    onContrastChanged = viewModel::updateContrast,
+                    visualizationMode = visualization,
+                    onVisualizationModeChanged = viewModel::updateVisualizationMode,
+                    overlayType = overlay,
+                    onOverlayTypeChanged = viewModel::updateOverlayType,
+                    overlayOpacity = overlayOpacity,
+                    onOverlayOpacityChanged = viewModel::updateOverlayOpacity,
+                    gridSpacing = grid,
+                    onGridSpacingChanged = viewModel::updateGridSpacing,
+                    zScale = zScale,
+                    onZScaleChanged = viewModel::updateZScale,
+                    featureScaleMeters = featureScale,
+                    onFeatureScaleChanged = viewModel::updateFeatureScale,
+                    analysisSensitivity = sensitivity,
+                    onAnalysisSensitivityChanged = viewModel::updateAnalysisSensitivity,
+                    contourIntervalMeters = contourInterval,
+                    onContourIntervalChanged = viewModel::updateContourInterval,
+                    heatmapEnabled = heatmapEnabled,
+                    onHeatmapEnabledChanged = viewModel::setHeatmapEnabled,
+                    basemapEnabled = basemapEnabled,
+                    onBasemapEnabledChanged = viewModel::setBasemapEnabled,
+                    basemapOpacity = basemapOpacity,
+                    onBasemapOpacityChanged = viewModel::setBasemapOpacity,
+                    basemapStatus = basemapStatus,
+                    groundMode = activeGroundMode,
+                    onGroundModeChanged = viewModel::setGroundSurfaceMode,
+                    classPreset = activeClassPreset,
+                    onClassPresetChanged = viewModel::setPointClassPreset,
+                    isReloadingSurface = isReloadingSurface,
+                    surfaceReloadMessage = surfaceReloadMessage,
+                    canChangeSurface = canRefine,
+                    modifier = Modifier.fillMaxWidth().testTag("terrain_analyze_sheet"),
+                )
+            }
+        }
+
+        if (showMore) {
+            IosSheet(title = "Terrain tools", onDismiss = { showMore = false }) {
+                IosSection(header = "View") {
+                    IosRow(
+                        title = "Hillshade",
+                        icon = Icons.Default.Landscape,
+                        value = if (visualization == 0) "On" else null,
+                        onClick = {
+                            viewModel.updateVisualizationMode(0)
+                            showMore = false
+                        },
+                    )
+                    IosDivider(startInset = IosIconRowDividerInset)
+                    IosRow(
+                        title = "Homesite probability",
+                        icon = Icons.Default.HomeWork,
+                        trailing = { Switch(checked = homesiteOverlayEnabled, onCheckedChange = { homesiteOverlayEnabled = it }) },
+                    )
+                    IosDivider(startInset = IosIconRowDividerInset)
+                    IosRow(
+                        title = if (focusMode) "Exit full screen" else "Full screen",
+                        icon = if (focusMode) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        onClick = {
+                            onFocusModeChanged(!focusMode)
+                            showMore = false
+                        },
+                    )
+                }
+                if (canRefine) {
+                    IosSection(header = "Detail", footer = "Reloads full-resolution points from the source LAZ.") {
+                        if (surveyBoundaries.isNotEmpty()) {
+                            IosRow(
+                                title = "Refine to boundary",
+                                icon = Icons.Default.CropFree,
+                                titleColor = if (!isRefining && !isReloadingSurface) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant,
+                                onClick = if (!isRefining && !isReloadingSurface) {
+                                    {
+                                        viewModel.refineToSurveyBoundary()
+                                        showMore = false
+                                    }
+                                } else {
+                                    null
+                                },
+                                modifier = Modifier.testTag("refine_to_boundary_button"),
+                            )
+                            IosDivider(startInset = IosIconRowDividerInset)
+                        }
+                        IosRow(
+                            title = "Refine what's on screen",
+                            icon = Icons.Default.CropFree,
+                            titleColor = if (!isRefining && !isReloadingSurface) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = if (!isRefining && !isReloadingSurface) {
+                                {
+                                    viewModel.refineToNormalizedRect(visibleBounds.value)
+                                    showMore = false
+                                }
+                            } else {
+                                null
+                            },
+                            modifier = Modifier.testTag("refine_viewport_rect_button"),
+                        )
+                        if (isDetailed) {
+                            IosDivider(startInset = IosIconRowDividerInset)
+                            IosRow(
+                                title = "Show whole terrain",
+                                icon = Icons.Default.ZoomOutMap,
+                                onClick = {
+                                    viewModel.showWholeTerrain()
+                                    showMore = false
+                                },
+                            )
+                        }
+                    }
+                }
+                IosSection(header = "Field") {
+                    IosRow(
+                        title = "Breadcrumb trail",
+                        icon = Icons.Default.Flag,
+                        trailing = {
+                            Switch(
+                                checked = isBreadcrumbRecording,
+                                onCheckedChange = { on ->
+                                    if (on) {
+                                        viewModel.startBreadcrumbRecording()
+                                        val granted = ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.ACCESS_FINE_LOCATION,
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                        if (!granted) locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                                    } else {
+                                        viewModel.pauseBreadcrumbRecording()
+                                    }
+                                },
+                            )
+                        },
+                    )
+                    IosDivider(startInset = IosIconRowDividerInset)
+                    val canShoot = bitmap != null && !isRendering && !isExportingScreenshot
+                    IosRow(
+                        title = if (isExportingScreenshot) "Saving screenshot…" else "Save screenshot",
+                        icon = Icons.Default.Save,
+                        titleColor = if (canShoot) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick = if (canShoot) {
+                            {
+                                exportScreenshot()
+                                showMore = false
+                            }
+                        } else {
+                            null
+                        },
+                        modifier = Modifier.testTag("terrain_screenshot_button"),
+                    )
+                }
+            }
         }
 
         screenshotMessage?.let { message ->
@@ -1068,21 +1137,27 @@ private fun TerrainQuickAction(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    TextButton(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+    // iOS toolbar item: icon over a small label; active items use the tint, others system grey.
+    val contentColor = when {
+        !enabled -> MaterialTheme.colorScheme.outline
+        active -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .widthIn(min = 50.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
     ) {
-        val contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-        Icon(icon, contentDescription = label, tint = contentColor, modifier = Modifier.width(19.dp))
-        Spacer(Modifier.width(4.dp))
+        Icon(icon, contentDescription = label, tint = contentColor, modifier = Modifier.size(22.dp))
         Text(
             label,
             color = contentColor,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 10.sp,
+            lineHeight = 12.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
             maxLines = 1,
         )
     }

@@ -31,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -379,7 +380,8 @@ fun IosSegmentedControl(
 
 /**
  * iOS-style pop-up sheet: grabber, centered title with a "Done" button, scrollable grouped content
- * on the grouped background. Opens fully so settings are never half-hidden.
+ * on the grouped background. Opens fully by default; with [peek] it opens at half height without
+ * dimming what's behind it, so live changes (map styling, sun angle) stay visible.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -387,12 +389,14 @@ fun IosSheet(
     title: String,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    peek: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = !peek)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
+        scrimColor = if (peek) Color.Transparent else BottomSheetDefaults.ScrimColor,
         shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
         containerColor = MaterialTheme.colorScheme.background,
         tonalElevation = 0.dp,
