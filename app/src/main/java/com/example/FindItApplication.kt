@@ -16,6 +16,8 @@ class FindItApplication : Application() {
         super.onCreate()
         LazDecoderSettings.load(this)
         initSentry()
+        // After Sentry so the on-phone crash log wraps (and then calls) Sentry's handler.
+        com.example.update.CrashLog.install(this)
     }
 
     private fun initSentry() {

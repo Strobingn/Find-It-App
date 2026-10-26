@@ -39,7 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
+import androidx.compose.animation.core.withInfiniteAnimationFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -265,7 +265,7 @@ fun ThermalWindMapScreen(
         if (!playing) return@LaunchedEffect
         var last = 0L
         while (true) {
-            withFrameNanos { now ->
+            withInfiniteAnimationFrameNanos { now ->
                 if (last != 0L) {
                     val dt = (now - last) / 1e9f
                     var h = hour + dt * 0.85f
@@ -597,7 +597,7 @@ private fun ParticleOverlay(
     LaunchedEffect(particles) {
         var last = 0L
         while (true) {
-            withFrameNanos { now ->
+            withInfiniteAnimationFrameNanos { now ->
                 val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.05f)
                 last = now
                 val g = currentGrid
