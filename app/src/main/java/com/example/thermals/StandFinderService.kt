@@ -25,7 +25,7 @@ data class StandSearchResult(
 )
 
 /**
- * Network side of the stand finder: a 1.6 km elevation grid (Open-Meteo, key-less), a satellite
+ * Network side of the stand finder: a ½-mile elevation grid (Open-Meteo, key-less), a satellite
  * picture of the same square (Mapbox Static Images) and the cloud AI that turns terrain + thermals
  * + imagery into ranked stand and hunting-area picks.
  */
@@ -53,11 +53,33 @@ class StandFinderService(
         ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray())
     }
 
+    /**
+     * Roads and buildings around the search square from OpenStreetMap (Overpass, key-less).
+     * Footpaths and farm tracks are left out — hunters walk those. Empty on any failure.
+     */
+    suspend fun fetchObstacles(lat: Double, lon: Double): MappedObstacles = withContext(Dispatchers.IO) {
+        val half = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) / 2.0 + 100.0
+        val dLat = half / 111_320.0
+        val dLon = half / (111_320.0 * kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.01))
+        val bbox = String.format(Locale.US, "%.5f,%.5f,%.5f,%.5f", lat - dLat, lon - dLon, lat + dLat, lon + dLon)
+        val query = "[out:json][timeout:20];(way[\"highway\"]($bbox);way[\"building\"]($bbox););out geom;"
+        runCatching {
+            val request = Request.Builder()
+                .url(OVERPASS_ENDPOINT)
+                .post(okhttp3.FormBody.Builder().add("data", query).build())
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use MappedObstacles.NONE
+                parseObstacles(response.body?.string().orEmpty())
+            }
+        }.getOrDefault(MappedObstacles.NONE)
+    }
+
     /** Satellite picture of the search square, or null without a Mapbox token / network. */
     suspend fun fetchSatellite(lat: Double, lon: Double): SatelliteImage? = withContext(Dispatchers.IO) {
         val token = BuildConfig.MAPBOX_ACCESS_TOKEN.trim()
         if (token.isBlank()) return@withContext null
-        val span = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) + 200.0
+        val span = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) + 120.0
         val zoom = StandFinder.zoomForSpan(lat, span, IMAGE_PX)
         val url = String.format(
             Locale.US,
@@ -87,12 +109,13 @@ class StandFinderService(
         locationLabel: String,
         dateLabel: String,
         onStage: (String) -> Unit,
+        obstacles: MappedObstacles = MappedObstacles.NONE,
     ): Pair<List<StandPick>, String> {
-        val prompt = buildPrompt(candidates, forecast, image, centerLat, centerLon, locationLabel, dateLabel)
+        val prompt = buildPrompt(candidates, forecast, image, centerLat, centerLon, locationLabel, dateLabel, obstacles)
         val answer = gateway.generate(
             conversation = listOf(GeminiConversationTurn(role = "user", text = prompt.second)),
             systemContext = prompt.first,
-            image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view of the 1.7 km search square, north up, stand search center in the middle") },
+            image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view of the half-mile search square, north up, search center in the middle") },
             onProviderStage = onStage,
             featureName = "stand_finder",
         )
@@ -121,6 +144,39 @@ class StandFinderService(
 
     companion object {
         const val IMAGE_PX = 640
+        const val OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter"
+
+        private val FOOT_TRAFFIC = setOf("footway", "path", "track", "bridleway", "cycleway", "steps", "pedestrian")
+
+        fun parseObstacles(body: String): MappedObstacles {
+            val elements = JSONObject(body).optJSONArray("elements") ?: return MappedObstacles.NONE
+            val roads = mutableListOf<Pair<Double, Double>>()
+            val buildings = mutableListOf<Pair<Double, Double>>()
+            for (i in 0 until elements.length()) {
+                val e = elements.optJSONObject(i) ?: continue
+                val tags = e.optJSONObject("tags") ?: continue
+                val geometry = e.optJSONArray("geometry") ?: continue
+                val line = (0 until geometry.length()).mapNotNull { j ->
+                    geometry.optJSONObject(j)?.let { it.optDouble("lat") to it.optDouble("lon") }
+                }.filter { !it.first.isNaN() && !it.second.isNaN() }
+                when {
+                    tags.has("building") -> buildings += line
+                    tags.has("highway") && tags.optString("highway") !in FOOT_TRAFFIC -> roads += MappedObstacles.densify(line)
+                }
+            }
+            return MappedObstacles(roads, buildings)
+        }
+
+        /**
+         * Turns network errors into something actionable. "Unable to resolve host" for the AI
+         * servers while other lookups work means the network or a DNS filter blocks them.
+         */
+        fun explainAiFailure(message: String): String =
+            if (message.contains("Unable to resolve host", ignoreCase = true) || message.contains("No address associated", ignoreCase = true)) {
+                "Your connection is blocking the AI servers (api.x.ai). Try cell data, or turn off Private DNS / ad-blocker / VPN filtering, then tap Again."
+            } else {
+                message
+            }
 
         /** (system context, user message) for the AI. Pure so it can be unit tested. */
         fun buildPrompt(
@@ -131,13 +187,15 @@ class StandFinderService(
             centerLon: Double,
             locationLabel: String,
             dateLabel: String,
+            obstacles: MappedObstacles = MappedObstacles.NONE,
         ): Pair<String, String> {
             val system = buildString {
                 appendLine("ROLE: Expert whitetail hunter and terrain scout. Pick the best tree-stand sites and hunting areas on this property.")
                 appendLine("Use the terrain candidates (computed from elevation), the thermal/wind forecast, and the satellite image if attached")
                 appendLine("(look for field edges, inside corners, thick cover, oak flats, creek crossings, pinch points).")
                 appendLine("A stand works when scent drifts AWAY from where deer come from during that sit. Morning: deer move from feeding up to bedding. Evening: bedding back down to feed.")
-                appendLine("Never place picks on roads, buildings, water or yards. Remind nothing about permission; the app already does.")
+                appendLine("Never place picks on or near roads, buildings, driveways, water or yards (stay 150+ ft from roads, 200+ ft from houses). Remind nothing about permission; the app already does.")
+                appendLine("The user is in the US: use feet, yards and miles, never meters.")
                 appendLine()
                 appendLine("OUTPUT: only a JSON array, no prose, no code fences. 3-4 stands + up to 2 areas, best first:")
                 appendLine("""[{"rank":1,"kind":"stand","candidate":3,"title":"Saddle stand","best_time":"Evening sit","wind":"NW or W","why":"...","entry":"..."}]""")
@@ -159,7 +217,8 @@ class StandFinderService(
                     appendLine("FORECAST: not loaded — reason from terrain and generic thermals.")
                 }
                 appendLine()
-                appendLine("CANDIDATES (id | feature | image x%,y% | elev ft | slope° | uphill | AM score, scent→ | PM score, scent→):")
+                appendLine("SEARCH AREA: half a mile across around the center.")
+                appendLine("CANDIDATES (id | feature | image x%,y% | elev ft | slope° | uphill | AM score, scent→ | PM score, scent→ | road ft | house ft):")
                 candidates.forEach { c ->
                     val pos = image?.let {
                         val (x, y) = StandFinder.latLonToImagePercent(c.latitude, c.longitude, it.centerLat, it.centerLon, it.zoom, it.widthPx, it.heightPx)
@@ -177,7 +236,8 @@ class StandFinderService(
                             ThermalWindEngine.compass(c.morningScentToward),
                             (c.eveningScore * 100).toInt(),
                             ThermalWindEngine.compass(c.eveningScentToward),
-                        ),
+                        ) + " | " + (obstacles.nearestRoadFeet(c.latitude, c.longitude)?.let { "%.0f".format(it) } ?: "?") +
+                            " | " + (obstacles.nearestBuildingFeet(c.latitude, c.longitude)?.let { "%.0f".format(it) } ?: "?"),
                     )
                 }
                 if (candidates.isEmpty()) appendLine("(none found — pick from the image)")
@@ -213,7 +273,7 @@ class StandFinderService(
                     else -> continue
                 }
                 // Keep everything near the search square.
-                if (StandFinder.distanceMeters(centerLat, centerLon, position.first, position.second) > 1_500.0) continue
+                if (StandFinder.distanceMeters(centerLat, centerLon, position.first, position.second) > StandFinder.MAX_PICK_DISTANCE_M) continue
                 val kind = if (o.optString("kind").equals("area", ignoreCase = true)) StandPick.Kind.AREA else StandPick.Kind.STAND
                 val bestTime = o.optString("best_time").ifBlank { candidate?.bestWindow?.label ?: "" }
                 val scent = candidate?.let {

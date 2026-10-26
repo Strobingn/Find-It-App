@@ -45,10 +45,12 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
             }
             try {
                 val imageJob = async { service.fetchSatellite(lat, lon) }
+                val obstaclesJob = async { service.fetchObstacles(lat, lon) }
                 val grid = service.fetchGrid(lat, lon)
+                val obstacles = obstaclesJob.await()
                 val field = inputs?.let { ThermalWindEngine.flowField(it.copy(latitude = lat, longitude = lon)) }
                 val prevailingFrom = forecast?.hour(8)?.let { ThermalWindEngine.normalize(it.windTowardDegrees + 180.0) }
-                val candidates = StandFinder.findCandidates(grid, field, prevailingFrom)
+                val candidates = StandFinder.findCandidates(grid, field, prevailingFrom, obstacles = obstacles)
                 val local = StandFinder.localPicks(candidates)
                 _state.update {
                     it.copy(
@@ -72,6 +74,7 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                     locationLabel = locationLabel,
                     dateLabel = dateLabel,
                     onStage = { stage -> _state.update { it.copy(stage = stage) } },
+                    obstacles = obstacles,
                 )
                 _state.update { it.copy(picks = picks, source = source, running = false, stage = null, selectedRank = null) }
             } catch (cancelled: CancellationException) {
@@ -81,7 +84,7 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                     it.copy(
                         running = false,
                         stage = null,
-                        error = (error.localizedMessage ?: "Stand search failed") +
+                        error = StandFinderService.explainAiFailure(error.localizedMessage ?: "Stand search failed") +
                             if (it.picks.isNotEmpty()) " — showing on-device picks." else "",
                     )
                 }

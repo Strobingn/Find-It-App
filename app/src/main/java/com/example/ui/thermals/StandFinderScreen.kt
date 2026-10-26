@@ -1,5 +1,14 @@
 package com.example.ui.thermals
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.core.content.ContextCompat
+import com.example.thermals.StandFinder
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
@@ -106,6 +115,27 @@ fun StandFinderScreen(
     // Make sure the Maps SDK (and BitmapDescriptorFactory, used for the numbered pins) is ready.
     remember(context) { runCatching { MapsInitializer.initialize(context.applicationContext) } }
 
+    // Location: open on the phone's GPS position, with the blue dot and a my-location button.
+    fun hasLocationPermission() =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    var locationGranted by remember { mutableStateOf(hasLocationPermission()) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        locationGranted = grants.values.any { it }
+        if (locationGranted) thermalViewModel.useDeviceLocation()
+    }
+    // First time Stands opens this session: search where the user is standing.
+    var openedOnGps by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (openedOnGps) return@LaunchedEffect
+        openedOnGps = true
+        if (locationGranted) {
+            thermalViewModel.useDeviceLocation()
+        } else {
+            permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        }
+    }
+
     val lat = thermal.latitude
     val lon = thermal.longitude
     // Camera animations only start after the map has loaded: maps-compose throws (and kills the
@@ -147,8 +177,15 @@ fun StandFinderScreen(
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
-            properties = MapProperties(mapType = MapType.HYBRID),
-            uiSettings = MapUiSettings(zoomControlsEnabled = false, mapToolbarEnabled = false, compassEnabled = true),
+            properties = MapProperties(mapType = MapType.HYBRID, isMyLocationEnabled = locationGranted),
+            uiSettings = MapUiSettings(
+                zoomControlsEnabled = false,
+                mapToolbarEnabled = false,
+                compassEnabled = true,
+                myLocationButtonEnabled = locationGranted,
+            ),
+            // Keeps Google's compass, my-location button and logo clear of the overlays.
+            contentPadding = PaddingValues(top = 120.dp, bottom = if (finder.picks.isEmpty()) 16.dp else 130.dp),
             onMapLoaded = { mapLoaded = true },
             onMapLongClick = { latLng -> thermalViewModel.useLocation(latLng.latitude, latLng.longitude, "Map pin") },
         ) {
@@ -168,14 +205,14 @@ fun StandFinderScreen(
                 if (pick.kind == StandPick.Kind.AREA) {
                     Circle(
                         center = position,
-                        radius = 140.0,
+                        radius = 75.0, // ~250 ft
                         fillColor = AreaPinColor.copy(alpha = 0.22f),
                         strokeColor = AreaPinColor,
                         strokeWidth = 4f,
                     )
                 }
                 pick.scentToward?.let { toward ->
-                    val (eLat, eLon) = ThermalMapGeometry.destination(pick.latitude, pick.longitude, toward, 180.0)
+                    val (eLat, eLon) = ThermalMapGeometry.destination(pick.latitude, pick.longitude, toward, 100.0) // ~330 ft
                     Polyline(
                         points = listOf(position, LatLng(eLat, eLon)),
                         color = ScentColor,
@@ -214,7 +251,7 @@ fun StandFinderScreen(
                                     lat == null || lon == null -> "Long-press the map on your property, or set a location in Thermals."
                                     finder.running -> finder.stage ?: "Working…"
                                     finder.source != null -> "${finder.picks.size} picks · chosen by ${finder.source}"
-                                    else -> "Scans 1.6 km of terrain, thermals and wind, then the AI picks spots."
+                                    else -> "Scans ½ mile of terrain, thermals and wind, then the AI picks spots."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -222,7 +259,17 @@ fun StandFinderScreen(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(
+                            onClick = {
+                                if (locationGranted) {
+                                    thermalViewModel.useDeviceLocation()
+                                } else {
+                                    permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                                }
+                            },
+                            modifier = Modifier.testTag("stand_use_my_location"),
+                        ) { Icon(Icons.Default.MyLocation, contentDescription = "Search where I am") }
                         if (finder.running) {
                             CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                         } else {
@@ -265,6 +312,15 @@ fun StandFinderScreen(
                 pick.scentToward?.let {
                     IosDivider(startInset = 16.dp)
                     IosRow(title = "Scent drifts", value = "→ ${ThermalWindEngine.compass(it)}")
+                }
+                if (finder.centerLat != null && finder.centerLon != null) {
+                    IosDivider(startInset = 16.dp)
+                    IosRow(
+                        title = "From search center",
+                        value = StandFinder.formatDistance(
+                            StandFinder.distanceMeters(finder.centerLat!!, finder.centerLon!!, pick.latitude, pick.longitude),
+                        ),
+                    )
                 }
             }
             if (pick.why.isNotBlank()) {
