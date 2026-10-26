@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Wildlife Whisperer emblem: whitetail antlers over a surveyor's crosshair -->
+
+    <!-- Amber outer ring -->
+    <path
+        android:pathData="M54,54 m-30,0 a30,30 0 1,1 60,0 a30,30 0 1,1 -60,0"
+        android:strokeWidth="1.5"
+        android:strokeColor="#E8A33D"
+        android:strokeAlpha="0.9"
+        android:fillColor="#00000000" />
+
+    <!-- Crosshair axes -->
+    <path
+        android:pathData="M54,18 L54,44 M54,64 L54,90"
+        android:strokeWidth="1.5"
+        android:strokeColor="#E8A33D"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M18,54 L44,54 M64,54 L90,54"
+        android:strokeWidth="1.5"
+        android:strokeColor="#E8A33D"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- Arrow tips: north, east, west -->
+    <path
+        android:pathData="M54,13 L57.5,21 L54,19 L50.5,21 Z"
+        android:fillColor="#E8A33D" />
+    <path
+        android:pathData="M94,54 L86,57.5 L88,54 L86,50.5 Z"
+        android:fillColor="#E8A33D" />
+    <path
+        android:pathData="M14,54 L22,57.5 L20,54 L22,50.5 Z"
+        android:fillColor="#E8A33D" />
+
+    <!-- Center pip -->
+    <path
+        android:pathData="M54,54 m-3.2,0 a3.2,3.2 0 1,1 6.4,0 a3.2,3.2 0 1,1 -6.4,0"
+        android:fillColor="#E8A33D" />
+
+    <!-- Left antler (bone white) -->
+    <path android:pathData="M47,80 C43,72 39,60 37,46 C36.4,41 36.2,37 36.4,33"
+        android:strokeWidth="3.1" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M39.8,62 C36,57 31.5,52.5 27.6,48.8"
+        android:strokeWidth="2.6" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M37.6,50.5 C35,45 32.5,40.5 30.6,36"
+        android:strokeWidth="2.4" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M46,75 C49.5,71 51.5,66.5 52.2,61.5"
+        android:strokeWidth="2.4" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+
+    <!-- Right antler (mirror about x=54) -->
+    <path android:pathData="M61,80 C65,72 69,60 71,46 C71.6,41 71.8,37 71.6,33"
+        android:strokeWidth="3.1" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M68.2,62 C72,57 76.5,52.5 80.4,48.8"
+        android:strokeWidth="2.6" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M70.4,50.5 C73,45 75.5,40.5 77.4,36"
+        android:strokeWidth="2.4" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+    <path android:pathData="M62,75 C58.5,71 56.5,66.5 55.8,61.5"
+        android:strokeWidth="2.4" android:strokeColor="#F2EFE8" android:strokeLineCap="round" android:fillColor="#00000000" />
+
+    <!-- Skull hint below center -->
+    <path
+        android:pathData="M54,80 C51.6,82.4 51.6,86 54,89 C56.4,86 56.4,82.4 54,80 Z"
+        android:fillColor="#F2EFE8" />
+</vector>
