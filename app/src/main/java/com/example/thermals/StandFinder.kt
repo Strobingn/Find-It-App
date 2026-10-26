@@ -62,16 +62,29 @@ class ElevationGrid(
 
     /** Uphill bearing and slope at ([lat], [lon]) for the thermal model, or null outside the grid. */
     fun terrainAt(lat: Double, lon: Double): SiteTerrain? {
+        // Null only when the query itself is outside. A neighbor one cell past the border
+        // must not discard an in-bounds point; use the point's own elevation on that side.
+        val here = elevationAt(lat, lon) ?: return null
         val step = spacingMeters
         val (nLat, nLon) = ThermalMapGeometry.destination(lat, lon, 0.0, step)
         val (sLat, sLon) = ThermalMapGeometry.destination(lat, lon, 180.0, step)
         val (eLat, eLon) = ThermalMapGeometry.destination(lat, lon, 90.0, step)
         val (wLat, wLon) = ThermalMapGeometry.destination(lat, lon, 270.0, step)
-        val zN = elevationAt(nLat, nLon) ?: return null
-        val zS = elevationAt(sLat, sLon) ?: return null
-        val zE = elevationAt(eLat, eLon) ?: return null
-        val zW = elevationAt(wLat, wLon) ?: return null
-        val (uphill, slope) = ThermalMapGeometry.slopeFromSamples(zN, zS, zE, zW, step)
+        val zN = elevationAt(nLat, nLon)
+        val zS = elevationAt(sLat, sLon)
+        val zE = elevationAt(eLat, eLon)
+        val zW = elevationAt(wLat, wLon)
+        fun dz(ahead: Double?, behind: Double?): Double = when {
+            ahead != null && behind != null -> (ahead - behind) / (2.0 * step)
+            ahead != null -> (ahead - here) / step
+            behind != null -> (here - behind) / step
+            else -> 0.0
+        }
+        val dzNorth = dz(zN, zS)
+        val dzEast = dz(zE, zW)
+        val rise = hypot(dzEast, dzNorth)
+        val slope = Math.toDegrees(atan(rise))
+        val uphill = if (rise < 0.01) null else ThermalWindEngine.normalize(Math.toDegrees(atan2(dzEast, dzNorth)))
         return ThermalMapGeometry.cellTerrain(uphill, slope)
     }
 

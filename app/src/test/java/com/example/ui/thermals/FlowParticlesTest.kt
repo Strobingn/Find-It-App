@@ -77,5 +77,17 @@ class FlowParticlesTest {
         assertEquals(TerrainSetting.SLOPE, terrain!!.setting)
         assertEquals(90.0, terrain.uphillBearingDegrees!!, 3.0)
         assertNull(g.elevationAt(43.0, -75.5)) // well outside the square
+        assertNull(g.terrainAt(43.0, -75.5))
+        // On the north edge the north sample leaves the grid; the point itself is still in it.
+        val (edgeLat, edgeLon) = g.latLon(0, size / 2)
+        assertNotNull(g.elevationAt(edgeLat, edgeLon))
+        val edge = g.terrainAt(edgeLat, edgeLon)
+        assertNotNull(edge)
+        assertEquals(TerrainSetting.SLOPE, edge!!.setting)
+        assertEquals(90.0, edge.uphillBearingDegrees!!, 3.0)
+        val (cornerLat, cornerLon) = g.latLon(0, size - 1)
+        val corner = g.terrainAt(cornerLat, cornerLon)
+        assertNotNull(corner)
+        assertEquals(90.0, corner!!.uphillBearingDegrees!!, 3.0)
     }
 }
