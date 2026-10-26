@@ -32,6 +32,10 @@ data class StandSearchResult(
 class StandFinderService(
     context: Context,
     private val httpClient: OkHttpClient = defaultHttpClient(),
+    /** Overpass is best-effort: a slow public instance must not hold up the search. */
+    private val overpassClient: OkHttpClient = httpClient.newBuilder()
+        .callTimeout(OVERPASS_TIMEOUT_S + 2L, TimeUnit.SECONDS)
+        .build(),
 ) {
     private val appContext = context.applicationContext
     private val gateway = TerrainAiGateway(appContext)
@@ -62,13 +66,13 @@ class StandFinderService(
         val dLat = half / 111_320.0
         val dLon = half / (111_320.0 * kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.01))
         val bbox = String.format(Locale.US, "%.5f,%.5f,%.5f,%.5f", lat - dLat, lon - dLon, lat + dLat, lon + dLon)
-        val query = "[out:json][timeout:20];(way[\"highway\"]($bbox);way[\"building\"]($bbox););out geom;"
+        val query = "[out:json][timeout:${OVERPASS_TIMEOUT_S}];(way[\"highway\"]($bbox);way[\"building\"]($bbox););out geom;"
         runCatching {
             val request = Request.Builder()
                 .url(OVERPASS_ENDPOINT)
                 .post(okhttp3.FormBody.Builder().add("data", query).build())
                 .build()
-            httpClient.newCall(request).execute().use { response ->
+            overpassClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@use MappedObstacles.NONE
                 parseObstacles(response.body?.string().orEmpty())
             }
@@ -119,7 +123,7 @@ class StandFinderService(
             onProviderStage = onStage,
             featureName = "stand_finder",
         )
-        val picks = parsePicks(answer.text, candidates, image, centerLat, centerLon)
+        val picks = parsePicks(answer.text, candidates, image, centerLat, centerLon, obstacles)
         if (picks.isEmpty()) throw IOException("The AI didn't return any usable picks")
         return picks to "${answer.provider.label} ${TerrainAiGateway.modelFor(answer.provider)}"
     }
@@ -145,13 +149,19 @@ class StandFinderService(
     companion object {
         const val IMAGE_PX = 640
         const val OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter"
+        const val OVERPASS_TIMEOUT_S = 8
+
+        /** Hosts the cloud AI providers are called on. */
+        val AI_HOSTS = setOf("api.x.ai", "api.openai.com", "generativelanguage.googleapis.com")
+
+        private val UNRESOLVED_HOST = Regex("""Unable to resolve host \\?"?([A-Za-z0-9.-]+)""", RegexOption.IGNORE_CASE)
 
         private val FOOT_TRAFFIC = setOf("footway", "path", "track", "bridleway", "cycleway", "steps", "pedestrian")
 
         fun parseObstacles(body: String): MappedObstacles {
             val elements = JSONObject(body).optJSONArray("elements") ?: return MappedObstacles.NONE
-            val roads = mutableListOf<Pair<Double, Double>>()
-            val buildings = mutableListOf<Pair<Double, Double>>()
+            val roads = mutableListOf<List<Pair<Double, Double>>>()
+            val buildings = mutableListOf<List<Pair<Double, Double>>>()
             for (i in 0 until elements.length()) {
                 val e = elements.optJSONObject(i) ?: continue
                 val tags = e.optJSONObject("tags") ?: continue
@@ -160,23 +170,28 @@ class StandFinderService(
                     geometry.optJSONObject(j)?.let { it.optDouble("lat") to it.optDouble("lon") }
                 }.filter { !it.first.isNaN() && !it.second.isNaN() }
                 when {
-                    tags.has("building") -> buildings += line
-                    tags.has("highway") && tags.optString("highway") !in FOOT_TRAFFIC -> roads += MappedObstacles.densify(line)
+                    line.isEmpty() -> Unit
+                    tags.has("building") -> buildings += listOf(line)
+                    tags.has("highway") && tags.optString("highway") !in FOOT_TRAFFIC -> roads += listOf(line)
                 }
             }
             return MappedObstacles(roads, buildings)
         }
 
         /**
-         * Turns network errors into something actionable. "Unable to resolve host" for the AI
-         * servers while other lookups work means the network or a DNS filter blocks them.
+         * Turns "Unable to resolve host" into something actionable, naming the host that
+         * actually failed. Only AI hosts get the DNS-filter advice; any other message is kept.
          */
-        fun explainAiFailure(message: String): String =
-            if (message.contains("Unable to resolve host", ignoreCase = true) || message.contains("No address associated", ignoreCase = true)) {
-                "Your connection is blocking the AI servers (api.x.ai). Try cell data, or turn off Private DNS / ad-blocker / VPN filtering, then tap Again."
+        fun explainNetworkFailure(message: String): String {
+            val hosts = UNRESOLVED_HOST.findAll(message).map { it.groupValues[1].trimEnd('.') }.distinct().toList()
+            if (hosts.isEmpty()) return message
+            val aiHosts = hosts.filter { it in AI_HOSTS }
+            return if (aiHosts.isNotEmpty() && aiHosts.size == hosts.size) {
+                "Your connection is blocking the AI servers (${aiHosts.joinToString()}). Try cell data, or turn off Private DNS / ad-blocker / VPN filtering, then tap Again."
             } else {
-                message
+                "Couldn't reach ${hosts.joinToString()} — check your connection, then tap Again."
             }
+        }
 
         /** (system context, user message) for the AI. Pure so it can be unit tested. */
         fun buildPrompt(
@@ -252,6 +267,7 @@ class StandFinderService(
             image: SatelliteImage?,
             centerLat: Double,
             centerLon: Double,
+            obstacles: MappedObstacles = MappedObstacles.NONE,
         ): List<StandPick> {
             val start = text.indexOf('[')
             val end = text.lastIndexOf(']')
@@ -274,6 +290,8 @@ class StandFinderService(
                 }
                 // Keep everything near the search square.
                 if (StandFinder.distanceMeters(centerLat, centerLon, position.first, position.second) > StandFinder.MAX_PICK_DISTANCE_M) continue
+                // Spots placed from the photo never went through findCandidates — keep them off roads and yards too.
+                if (obstacles.tooClose(position.first, position.second)) continue
                 val kind = if (o.optString("kind").equals("area", ignoreCase = true)) StandPick.Kind.AREA else StandPick.Kind.STAND
                 val bestTime = o.optString("best_time").ifBlank { candidate?.bestWindow?.label ?: "" }
                 val scent = candidate?.let {
