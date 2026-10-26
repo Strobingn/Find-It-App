@@ -140,7 +140,7 @@ object ThermalWindEngine {
         val rangeF = weather.maxTemp() - weather.minTemp()
         val rangeFactor = (rangeF / 25.0).coerceIn(0.3, 1.6)
 
-        val hours = (0..23).map { hour -> evaluateHour(inputs, weather, daylight.solarNoonUtcMinutes, hour, rangeFactor, rangeF) }
+        val hours = (0..23).map { hour -> evaluateHour(inputs, weather, daylight.solarNoonUtcMinutes, hour.toDouble(), rangeFactor, rangeF) }
 
         // Switch detection at 10-minute resolution so the times read like "8:20 AM", not "8 AM".
         val fine = (0..(24 * 6)).map { step ->
@@ -168,11 +168,10 @@ object ThermalWindEngine {
         inputs: ThermalInputs,
         weather: WeatherSeries,
         solarNoonUtcMinutes: Float,
-        hour: Int,
+        t: Double,
         rangeFactor: Double,
         rangeF: Double,
     ): ThermalHour {
-        val t = hour.toDouble()
         val sun = sunAt(inputs, solarNoonUtcMinutes, t)
         val exposure = slopeExposure(inputs.terrain, sun.first, sun.second)
         val tendency = tendencyAt(inputs, weather, solarNoonUtcMinutes, t)
@@ -224,7 +223,7 @@ object ThermalWindEngine {
             ).coerceIn(0.1, 0.95)
 
         return ThermalHour(
-            hour = hour,
+            hour = floor(t).toInt().coerceIn(0, 23),
             temperatureF = weather.temperature(t),
             warmingRateFPerHour = weather.warmingRate(t),
             sunAltitudeDegrees = sun.first,
@@ -281,6 +280,29 @@ object ThermalWindEngine {
         val az = Math.toRadians(sunAzimuthDegrees)
         val cosIncidence = sin(alt) * cos(slope) + cos(alt) * sin(slope) * cos(az - aspect)
         return cosIncidence.coerceAtLeast(0.0)
+    }
+
+    /**
+     * Flow field for the map: evaluates the thermal for any patch of ground (its own slope and
+     * facing) at any fractional hour, sharing the day's weather. East faces turn uphill before
+     * west faces, draws drain while ridges lift — each cell behaves like its own stand.
+     */
+    class FlowField internal constructor(
+        private val inputs: ThermalInputs,
+        private val weather: WeatherSeries,
+        private val solarNoonUtcMinutes: Float,
+        private val rangeFactor: Double,
+        private val rangeF: Double,
+    ) {
+        fun at(t: Double, terrain: SiteTerrain = inputs.terrain): ThermalHour =
+            evaluateHour(inputs.copy(terrain = terrain), weather, solarNoonUtcMinutes, t.coerceIn(0.0, 23.99), rangeFactor, rangeF)
+    }
+
+    fun flowField(inputs: ThermalInputs): FlowField {
+        val weather = WeatherSeries(inputs.hourly)
+        val daylight = DaylightPlanner.compute(inputs.latitude, inputs.longitude, inputs.dayOfYear)
+        val rangeF = weather.maxTemp() - weather.minTemp()
+        return FlowField(inputs, weather, daylight.solarNoonUtcMinutes, (rangeF / 25.0).coerceIn(0.3, 1.6), rangeF)
     }
 
     private fun terrainFactor(terrain: SiteTerrain): Double = when (terrain.setting) {
