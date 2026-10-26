@@ -33,6 +33,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.BuildConfig
 import com.example.geospatial.GeoSpatialLibrary
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
@@ -122,6 +123,36 @@ fun LidarAreaPickerMapScreen(
 
     Box(modifier = modifier.fillMaxSize().testTag("lidar_area_map")) {
         AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+
+        // Same fail-loud treatment as the terrain overlay tab: with no key the MapView renders
+        // a silent gray grid, so state the cause and the exact fix instead.
+        if (BuildConfig.MAPS_API_KEY.isBlank()) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                ),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+                    .fillMaxWidth(0.9f),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        "Google Maps key needed",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        "Set MAPS_API_KEY in local.properties or .env (CI: the MAPS_API_KEY secret), " +
+                            "then rebuild. The key's Android restrictions must allow package " +
+                            "com.wildlifewhisperer.findit with this install's signing SHA-1.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            }
+        }
 
         if (drawingBox) {
             Box(
