@@ -61,7 +61,7 @@ internal class GrokApiClient(
 
         val startedAt = System.nanoTime()
         Log.i(LOG_TAG, "Starting xAI request model=$model effort=$effort image=${image != null}")
-        httpClient.newCall(request).execute().use { response ->
+        httpClient.newCall(request).executeCancellable { response ->
             val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
             Log.i(LOG_TAG, "xAI request finished model=$model http=${response.code} elapsedMs=$elapsedMs")
             if (!response.isSuccessful) {

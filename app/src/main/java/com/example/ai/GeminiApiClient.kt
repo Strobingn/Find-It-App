@@ -110,7 +110,7 @@ internal class GeminiApiClient(
 
         val startedAt = System.nanoTime()
         Log.i(LOG_TAG, "Starting generateContent request model=$model image=${image != null}")
-        httpClient.newCall(request).execute().use { response ->
+        httpClient.newCall(request).executeCancellable { response ->
             val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
             Log.i(LOG_TAG, "generateContent finished model=$model http=${response.code} elapsedMs=$elapsedMs")
             val responseText = response.body?.string().orEmpty()
