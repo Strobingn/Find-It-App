@@ -56,6 +56,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.BuildConfig
 import com.example.geospatial.GeoSpatialLibrary
+import com.example.thermals.MapLoadIssue
 import com.example.thermals.SiteTerrain
 import com.example.thermals.ThermalHour
 import com.example.thermals.ThermalMapGeometry
@@ -104,9 +105,13 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 
 private const val MAP_FIRST_HOUR = 4f
 private const val MAP_LAST_HOUR = 21f
+
+/** Camera moves prefetch this many zoom levels of lower-detail tiles (SDK default 4). */
+private const val PREFETCH_ZOOM_DELTA: Byte = 1
 
 private object WindMapIds {
     const val DEM = "thermal-dem"
@@ -235,7 +240,16 @@ fun ThermalWindMapScreen(
     LaunchedEffect(lat, lon) { if (lat != null && lon != null) recenter() }
 
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
-    var mapLoadError by remember { mutableStateOf<String?>(null) }
+    var mapIssue by remember { mutableStateOf<MapLoadIssue?>(null) }
+    var tileIssueAt by remember { mutableLongStateOf(0L) }
+    // The base style's own elevation source when it has one, so DEM tiles aren't fetched twice.
+    var demSourceId by remember { mutableStateOf(WindMapIds.DEM) }
+    // Tile hiccups (rate limits, a dropped tile) clear themselves once tiles stop failing.
+    LaunchedEffect(tileIssueAt) {
+        if (tileIssueAt == 0L) return@LaunchedEffect
+        delay(MapLoadIssue.TILE_NOTE_MS)
+        if (mapIssue?.fatal == false) mapIssue = null
+    }
     var idleTick by remember { mutableIntStateOf(0) }
     var lastMoveMs by remember { mutableLongStateOf(0L) }
     var grid by remember { mutableStateOf<GroundGrid?>(null) }
@@ -308,15 +322,14 @@ fun ThermalWindMapScreen(
                 val subs = mutableListOf<Cancelable>()
                 subs += mapView.mapboxMap.subscribeMapIdle { idleTick++ }
                 subs += mapView.mapboxMap.subscribeCameraChangedCoalesced { lastMoveMs = System.currentTimeMillis() }
+                // Fewer low-zoom placeholder tiles per camera move (default 4) — cuts tile requests.
+                mapView.mapboxMap.setPrefetchZoomDelta(PREFETCH_ZOOM_DELTA)
                 // A rejected token or offline style fetch otherwise fails silently to a blank map.
                 subs += mapView.mapboxMap.subscribeMapLoadingError { event ->
-                    mapLoadError = buildString {
-                        append("Map failed to load: ").append(event.message)
-                        if (event.message.contains("token", ignoreCase = true) ||
-                            event.message.contains("401") || event.message.contains("403")
-                        ) {
-                            append(" — check that MAPBOX_ACCESS_TOKEN is a valid public (pk.) token, then rebuild.")
-                        }
+                    val issue = MapLoadIssue.from(event.type.name, event.message, event.sourceId)
+                    if (issue.fatal || mapIssue?.fatal != true) {
+                        mapIssue = issue
+                        if (!issue.fatal) tileIssueAt = System.currentTimeMillis()
                     }
                 }
                 try {
@@ -327,13 +340,14 @@ fun ThermalWindMapScreen(
             }
             MapEffect(base) { mapView ->
                 mapView.mapboxMap.loadStyle(base.uri) { style ->
-                    style.installWindLayers(coneFeatures, standFeatures, coneColor, terrain3d, showCone)
+                    demSourceId = style.installWindLayers(coneFeatures, standFeatures, coneColor, terrain3d, showCone)
+                    if (mapIssue?.fatal == true) mapIssue = null
                     idleTick++
                 }
             }
             MapEffect(terrain3d) { mapView ->
                 mapView.mapboxMap.getStyle { style ->
-                    if (terrain3d) style.setTerrain(terrain(WindMapIds.DEM) { exaggeration(1.4) }) else style.removeTerrain()
+                    if (terrain3d) style.setTerrain(terrain(demSourceId) { exaggeration(1.4) }) else style.removeTerrain()
                 }
             }
             MapEffect(coneFeatures, coneColor, showCone) { mapView ->
@@ -378,9 +392,14 @@ fun ThermalWindMapScreen(
             } else {
                 standFlow?.let { HudCard(it, hour, mode) }
             }
-            mapLoadError?.let {
+            mapIssue?.let { issue ->
                 GlassCard {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(12.dp))
+                    Text(
+                        issue.text,
+                        color = if (issue.fatal) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = if (issue.fatal) 12.dp else 8.dp).testTag("wind_map_issue"),
+                    )
                 }
             }
             state.error?.let {
@@ -806,17 +825,22 @@ private fun Style.installWindLayers(
     coneColor: Color,
     terrain3d: Boolean,
     showCone: Boolean,
-) {
-    if (!styleSourceExists(WindMapIds.DEM)) {
-        addSource(
-            rasterDemSource(WindMapIds.DEM) {
-                url(WindMapIds.DEM_URL)
-                tileSize(514)
-                maxzoom(14)
-            },
-        )
+): String {
+    // Outdoors/satellite styles may already carry an elevation source; reuse it rather than
+    // pulling the same DEM tiles a second time at a different tile size.
+    val demId = styleSources.firstOrNull { it.type == "raster-dem" }?.id ?: run {
+        if (!styleSourceExists(WindMapIds.DEM)) {
+            addSource(
+                rasterDemSource(WindMapIds.DEM) {
+                    url(WindMapIds.DEM_URL)
+                    tileSize(514)
+                    maxzoom(14)
+                },
+            )
+        }
+        WindMapIds.DEM
     }
-    if (terrain3d) setTerrain(terrain(WindMapIds.DEM) { exaggeration(1.4) })
+    if (terrain3d) setTerrain(terrain(demId) { exaggeration(1.4) })
     addSource(geoJsonSource(WindMapIds.CONE_SOURCE) { featureCollection(cone) })
     addSource(geoJsonSource(WindMapIds.STAND_SOURCE) { featureCollection(stand) })
     val vis = if (showCone) Visibility.VISIBLE else Visibility.NONE
@@ -843,4 +867,5 @@ private fun Style.installWindLayers(
             circleStrokeWidth(3.0)
         },
     )
+    return demId
 }
