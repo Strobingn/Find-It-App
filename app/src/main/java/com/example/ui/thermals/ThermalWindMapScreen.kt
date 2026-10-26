@@ -128,7 +128,7 @@ private enum class ParticleMode(val label: String) { SCENT("Scent drift"), THERM
 
 private enum class ParticleDensity(val label: String, val count: Int) { LOW("Light", 180), MEDIUM("Medium", 360), HIGH("Dense", 600) }
 
-/** One sample of the map's ground, in screen pixels, with how many pixels one meter north/east spans there. */
+/** One sample of the map's ground under the screen, in screen pixels, with how many pixels one meter north/east spans there. */
 private class GroundCell(
     val px: Float,
     val py: Float,
@@ -159,13 +159,20 @@ fun ThermalWindMapScreen(
     viewModel: ThermalWindViewModel = viewModel(),
 ) {
     val token = BuildConfig.MAPBOX_ACCESS_TOKEN
-    if (token.isBlank()) {
+    // A blank token — or a secret sk. token pasted by mistake — leaves a permanently blank map.
+    // Fail loudly here instead of letting the hunter stare at an empty screen.
+    val tokenProblem = when {
+        token.isBlank() -> "Add your public Mapbox token (starts with pk.) as MAPBOX_ACCESS_TOKEN in local.properties, .env or the CI secrets, then rebuild."
+        !token.startsWith("pk.") -> "MAPBOX_ACCESS_TOKEN must be a PUBLIC Mapbox token starting with \"pk.\". A secret (sk.) token cannot load maps in an app — create a public one at account.mapbox.com/access-tokens, then rebuild."
+        else -> null
+    }
+    if (tokenProblem != null) {
         Column(modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            IosSection(
-                header = "Wind map",
-                footer = "Add your public Mapbox token (starts with pk.) as MAPBOX_ACCESS_TOKEN in local.properties, .env or the CI secrets, then rebuild.",
-            ) {
-                IosRow(title = "Mapbox token needed", titleColor = MaterialTheme.colorScheme.onSurfaceVariant)
+            IosSection(header = "Wind map", footer = tokenProblem) {
+                IosRow(
+                    title = if (token.isBlank()) "Mapbox token needed" else "Mapbox token is invalid",
+                    titleColor = MaterialTheme.colorScheme.error,
+                )
             }
         }
         return
@@ -188,6 +195,10 @@ fun ThermalWindMapScreen(
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var playing by rememberSaveable { mutableStateOf(false) }
     var hour by rememberSaveable { mutableStateOf(state.selectedHour.toFloat().coerceIn(MAP_FIRST_HOUR, MAP_LAST_HOUR)) }
+    // The view model is shared with the Thermals tab. Keep the scrubber in sync both ways:
+    // our own scrubs push down via selectHour (tracked by lastPushedHour), and hour picks made
+    // on the Thermals tab pull this scrubber along.
+    var lastPushedHour by remember { mutableIntStateOf(state.selectedHour) }
 
     val inputs = remember(state) { ThermalWindViewModel.buildInputs(state) }
     val field = remember(inputs) { inputs?.let(ThermalWindEngine::flowField) }
@@ -224,6 +235,7 @@ fun ThermalWindMapScreen(
     LaunchedEffect(lat, lon) { if (lat != null && lon != null) recenter() }
 
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+    var mapLoadError by remember { mutableStateOf<String?>(null) }
     var idleTick by remember { mutableIntStateOf(0) }
     var lastMoveMs by remember { mutableLongStateOf(0L) }
     var grid by remember { mutableStateOf<GroundGrid?>(null) }
@@ -264,7 +276,16 @@ fun ThermalWindMapScreen(
             }
         }
     }
-    LaunchedEffect(hourKey / 10) { viewModel.selectHour(hourKey / 10) }
+    LaunchedEffect(hourKey / 10) {
+        lastPushedHour = hourKey / 10
+        viewModel.selectHour(hourKey / 10)
+    }
+    LaunchedEffect(state.selectedHour) {
+        if (state.selectedHour != lastPushedHour) {
+            lastPushedHour = state.selectedHour
+            hour = state.selectedHour.toFloat().coerceIn(MAP_FIRST_HOUR, MAP_LAST_HOUR)
+        }
+    }
 
     val coneColor = standFlow?.let { phaseColor(it.phase) } ?: ScentColor
     val coneFeatures = remember(standFlow, lat, lon) { buildCone(lat, lon, standFlow) }
@@ -287,6 +308,17 @@ fun ThermalWindMapScreen(
                 val subs = mutableListOf<Cancelable>()
                 subs += mapView.mapboxMap.subscribeMapIdle { idleTick++ }
                 subs += mapView.mapboxMap.subscribeCameraChangedCoalesced { lastMoveMs = System.currentTimeMillis() }
+                // A rejected token or offline style fetch otherwise fails silently to a blank map.
+                subs += mapView.mapboxMap.subscribeMapLoadingError { event ->
+                    mapLoadError = buildString {
+                        append("Map failed to load: ").append(event.message)
+                        if (event.message.contains("token", ignoreCase = true) ||
+                            event.message.contains("401") || event.message.contains("403")
+                        ) {
+                            append(" — check that MAPBOX_ACCESS_TOKEN is a valid public (pk.) token, then rebuild.")
+                        }
+                    }
+                }
                 try {
                     awaitCancellation()
                 } finally {
@@ -345,6 +377,11 @@ fun ThermalWindMapScreen(
                 }
             } else {
                 standFlow?.let { HudCard(it, hour, mode) }
+            }
+            mapLoadError?.let {
+                GlassCard {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(12.dp))
+                }
             }
             state.error?.let {
                 GlassCard {
