@@ -103,6 +103,7 @@ fun HomeHubScreen(
         AppDestination.FIELD,
         AppDestination.THERMALS,
         AppDestination.WIND_MAP,
+        AppDestination.STANDS,
         AppDestination.AI,
         AppDestination.LIBRARY,
         AppDestination.MAP,

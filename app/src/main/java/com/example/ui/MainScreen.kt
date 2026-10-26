@@ -101,6 +101,7 @@ import com.example.ui.ios.IosSheet
 import com.example.ui.ios.IosNavBar
 import com.example.ui.ios.IosTabBar
 import com.example.ui.ios.IosTabItem
+import com.example.ui.thermals.StandFinderScreen
 import com.example.ui.thermals.ThermalWindMapScreen
 import com.example.ui.thermals.ThermalWindScreen
 import com.example.R
@@ -173,7 +174,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     Scaffold(
         modifier = modifier.fillMaxSize().testTag("main_scaffold"),
         topBar = {
-            if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME && current != AppDestination.WIND_MAP) {
+            if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME && current != AppDestination.WIND_MAP && current != AppDestination.STANDS) {
                 IosNavBar(
                     title = current.title,
                     backLabel = if (isPrimary) null else AppDestination.HOME.label,
@@ -208,6 +209,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
             AppDestination.FIELD -> FindsTab(viewModel, padding)
             AppDestination.THERMALS -> ThermalsTab(viewModel, padding)
             AppDestination.WIND_MAP -> WindMapTab(viewModel, padding)
+            AppDestination.STANDS -> StandsTab(viewModel, padding)
             AppDestination.AI -> GeminiTab(viewModel, padding)
             AppDestination.LIBRARY -> ImportTab(viewModel, padding) {
                 navigate(AppDestination.TERRAIN)
@@ -1245,6 +1247,15 @@ private fun ThermalsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 private fun WindMapTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
     ThermalWindMapScreen(
+        padding = padding,
+        siteMetadata = metadata.takeIf { it.isGeoreferenced },
+    )
+}
+
+@Composable
+private fun StandsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    StandFinderScreen(
         padding = padding,
         siteMetadata = metadata.takeIf { it.isGeoreferenced },
     )
