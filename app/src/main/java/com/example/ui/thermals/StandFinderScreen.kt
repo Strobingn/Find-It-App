@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.core.content.ContextCompat
@@ -197,6 +198,20 @@ fun StandFinderScreen(
     val hourKey = (hour * 4).roundToInt()
     val flowHere: ThermalHour? = remember(field, hourKey) { field?.at(hourKey / 4.0) }
 
+    // Seconds since the AI was asked, ticking while it works.
+    var aiElapsed by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(finder.aiStartedAtMs) {
+        val started = finder.aiStartedAtMs
+        if (started == null) {
+            aiElapsed = null
+            return@LaunchedEffect
+        }
+        while (true) {
+            aiElapsed = (System.currentTimeMillis() - started) / 1000
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
+
     val density = LocalDensity.current
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var headerHeight by remember { mutableStateOf(0) }
@@ -352,7 +367,9 @@ fun StandFinderScreen(
                             Text(
                                 when {
                                     lat == null || lon == null -> "Long-press the map on your property, or set a location in Thermals."
-                                    finder.running -> finder.stage ?: "Working…"
+                                    finder.running && finder.picks.isNotEmpty() ->
+                                        "${finder.picks.size} on-device picks · ${(finder.stage ?: "AI refining…").removeSuffix("…")}${aiElapsed?.let { " ${it}s" } ?: "…"}"
+                                    finder.running -> (finder.stage ?: "Working…") + (aiElapsed?.let { " ${it}s" } ?: "")
                                     finder.source != null -> "${finder.picks.size} picks · ${finder.source}"
                                     else -> "Scans ½ mile of terrain, thermals and wind, then the AI picks spots."
                                 },
@@ -373,7 +390,18 @@ fun StandFinderScreen(
                             modifier = Modifier.testTag("stand_use_my_location"),
                         ) { Icon(Icons.Default.MyLocation, contentDescription = "Search where I am") }
                         if (finder.running) {
-                            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                            // Spinner doubles as Stop: the on-device picks stay on the map.
+                            Box(
+                                Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .clickable(onClickLabel = "Stop waiting for the AI") { finderViewModel.stopAi() }
+                                    .testTag("stand_stop_ai"),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+                                Icon(Icons.Default.Close, contentDescription = "Stop", modifier = Modifier.size(14.dp))
+                            }
                         } else {
                             Button(
                                 onClick = ::runSearch,

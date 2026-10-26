@@ -26,6 +26,8 @@ data class StandFinderState(
     val selectedRank: Int? = null,
     /** Elevation of the search square, kept so the map can draw terrain-aware wind. */
     val grid: ElevationGrid? = null,
+    /** When the cloud AI call started (for the elapsed-time readout), null when not asking. */
+    val aiStartedAtMs: Long? = null,
 ) {
     val selected: StandPick? get() = picks.firstOrNull { it.rank == selectedRank }
 }
@@ -92,7 +94,11 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
 
             try {
                 val image = imageJob.await()
-                val (picks, source) = service.aiPicks(
+                _state.update { it.copy(aiStartedAtMs = System.currentTimeMillis()) }
+                // A slow provider (or a fallback chain of them) must not leave the spinner up for
+                // minutes: past the budget, keep the on-device picks and say so.
+                val result = withTimeoutOrNull(AI_BUDGET_MS) {
+                    service.aiPicks(
                     candidates = candidates,
                     forecast = forecast,
                     image = image,
@@ -102,8 +108,22 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                     dateLabel = dateLabel,
                     onStage = { stage -> _state.update { it.copy(stage = stage) } },
                     obstacles = obstacles,
-                )
-                _state.update { it.copy(picks = picks, source = source, running = false, stage = null, selectedRank = null) }
+                    onWriting = { _state.update { it.copy(stage = "Writing picks…") } },
+                    )
+                }
+                if (result == null) {
+                    _state.update {
+                        it.copy(
+                            running = false,
+                            stage = null,
+                            aiStartedAtMs = null,
+                            error = "The AI took over ${AI_BUDGET_MS / 1000} s, so these are the on-device picks. Tap Again to retry.",
+                        )
+                    }
+                    return@launch
+                }
+                val (picks, source) = result
+                _state.update { it.copy(picks = picks, source = source, running = false, stage = null, aiStartedAtMs = null, selectedRank = null) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -111,6 +131,7 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                     it.copy(
                         running = false,
                         stage = null,
+                        aiStartedAtMs = null,
                         error = StandFinderService.explainNetworkFailure(error.localizedMessage ?: "AI pick failed") +
                             if (it.picks.isNotEmpty()) " — showing on-device picks." else "",
                     )
@@ -121,7 +142,17 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
 
     fun select(rank: Int?) = _state.update { it.copy(selectedRank = rank) }
 
+    /** Stops waiting on the cloud AI; the on-device picks already on the map stay. */
+    fun stopAi() {
+        if (!_state.value.running) return
+        job?.cancel()
+        _state.update { it.copy(running = false, stage = null, aiStartedAtMs = null) }
+    }
+
     private companion object {
+        /** Total time allowed for the AI step, including any provider fallbacks. */
+        const val AI_BUDGET_MS = 75_000L
+
         /** Extra wait for OpenStreetMap after the terrain is in (they're fetched in parallel). */
         const val OBSTACLE_WAIT_MS = 4_000L
     }

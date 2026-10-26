@@ -114,14 +114,21 @@ class StandFinderService(
         dateLabel: String,
         onStage: (String) -> Unit,
         obstacles: MappedObstacles = MappedObstacles.NONE,
+        /** Called once the answer starts streaming in. */
+        onWriting: () -> Unit = {},
     ): Pair<List<StandPick>, String> {
         val prompt = buildPrompt(candidates, forecast, image, centerLat, centerLon, locationLabel, dateLabel, obstacles)
+        var writing = false
         val answer = gateway.generate(
             conversation = listOf(GeminiConversationTurn(role = "user", text = prompt.second)),
             systemContext = prompt.first,
             image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view of the half-mile search square, north up, search center in the middle") },
             onProviderStage = onStage,
             featureName = "stand_finder",
+            // Low reasoning effort + streaming: picks in seconds instead of minutes, and the
+            // connection never sits silent long enough to hit the read timeout.
+            fast = true,
+            onPartialText = { text -> if (text.isNotEmpty() && !writing) { writing = true; onWriting() } },
         )
         val picks = parsePicks(answer.text, candidates, image, centerLat, centerLon, obstacles)
         if (picks.isEmpty()) throw IOException("The AI didn't return any usable picks")
