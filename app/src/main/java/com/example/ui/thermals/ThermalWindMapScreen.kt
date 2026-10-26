@@ -129,32 +129,8 @@ private enum class WindMapBase(val label: String, val uri: String) {
     OUTDOORS("Topo", Style.OUTDOORS),
 }
 
-private enum class ParticleMode(val label: String) { SCENT("Scent drift"), THERMAL("Thermal only") }
 
 private enum class ParticleDensity(val label: String, val count: Int) { LOW("Light", 180), MEDIUM("Medium", 360), HIGH("Dense", 600) }
-
-/** One sample of the map's ground under the screen, in screen pixels, with how many pixels one meter north/east spans there. */
-private class GroundCell(
-    val px: Float,
-    val py: Float,
-    val northX: Float,
-    val northY: Float,
-    val eastX: Float,
-    val eastY: Float,
-    val terrain: SiteTerrain,
-)
-
-private class GroundGrid(val cols: Int, val rows: Int, val width: Float, val height: Float, val cells: Array<GroundCell?>) {
-    fun cellAt(x: Float, y: Float): Int {
-        if (x < 0 || y < 0 || x >= width || y >= height) return -1
-        val c = (x / width * cols).toInt().coerceIn(0, cols - 1)
-        val r = (y / height * rows).toInt().coerceIn(0, rows - 1)
-        return r * cols + c
-    }
-}
-
-/** Per-cell motion for the current hour: unit screen direction, pixel speed and phase color. */
-private class CellMotion(val dx: Float, val dy: Float, val speedPx: Float, val color: Int, val swirl: Boolean)
 
 @Composable
 fun ThermalWindMapScreen(
@@ -390,7 +366,7 @@ fun ThermalWindMapScreen(
                     )
                 }
             } else {
-                standFlow?.let { HudCard(it, hour, mode) }
+                standFlow?.let { HudCard(it, hour, mode, mapBearing = mapViewportState.cameraState?.bearing ?: 0.0) }
             }
             mapIssue?.let { issue ->
                 GlassCard {
@@ -432,6 +408,7 @@ fun ThermalWindMapScreen(
             },
             onTogglePlay = { playing = !playing },
             forecastSwitches = listOfNotNull(state.forecast?.morningSwitchHour, state.forecast?.eveningSwitchHour),
+            phaseAt = { h -> field?.at(h.toDouble())?.phase },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(12.dp),
@@ -480,27 +457,7 @@ fun ThermalWindMapScreen(
 // ───────────────────────── Overlays ─────────────────────────
 
 @Composable
-private fun GlassCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.88f),
-        modifier = modifier.fillMaxWidth(),
-    ) { content() }
-}
-
-@Composable
-private fun RoundGlassButton(onClick: () -> Unit, testTag: String, content: @Composable () -> Unit) {
-    Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.88f),
-        modifier = Modifier.size(44.dp).testTag(testTag),
-    ) {
-        IconButton(onClick = onClick) { content() }
-    }
-}
-
-@Composable
-private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode) {
+private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode, mapBearing: Double) {
     GlassCard(Modifier.testTag("wind_map_hud")) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -532,22 +489,31 @@ private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            ScentDial(flow, Modifier.size(56.dp))
+            ScentDial(flow, Modifier.size(56.dp), mapBearing)
         }
     }
 }
 
-/** Small compass: grey wind arrow, phase-colored thermal arrow, red scent arrow. North is up. */
+/**
+ * Small compass: grey wind arrow, phase-colored thermal arrow, red scent arrow. Turned with the
+ * map ([mapBearing]) so the arrows point the same way as the particles on screen.
+ */
 @Composable
-private fun ScentDial(flow: ThermalHour, modifier: Modifier) {
+internal fun ScentDial(flow: ThermalHour, modifier: Modifier, mapBearing: Double = 0.0) {
     val ring = MaterialTheme.colorScheme.outline
     Canvas(modifier) {
         val c = Offset(size.width / 2f, size.height / 2f)
         val r = size.minDimension / 2f - 2.dp.toPx()
         drawCircle(ring, radius = r, center = c, style = Stroke(1.dp.toPx()))
-        drawDirectionArrow(c, flow.windTowardDegrees, r * 0.5f, WindColor.copy(alpha = 0.7f), 2.dp.toPx())
-        flow.thermalTowardDegrees?.let { drawDirectionArrow(c, it, r * 0.45f, phaseColor(flow.phase), 2.5.dp.toPx()) }
-        drawDirectionArrow(c, flow.scentTowardDegrees, r * 0.85f, ScentColor, 3.dp.toPx())
+        // A ground bearing appears on screen turned by the map's own bearing.
+        drawDirectionArrow(c, flow.windTowardDegrees - mapBearing, r * 0.5f, WindColor.copy(alpha = 0.7f), 2.dp.toPx())
+        flow.thermalTowardDegrees?.let { drawDirectionArrow(c, it - mapBearing, r * 0.45f, phaseColor(flow.phase), 2.5.dp.toPx()) }
+        drawDirectionArrow(c, flow.scentTowardDegrees - mapBearing, r * 0.85f, ScentColor, 3.dp.toPx())
+        // North tick so the dial still reads as a compass when the map is turned.
+        val nRad = Math.toRadians(-mapBearing)
+        val nx = c.x + (r - 1.dp.toPx()) * kotlin.math.sin(nRad).toFloat()
+        val ny = c.y - (r - 1.dp.toPx()) * kotlin.math.cos(nRad).toFloat()
+        drawCircle(Color.White.copy(alpha = 0.85f), radius = 2.5.dp.toPx(), center = Offset(nx, ny))
     }
 }
 
@@ -558,6 +524,7 @@ private fun TimeScrubber(
     onHour: (Float) -> Unit,
     onTogglePlay: () -> Unit,
     forecastSwitches: List<Double>,
+    phaseAt: (Float) -> ThermalPhase?,
     modifier: Modifier = Modifier,
 ) {
     GlassCard(modifier.testTag("wind_map_scrubber")) {
@@ -569,19 +536,16 @@ private fun TimeScrubber(
                         contentDescription = if (playing) "Pause" else "Play the day",
                     )
                 }
-                Column(Modifier.weight(1f)) {
-                    Slider(
-                        value = hour,
-                        onValueChange = onHour,
-                        valueRange = MAP_FIRST_HOUR..MAP_LAST_HOUR,
-                        modifier = Modifier.height(32.dp),
-                    )
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        listOf("4a", "8a", "12p", "4p", "9p").forEach {
-                            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
+                HourTrack(
+                    hour = hour,
+                    onHour = onHour,
+                    first = MAP_FIRST_HOUR,
+                    last = MAP_LAST_HOUR,
+                    phaseAt = phaseAt,
+                    switches = forecastSwitches,
+                    modifier = Modifier.weight(1f).padding(top = 6.dp),
+                    testTag = "wind_map_hour_track",
+                )
             }
             if (forecastSwitches.isNotEmpty()) {
                 Text(
@@ -595,129 +559,8 @@ private fun TimeScrubber(
     }
 }
 
-/**
- * Streaks that flow with the local scent/thermal motion of the ground under them. Particles
- * dim while the map is being dragged (the field is re-sampled when the camera settles).
- */
-@Composable
-private fun ParticleOverlay(
-    grid: GroundGrid?,
-    motions: Array<CellMotion?>,
-    count: Int,
-    lastMoveMs: () -> Long,
-    modifier: Modifier = Modifier,
-) {
-    val currentGrid by rememberUpdatedState(grid)
-    val currentMotions by rememberUpdatedState(motions)
-    val particles = remember(count) { ParticleBuffer(count) }
-    var frame by remember { mutableLongStateOf(0L) }
-    val strokePx = with(LocalDensity.current) { 2.2.dp.toPx() }
-
-    LaunchedEffect(particles) {
-        var last = 0L
-        while (true) {
-            withInfiniteAnimationFrameNanos { now ->
-                val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.05f)
-                last = now
-                val g = currentGrid
-                if (g != null) particles.step(dt, g, currentMotions)
-                frame = now
-            }
-        }
-    }
-
-    BoxWithConstraints(modifier) {
-        Canvas(Modifier.fillMaxSize()) {
-            if (frame < 0L) return@Canvas // reading the frame clock redraws every frame
-            if (currentGrid == null) return@Canvas
-            val moving = System.currentTimeMillis() - lastMoveMs() < 350L
-            val dimming = if (moving) 0.25f else 1f
-            for (i in 0 until particles.size) {
-                val cellIndex = particles.cell[i]
-                if (cellIndex < 0) continue
-                val motion = currentMotions.getOrNull(cellIndex) ?: continue
-                val life = particles.age[i] / particles.life[i]
-                val fade = (if (life < 0.15f) life / 0.15f else if (life > 0.75f) (1f - life) / 0.25f else 1f).coerceIn(0f, 1f)
-                val tail = (6f + motion.speedPx * 0.22f).coerceAtMost(40f)
-                val x = particles.x[i]
-                val y = particles.y[i]
-                drawLine(
-                    color = Color(motion.color).copy(alpha = 0.9f * fade * dimming),
-                    start = Offset(x - particles.vx[i] * tail, y - particles.vy[i] * tail),
-                    end = Offset(x, y),
-                    strokeWidth = strokePx,
-                    cap = StrokeCap.Round,
-                )
-            }
-        }
-    }
-}
-
-/** Struct-of-arrays particle store (no per-frame allocation). */
-private class ParticleBuffer(val size: Int) {
-    val x = FloatArray(size)
-    val y = FloatArray(size)
-    val vx = FloatArray(size)
-    val vy = FloatArray(size)
-    val age = FloatArray(size)
-    val life = FloatArray(size) { 1f }
-    val cell = IntArray(size) { -1 }
-    private val rnd = Random(42)
-
-    fun step(dt: Float, grid: GroundGrid, motions: Array<CellMotion?>) {
-        for (i in 0 until size) {
-            age[i] += dt
-            var c = cell[i]
-            if (c < 0 || age[i] >= life[i]) {
-                respawn(i, grid, motions)
-                continue
-            }
-            val m = motions.getOrNull(c)
-            if (m == null) {
-                respawn(i, grid, motions)
-                continue
-            }
-            var dx = m.dx
-            var dy = m.dy
-            if (m.swirl) {
-                // Switching thermals: scent eddies around instead of travelling.
-                val a = age[i] * 2.4f + i
-                dx = cos(a)
-                dy = sin(a)
-            }
-            vx[i] = dx
-            vy[i] = dy
-            x[i] += dx * m.speedPx * dt
-            y[i] += dy * m.speedPx * dt
-            c = grid.cellAt(x[i], y[i])
-            cell[i] = c
-            if (c < 0 || grid.cells[c] == null) respawn(i, grid, motions)
-        }
-    }
-
-    private fun respawn(i: Int, grid: GroundGrid, motions: Array<CellMotion?>) {
-        repeat(6) {
-            val px = rnd.nextFloat() * grid.width
-            val py = rnd.nextFloat() * grid.height
-            val c = grid.cellAt(px, py)
-            if (c >= 0 && grid.cells[c] != null && motions.getOrNull(c) != null) {
-                x[i] = px
-                y[i] = py
-                cell[i] = c
-                age[i] = 0f
-                life[i] = 2f + rnd.nextFloat() * 2.5f
-                return
-            }
-        }
-        cell[i] = -1
-        age[i] = 0f
-    }
-}
-
 // ───────────────────────── Field sampling ─────────────────────────
 
-private const val GRID_COLS = 9
-private const val GRID_ROWS = 15
 private const val SLOPE_SPACING_M = 60.0
 
 /**
@@ -727,11 +570,11 @@ private const val SLOPE_SPACING_M = 60.0
  * stand's own terrain is used everywhere.
  */
 private fun sampleGround(map: MapboxMap, width: Float, height: Float, fallback: SiteTerrain?): GroundGrid {
-    val cells = arrayOfNulls<GroundCell>(GRID_COLS * GRID_ROWS)
-    for (r in 0 until GRID_ROWS) {
-        for (c in 0 until GRID_COLS) {
-            val px = (c + 0.5f) * width / GRID_COLS
-            val py = (r + 0.5f) * height / GRID_ROWS
+    val cells = arrayOfNulls<GroundCell>(FLOW_GRID_COLS * FLOW_GRID_ROWS)
+    for (r in 0 until FLOW_GRID_ROWS) {
+        for (c in 0 until FLOW_GRID_COLS) {
+            val px = (c + 0.5f) * width / FLOW_GRID_COLS
+            val py = (r + 0.5f) * height / FLOW_GRID_ROWS
             val point = runCatching { map.coordinateForPixel(ScreenCoordinate(px.toDouble(), py.toDouble())) }.getOrNull() ?: continue
             val back = runCatching { map.pixelForCoordinate(point) }.getOrNull() ?: continue
             if (hypot(back.x - px, back.y - py) > 30.0) continue // sky / off-globe
@@ -755,7 +598,7 @@ private fun sampleGround(map: MapboxMap, width: Float, height: Float, fallback: 
                     fallback ?: ThermalMapGeometry.cellTerrain(null, 0.0)
                 }
             }
-            cells[r * GRID_COLS + c] = GroundCell(
+            cells[r * FLOW_GRID_COLS + c] = GroundCell(
                 px = px,
                 py = py,
                 northX = ((pN.x - px) / SLOPE_SPACING_M).toFloat(),
@@ -766,33 +609,7 @@ private fun sampleGround(map: MapboxMap, width: Float, height: Float, fallback: 
             )
         }
     }
-    return GroundGrid(GRID_COLS, GRID_ROWS, width, height, cells)
-}
-
-private fun cellMotion(cell: GroundCell, flow: ThermalHour, mode: ParticleMode, pxPerDp: Float): CellMotion {
-    val (bearing, mph) = when (mode) {
-        ParticleMode.SCENT -> flow.scentTowardDegrees to flow.scentSpeedMph
-        ParticleMode.THERMAL -> (flow.thermalTowardDegrees ?: flow.scentTowardDegrees) to
-            (if (flow.thermalTowardDegrees == null) 0.15 else flow.thermalSpeedMph)
-    }
-    val rad = Math.toRadians(bearing)
-    // Screen direction of a ground bearing = east·sin + north·cos (perspective-correct).
-    var sx = (cell.eastX * sin(rad) + cell.northX * cos(rad)).toFloat()
-    var sy = (cell.eastY * sin(rad) + cell.northY * cos(rad)).toFloat()
-    val len = hypot(sx, sy)
-    val perspective = len
-    if (len > 1e-6f) {
-        sx /= len
-        sy /= len
-    } else {
-        sx = 0f
-        sy = -1f
-    }
-    // Pixels per second: visibly faster for stronger flow; nearer ground (bigger px/m) moves faster.
-    val depth = (perspective / 0.35f).coerceIn(0.45f, 1.6f)
-    val speed = (14f + mph.toFloat() * 22f) * pxPerDp * depth
-    val swirl = flow.phase == ThermalPhase.SWITCHING && abs(flow.tendency) < 0.03 && mph < 1.0
-    return CellMotion(sx, sy, speed, phaseColor(flow.phase).toArgb(), swirl)
+    return GroundGrid(FLOW_GRID_COLS, FLOW_GRID_ROWS, width, height, cells)
 }
 
 // ───────────────────────── Map layers ─────────────────────────

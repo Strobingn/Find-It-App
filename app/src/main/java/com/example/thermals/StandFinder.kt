@@ -43,6 +43,38 @@ class ElevationGrid(
 
     fun at(r: Int, c: Int): Double = meters[r.coerceIn(0, size - 1) * size + c.coerceIn(0, size - 1)]
 
+    /** Bilinear elevation at ([lat], [lon]), or null outside the grid. */
+    fun elevationAt(lat: Double, lon: Double): Double? {
+        val half = (size - 1) / 2.0
+        val north = (lat - centerLat) * 111_320.0
+        val east = (lon - centerLon) * 111_320.0 * cos(Math.toRadians(centerLat)).coerceAtLeast(0.01)
+        val r = half - north / spacingMeters
+        val c = half + east / spacingMeters
+        if (r < 0 || c < 0 || r > size - 1 || c > size - 1) return null
+        val r0 = r.toInt().coerceAtMost(size - 2)
+        val c0 = c.toInt().coerceAtMost(size - 2)
+        val fr = r - r0
+        val fc = c - c0
+        val top = at(r0, c0) * (1 - fc) + at(r0, c0 + 1) * fc
+        val bottom = at(r0 + 1, c0) * (1 - fc) + at(r0 + 1, c0 + 1) * fc
+        return top * (1 - fr) + bottom * fr
+    }
+
+    /** Uphill bearing and slope at ([lat], [lon]) for the thermal model, or null outside the grid. */
+    fun terrainAt(lat: Double, lon: Double): SiteTerrain? {
+        val step = spacingMeters
+        val (nLat, nLon) = ThermalMapGeometry.destination(lat, lon, 0.0, step)
+        val (sLat, sLon) = ThermalMapGeometry.destination(lat, lon, 180.0, step)
+        val (eLat, eLon) = ThermalMapGeometry.destination(lat, lon, 90.0, step)
+        val (wLat, wLon) = ThermalMapGeometry.destination(lat, lon, 270.0, step)
+        val zN = elevationAt(nLat, nLon) ?: return null
+        val zS = elevationAt(sLat, sLon) ?: return null
+        val zE = elevationAt(eLat, eLon) ?: return null
+        val zW = elevationAt(wLat, wLon) ?: return null
+        val (uphill, slope) = ThermalMapGeometry.slopeFromSamples(zN, zS, zE, zW, step)
+        return ThermalMapGeometry.cellTerrain(uphill, slope)
+    }
+
     /** (lat, lon) of a grid node. */
     fun latLon(r: Int, c: Int): Pair<Double, Double> {
         val half = (size - 1) / 2.0
