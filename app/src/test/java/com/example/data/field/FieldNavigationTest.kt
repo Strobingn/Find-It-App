@@ -21,6 +21,15 @@ class FieldNavigationTest {
     }
 
     @Test
+    fun distanceMetersHandlesExtremeLatitudeRoundoff() {
+        val distance = FieldNavigation.distanceMeters(-82.0, -180.0, 82.0, 0.0)
+
+        assertTrue(distance.isFinite())
+        assertTrue(distance > 0.0)
+        assertTrue(distance < 20_000_000.0)
+    }
+
+    @Test
     fun turnInstructionWrapsAcrossNorth() {
         assertEquals(20f, FieldNavigation.signedTurnDegrees(350f, 10f), 0.1f)
         assertEquals(-20f, FieldNavigation.signedTurnDegrees(10f, 350f), 0.1f)

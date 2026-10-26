@@ -136,7 +136,8 @@ object GeoSpatialLibrary {
         val a = sin(dLat / 2).let { it * it } +
             cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
             sin(dLon / 2).let { it * it }
-        return 6_371_000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
+        val clampedA = a.coerceIn(0.0, 1.0)
+        return 6_371_000.0 * 2 * atan2(sqrt(clampedA), sqrt(1.0 - clampedA))
     }
 
     /** Projects valid WGS84 coordinates into their natural UTM zone. */

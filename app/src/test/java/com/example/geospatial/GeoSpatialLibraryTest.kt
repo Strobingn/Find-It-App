@@ -27,6 +27,15 @@ class GeoSpatialLibraryTest {
     }
 
     @Test
+    fun geodesicDistanceStaysFiniteForExtremes() {
+        val distance = GeoSpatialLibrary.calculateGeodesicDistance(-82.0, -180.0, 82.0, 0.0)
+
+        assertTrue(distance.isFinite())
+        assertTrue(distance > 0.0)
+        assertTrue(distance < 20_000_000.0)
+    }
+
+    @Test
     fun geographicToGridReturnsNullWithoutBounds() {
         val local = GeoSpatialLibrary.localGrid("Imported", 80, 60, 2.0)
 

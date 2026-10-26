@@ -45,7 +45,8 @@ object FieldNavigation {
         val lat2 = degreesToRadians(toLatitude)
         val haversine = sin(dLat / 2).let { it * it } +
             cos(lat1) * cos(lat2) * sin(dLon / 2).let { it * it }
-        return 2 * EARTH_RADIUS_METERS * atan2(sqrt(haversine), sqrt((1 - haversine).coerceAtLeast(0.0)))
+        val clampedHaversine = haversine.coerceIn(0.0, 1.0)
+        return 2 * EARTH_RADIUS_METERS * atan2(sqrt(clampedHaversine), sqrt(1.0 - clampedHaversine))
     }
 
     fun bearingDegrees(
