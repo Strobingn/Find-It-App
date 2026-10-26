@@ -24,6 +24,8 @@ data class StandFinderState(
     val picks: List<StandPick> = emptyList(),
     val source: String? = null,
     val selectedRank: Int? = null,
+    /** Elevation of the search square, kept so the map can draw terrain-aware wind. */
+    val grid: ElevationGrid? = null,
 ) {
     val selected: StandPick? get() = picks.firstOrNull { it.rank == selectedRank }
 }
@@ -50,6 +52,7 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
             val obstacles: MappedObstacles
             try {
                 val grid = service.fetchGrid(lat, lon)
+                _state.update { it.copy(grid = grid) }
                 // Roads/houses are best-effort: don't let a slow Overpass hold up the picks.
                 obstacles = withTimeoutOrNull(OBSTACLE_WAIT_MS) { obstaclesJob.await() } ?: run {
                     obstaclesJob.cancel()

@@ -9,6 +9,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.core.content.ContextCompat
 import com.example.thermals.StandFinder
+import com.example.thermals.ElevationGrid
+import com.example.thermals.SiteTerrain
+import com.example.thermals.ThermalHour
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
+import com.google.android.gms.maps.Projection
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
@@ -74,8 +90,6 @@ import com.google.android.gms.maps.MapsInitializer
 import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.Dash
-import com.google.android.gms.maps.model.Gap
 import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
@@ -173,7 +187,46 @@ fun StandFinderScreen(
         )
     }
 
-    Box(modifier.fillMaxSize().padding(padding).testTag("stand_finder_screen")) {
+    // ── Wind on the map: the same terrain-aware scent particles as the Wind tab, at the hour picked here.
+    var hour by rememberSaveable { mutableFloatStateOf(thermal.selectedHour.toFloat().coerceIn(STAND_FIRST_HOUR, STAND_LAST_HOUR)) }
+    LaunchedEffect(thermal.selectedHour) {
+        if (hour.roundToInt() != thermal.selectedHour) hour = thermal.selectedHour.toFloat().coerceIn(STAND_FIRST_HOUR, STAND_LAST_HOUR)
+    }
+    val inputs = remember(thermal) { ThermalWindViewModel.buildInputs(thermal) }
+    val field = remember(inputs) { inputs?.let(ThermalWindEngine::flowField) }
+    val hourKey = (hour * 4).roundToInt()
+    val flowHere: ThermalHour? = remember(field, hourKey) { field?.at(hourKey / 4.0) }
+
+    val density = LocalDensity.current
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    var headerHeight by remember { mutableStateOf(0) }
+    var cardsHeight by remember { mutableStateOf(0) }
+    var lastMoveMs by remember { mutableLongStateOf(0L) }
+    var settleTick by remember { mutableStateOf(0) }
+    LaunchedEffect(cameraPositionState) {
+        snapshotFlow { cameraPositionState.isMoving }.collect { moving ->
+            lastMoveMs = System.currentTimeMillis()
+            if (!moving) settleTick++
+        }
+    }
+    var ground by remember { mutableStateOf<GroundGrid?>(null) }
+    LaunchedEffect(settleTick, mapLoaded, boxSize, finder.grid, inputs?.terrain) {
+        val projection = cameraPositionState.projection
+        if (!mapLoaded || projection == null || boxSize.width <= 0 || boxSize.height <= 0) return@LaunchedEffect
+        ground = sampleGoogleGround(projection, boxSize.width.toFloat(), boxSize.height.toFloat(), finder.grid, inputs?.terrain)
+    }
+    val pxPerDp = density.density
+    val motions: Array<CellMotion?> = remember(ground, field, hourKey) {
+        val g = ground
+        val f = field
+        if (g == null || f == null) {
+            arrayOfNulls(0)
+        } else {
+            Array(g.cells.size) { i -> g.cells[i]?.let { cell -> cellMotion(cell, f.at(hourKey / 4.0, cell.terrain), ParticleMode.SCENT, pxPerDp) } }
+        }
+    }
+
+    Box(modifier.fillMaxSize().padding(padding).onSizeChanged { boxSize = it }.testTag("stand_finder_screen")) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
@@ -185,7 +238,12 @@ fun StandFinderScreen(
                 myLocationButtonEnabled = locationGranted,
             ),
             // Keeps Google's compass, my-location button and logo clear of the overlays.
-            contentPadding = PaddingValues(top = 120.dp, bottom = if (finder.picks.isEmpty()) 16.dp else 130.dp),
+            contentPadding = with(density) {
+                PaddingValues(
+                    top = headerHeight.toDp() + 16.dp,
+                    bottom = if (finder.picks.isEmpty()) 12.dp else cardsHeight.toDp() + 16.dp,
+                )
+            },
             onMapLoaded = { mapLoaded = true },
             onMapLongClick = { latLng -> thermalViewModel.useLocation(latLng.latitude, latLng.longitude, "Map pin") },
         ) {
@@ -212,13 +270,14 @@ fun StandFinderScreen(
                     )
                 }
                 pick.scentToward?.let { toward ->
-                    val (eLat, eLon) = ThermalMapGeometry.destination(pick.latitude, pick.longitude, toward, 100.0) // ~330 ft
-                    Polyline(
-                        points = listOf(position, LatLng(eLat, eLon)),
-                        color = ScentColor,
-                        width = 8f,
-                        pattern = listOf(Dash(24f), Gap(14f)),
-                    )
+                    // Arrow showing where scent drifts from the stand during its best sit (~400 ft).
+                    val (eLat, eLon) = ThermalMapGeometry.destination(pick.latitude, pick.longitude, toward, 120.0)
+                    val tip = LatLng(eLat, eLon)
+                    val (lLat, lLon) = ThermalMapGeometry.destination(eLat, eLon, toward + 150.0, 28.0)
+                    val (rLat, rLon) = ThermalMapGeometry.destination(eLat, eLon, toward - 150.0, 28.0)
+                    val arrow = listOf(position, tip, LatLng(lLat, lLon), tip, LatLng(rLat, rLon))
+                    Polyline(points = arrow, color = Color.White.copy(alpha = 0.85f), width = 13f, zIndex = 1f)
+                    Polyline(points = arrow, color = ScentColor, width = 7f, zIndex = 2f)
                 }
                 val icon = remember(pick.rank, pick.kind) {
                     runCatching { numberedPin(pick.rank, if (pick.kind == StandPick.Kind.AREA) AreaPinColor else StandPinColor) }.getOrNull()
@@ -230,36 +289,79 @@ fun StandFinderScreen(
                     icon = icon,
                     onClick = {
                         finderViewModel.select(pick.rank)
+                        sitHour(pick.bestTime)?.let { h ->
+                            hour = h
+                            thermalViewModel.selectHour(h.roundToInt())
+                        }
                         true
                     },
                 )
             } }
         }
 
-        // Top: search button + status.
+        if (flowHere != null) {
+            ParticleOverlay(
+                grid = ground,
+                motions = motions,
+                count = STAND_PARTICLES,
+                lastMoveMs = { lastMoveMs },
+                alpha = 0.85f,
+                modifier = Modifier.fillMaxSize().testTag("stand_wind_particles"),
+            )
+        }
+
+        // Top: wind at the chosen hour, status, search.
         Column(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(12.dp),
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(12.dp).onSizeChanged { headerHeight = it.height },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            GlassPanel {
-                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            GlassCard {
+                Column(Modifier.padding(start = 12.dp, end = 10.dp, top = 10.dp, bottom = 4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Best stands & hunt areas", style = MaterialTheme.typography.titleMedium)
+                        if (flowHere != null) {
+                            ScentDial(flowHere, Modifier.size(46.dp).testTag("stand_wind_dial"), mapBearing = cameraPositionState.position.bearing.toDouble())
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                            if (flowHere != null) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(8.dp).clip(CircleShape).background(phaseColor(flowHere.phase)))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "${ThermalWindEngine.formatHour(hourKey / 4.0)} · ${flowHere.phase.label}",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(
+                                    "Scent → %s %.1f mph · wind from %s %.0f mph".format(
+                                        ThermalWindEngine.compass(flowHere.scentTowardDegrees),
+                                        flowHere.scentSpeedMph,
+                                        ThermalWindEngine.compass(ThermalWindEngine.normalize(flowHere.windTowardDegrees + 180.0)),
+                                        flowHere.groundWindMph,
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.testTag("stand_wind_summary"),
+                                )
+                            } else {
+                                Text("Best stands & hunt areas", style = MaterialTheme.typography.titleSmall)
+                            }
                             Text(
                                 when {
                                     lat == null || lon == null -> "Long-press the map on your property, or set a location in Thermals."
                                     finder.running -> finder.stage ?: "Working…"
-                                    finder.source != null -> "${finder.picks.size} picks · chosen by ${finder.source}"
+                                    finder.source != null -> "${finder.picks.size} picks · ${finder.source}"
                                     else -> "Scans ½ mile of terrain, thermals and wind, then the AI picks spots."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
+                                maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        Spacer(Modifier.width(4.dp))
                         IconButton(
                             onClick = {
                                 if (locationGranted) {
@@ -280,8 +382,28 @@ fun StandFinderScreen(
                             ) { Text(if (finder.picks.isEmpty()) "Find" else "Again") }
                         }
                     }
+                    if (flowHere != null) {
+                        HourTrack(
+                            hour = hour,
+                            onHour = {
+                                hour = it
+                                thermalViewModel.selectHour(it.roundToInt())
+                            },
+                            first = STAND_FIRST_HOUR,
+                            last = STAND_LAST_HOUR,
+                            phaseAt = { h -> field?.at(h.toDouble())?.phase },
+                            switches = listOfNotNull(thermal.forecast?.morningSwitchHour, thermal.forecast?.eveningSwitchHour),
+                            height = 36.dp,
+                            testTag = "stand_hour_track",
+                        )
+                    }
                     finder.error?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 6.dp),
+                        )
                     }
                 }
             }
@@ -290,12 +412,24 @@ fun StandFinderScreen(
         // Bottom: swipeable pick cards.
         if (finder.picks.isNotEmpty()) {
             LazyRow(
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 12.dp).testTag("stand_pick_cards"),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp)
+                    .onSizeChanged { cardsHeight = it.height }
+                    .testTag("stand_pick_cards"),
                 contentPadding = PaddingValues(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(finder.picks, key = { it.rank }) { pick ->
-                    PickCard(pick, selected = finder.selectedRank == pick.rank) { finderViewModel.select(pick.rank) }
+                    PickCard(pick, selected = finder.selectedRank == pick.rank) {
+                        finderViewModel.select(pick.rank)
+                        // Show the wind for that sit.
+                        sitHour(pick.bestTime)?.let { h ->
+                            hour = h
+                            thermalViewModel.selectHour(h.roundToInt())
+                        }
+                    }
                 }
             }
         }
@@ -368,21 +502,12 @@ fun StandFinderScreen(
 }
 
 @Composable
-private fun GlassPanel(content: @Composable () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.9f),
-        modifier = Modifier.fillMaxWidth(),
-    ) { content() }
-}
-
-@Composable
 private fun PickCard(pick: StandPick, selected: Boolean, onClick: () -> Unit) {
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = if (selected) 1f else 0.9f),
-        border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
-        modifier = Modifier.width(230.dp).clickable(onClick = onClick),
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = if (selected) 0.98f else 0.88f),
+        border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, if (pick.kind == StandPick.Kind.AREA) AreaPinColor else StandPinColor) else null,
+        modifier = Modifier.width(250.dp).clickable(onClick = onClick).testTag("stand_pick_${pick.rank}"),
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -405,8 +530,12 @@ private fun PickCard(pick: StandPick, selected: Boolean, onClick: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text(pick.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (pick.bestTime.isNotBlank()) {
-                Text(pick.bestTime, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            val meta = listOfNotNull(
+                pick.bestTime.ifBlank { null },
+                pick.scentToward?.let { "scent → ${ThermalWindEngine.compass(it)}" },
+            ).joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Text(meta, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Text(pick.why, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
@@ -441,4 +570,58 @@ private fun dotIcon(color: Color, sizePx: Int): BitmapDescriptor {
     paint.color = color.toArgb()
     canvas.drawCircle(sizePx / 2f, sizePx / 2f, sizePx / 2f - 4f, paint)
     return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+private const val STAND_FIRST_HOUR = 4f
+private const val STAND_LAST_HOUR = 21f
+private const val STAND_PARTICLES = 260
+private const val DIRECTION_SPACING_M = 200.0
+
+/** Hour to show for a pick's "best time" — morning sits at 7 AM, midday at noon, evening at 5 PM. */
+internal fun sitHour(bestTime: String): Float? = when {
+    bestTime.contains("morning", ignoreCase = true) || bestTime.contains("dawn", ignoreCase = true) -> 7f
+    bestTime.contains("evening", ignoreCase = true) || bestTime.contains("dusk", ignoreCase = true) -> 17f
+    bestTime.contains("midday", ignoreCase = true) || bestTime.contains("noon", ignoreCase = true) -> 12f
+    else -> null
+}
+
+/**
+ * The ground under a grid of screen points on the Google map: which way north/east run on screen
+ * there, and the slope from the stand search's elevation grid (the stand's own terrain outside it).
+ */
+private fun sampleGoogleGround(
+    projection: Projection,
+    width: Float,
+    height: Float,
+    elevation: ElevationGrid?,
+    fallback: SiteTerrain?,
+): GroundGrid {
+    val cells = arrayOfNulls<GroundCell>(FLOW_GRID_COLS * FLOW_GRID_ROWS)
+    for (r in 0 until FLOW_GRID_ROWS) {
+        for (c in 0 until FLOW_GRID_COLS) {
+            val px = (c + 0.5f) * width / FLOW_GRID_COLS
+            val py = (r + 0.5f) * height / FLOW_GRID_ROWS
+            val here = runCatching { projection.fromScreenLocation(android.graphics.Point(px.roundToInt(), py.roundToInt())) }.getOrNull() ?: continue
+            val (nLat, nLon) = ThermalMapGeometry.destination(here.latitude, here.longitude, 0.0, DIRECTION_SPACING_M)
+            val (eLat, eLon) = ThermalMapGeometry.destination(here.latitude, here.longitude, 90.0, DIRECTION_SPACING_M)
+            val pN = runCatching { projection.toScreenLocation(LatLng(nLat, nLon)) }.getOrNull() ?: continue
+            val pE = runCatching { projection.toScreenLocation(LatLng(eLat, eLon)) }.getOrNull() ?: continue
+            val northX = ((pN.x - px) / DIRECTION_SPACING_M).toFloat()
+            val northY = ((pN.y - py) / DIRECTION_SPACING_M).toFloat()
+            if (hypot(northX, northY) < 1e-4f) continue
+            val terrain = elevation?.terrainAt(here.latitude, here.longitude)
+                ?: fallback
+                ?: ThermalMapGeometry.cellTerrain(null, 0.0)
+            cells[r * FLOW_GRID_COLS + c] = GroundCell(
+                px = px,
+                py = py,
+                northX = northX,
+                northY = northY,
+                eastX = ((pE.x - px) / DIRECTION_SPACING_M).toFloat(),
+                eastY = ((pE.y - py) / DIRECTION_SPACING_M).toFloat(),
+                terrain = terrain,
+            )
+        }
+    }
+    return GroundGrid(FLOW_GRID_COLS, FLOW_GRID_ROWS, width, height, cells)
 }
