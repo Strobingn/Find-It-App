@@ -98,9 +98,110 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+
+  # Opens every screen of the real app on an emulator with Google Play services. A screen that
+  # crashes on open fails this job, and no APK is built from that commit.
+  smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create local.properties
+        shell: bash
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_REASONING_EFFORT: ${{ vars.GROK_REASONING_EFFORT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          FINDIT_UPDATE_TOKEN: ${{ secrets.FINDIT_UPDATE_TOKEN }}
+        run: |
+          {
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+            printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'MAPBOX_ACCESS_TOKEN=%s\n' "$MAPBOX_ACCESS_TOKEN"
+            printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
+            printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
+            printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
+            printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'XAI_API_KEY=%s\n' "$XAI_API_KEY"
+            printf 'GROK_MODEL=%s\n' "${GROK_MODEL:-grok-4.7}"
+            printf 'GROK_REASONING_EFFORT=%s\n' "${GROK_REASONING_EFFORT:-medium}"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
+            printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
+            printf 'FINDIT_UPDATE_TOKEN=%s\n' "$FINDIT_UPDATE_TOKEN"
+          } > "$GITHUB_WORKSPACE/local.properties"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Ensure .env for secrets plugin
+        run: |
+          if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env
+          fi
+          touch .env
+
+      - name: Use committed debug keystore
+        run: |
+          test -s ci/findit-debug.keystore
+          mkdir -p "$HOME/.android"
+          cp -f ci/findit-debug.keystore "$HOME/.android/debug.keystore"
+          cp -f ci/findit-debug.keystore debug.keystore
+          chmod +x ./gradlew
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Open every screen on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            adb logcat -c
+            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.example.AppSmokeTest --stacktrace --no-configuration-cache || (adb logcat -d > smoke-logcat.txt; exit 1)
+
+      - name: Upload crash log and test report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-test-${{ github.run_number }}
+          path: |
+            smoke-logcat.txt
+            app/build/reports/androidTests/connected/
+          if-no-files-found: warn
+          retention-days: 14
+
   release:
     if: github.event_name == 'push'
-    needs: test
+    needs: [test, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -265,7 +366,7 @@ jobs:
   # PR / manual runs: build the APK and attach it as a workflow artifact (no GitHub Release).
   apk-preview:
     if: github.event_name != 'push'
-    needs: test
+    needs: [test, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read
