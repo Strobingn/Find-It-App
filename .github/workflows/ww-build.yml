@@ -1,0 +1,113 @@
+name: WW Find It APK
+
+# Wildlife Whisperer edition build: every push to this branch runs unit tests, then
+# builds the signed APK and attaches it as a downloadable workflow artifact.
+# Manual dispatch works too (Actions tab → WW Find It APK → Run workflow).
+on:
+  push:
+    branches: [wildlife-whisperer-edition]
+  workflow_dispatch:
+
+env:
+  APPLICATION_ID: com.wildlifewhisperer.findit
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create local.properties before Gradle setup
+        shell: bash
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          MAPBOX_ACCESS_TOKEN: ${{ secrets.MAPBOX_ACCESS_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_REASONING_EFFORT: ${{ vars.GROK_REASONING_EFFORT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          FINDIT_UPDATE_TOKEN: ${{ secrets.FINDIT_UPDATE_TOKEN }}
+        run: |
+          {
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+            printf 'MAPS_API_KEY=%s\n' "$MAPS_API_KEY"
+            printf 'MAPBOX_ACCESS_TOKEN=%s\n' "$MAPBOX_ACCESS_TOKEN"
+            printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
+            printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
+            printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
+            printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'XAI_API_KEY=%s\n' "$XAI_API_KEY"
+            printf 'GROK_MODEL=%s\n' "${GROK_MODEL:-grok-4.7}"
+            printf 'GROK_REASONING_EFFORT=%s\n' "${GROK_REASONING_EFFORT:-medium}"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
+            printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
+            printf 'FINDIT_UPDATE_TOKEN=%s\n' "$FINDIT_UPDATE_TOKEN"
+          } > "$GITHUB_WORKSPACE/local.properties"
+          touch .env
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Use committed debug keystore
+        run: |
+          test -s ci/findit-debug.keystore
+          mkdir -p "$HOME/.android"
+          cp -f ci/findit-debug.keystore "$HOME/.android/debug.keystore"
+          cp -f ci/findit-debug.keystore debug.keystore
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest --stacktrace --no-configuration-cache 2>&1 | tee unit-test.log
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ww-unit-test-log-${{ github.run_number }}
+          path: unit-test.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build WW Find It APK (signed with committed debug keystore)
+        env:
+          STORE_PASSWORD: android
+          KEY_ALIAS: androiddebugkey
+          KEY_PASSWORD: android
+        run: |
+          export VERSION_CODE=$((2000000 + ${{ github.run_number }}))
+          export VERSION_NAME="2.0.${{ github.run_number }}-ww"
+          ./gradlew assembleRelease --stacktrace --no-configuration-cache
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          test -n "$APK"
+          mkdir -p out
+          DEST="out/ww-findit-${{ github.run_number }}.apk"
+          cp "$APK" "$DEST"
+          sha256sum "$DEST" | awk '{print $1}' > out/ww-findit.sha256
+          echo "Built $DEST (app-id: $APPLICATION_ID)"
+
+      - name: Upload WW Find It APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: ww-findit-apk
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
