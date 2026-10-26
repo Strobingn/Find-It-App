@@ -181,8 +181,8 @@ fun MapboxTerrainMapScreen(
     modifier: Modifier = Modifier,
 ) {
     val token = BuildConfig.MAPBOX_ACCESS_TOKEN
-    if (token.isBlank()) {
-        MapboxTokenMissing(modifier)
+    if (token.isBlank() || !token.startsWith("pk.")) {
+        MapboxTokenMissing(modifier, invalidToken = token.isNotBlank())
         return
     }
     // Must be set before the first MapView is created.
@@ -521,14 +521,24 @@ fun MapboxTerrainMapScreen(
 }
 
 @Composable
-private fun MapboxTokenMissing(modifier: Modifier) {
+private fun MapboxTokenMissing(modifier: Modifier, invalidToken: Boolean = false) {
     Box(modifier.padding(16.dp), contentAlignment = Alignment.Center) {
         Card {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Mapbox token needed", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    "Add your public Mapbox token (starts with pk.) as MAPBOX_ACCESS_TOKEN in " +
-                        "local.properties or .env, then rebuild the app.",
+                    if (invalidToken) "Mapbox token is invalid" else "Mapbox token needed",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (invalidToken) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (invalidToken) {
+                        "MAPBOX_ACCESS_TOKEN must be a PUBLIC Mapbox token starting with \"pk.\". " +
+                            "A secret (sk.) token cannot load maps in an app — swap it, then rebuild."
+                    } else {
+                        "Add your public Mapbox token (starts with pk.) as MAPBOX_ACCESS_TOKEN in " +
+                            "local.properties or .env, then rebuild the app."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
