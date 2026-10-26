@@ -94,6 +94,7 @@ fun HomeHubScreen(
     val workspaceCards = listOf(
         AppDestination.TERRAIN,
         AppDestination.FIELD,
+        AppDestination.THERMALS,
         AppDestination.AI,
         AppDestination.LIBRARY,
         AppDestination.MAP,

@@ -1,6 +1,7 @@
 package com.example.ui
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CenterFocusStrong
@@ -43,6 +44,13 @@ enum class AppDestination(
         title = "Field finds",
         subtitle = "Targets, digs, GPS, boundaries",
         icon = Icons.Default.Flag,
+        primary = true,
+    ),
+    THERMALS(
+        label = "Thermals",
+        title = "Thermal wind",
+        subtitle = "Hour-by-hour scent drift and AI hunt plan",
+        icon = Icons.Default.Air,
         primary = true,
     ),
     AI(

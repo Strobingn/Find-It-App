@@ -87,6 +87,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
+import com.example.ui.thermals.ThermalWindScreen
 import com.example.R
 import android.media.AudioManager
 import android.media.ToneGenerator
@@ -243,6 +244,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
                 onFocusModeChanged = { terrainFocusMode.value = it },
             )
             AppDestination.FIELD -> FindsTab(viewModel, padding)
+            AppDestination.THERMALS -> ThermalsTab(viewModel, padding)
             AppDestination.AI -> GeminiTab(viewModel, padding)
             AppDestination.LIBRARY -> ImportTab(viewModel, padding) {
                 navigate(AppDestination.TERRAIN)
@@ -1199,6 +1201,15 @@ private fun LidarAreaTab(
     LidarAreaPickerMapScreen(
         onAreaSelected = onAreaSelected,
         modifier = Modifier.fillMaxSize().padding(padding),
+    )
+}
+
+@Composable
+private fun ThermalsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    ThermalWindScreen(
+        padding = padding,
+        siteMetadata = metadata.takeIf { it.isGeoreferenced },
     )
 }
 
