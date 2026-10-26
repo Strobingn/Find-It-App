@@ -87,6 +87,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
+import com.example.ui.ios.IosNavBar
+import com.example.ui.ios.IosTabBar
+import com.example.ui.ios.IosTabItem
 import com.example.ui.thermals.ThermalWindScreen
 import com.example.R
 import android.media.AudioManager
@@ -131,11 +134,11 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-/** Kept for layout unit tests; primary nav always shows labels now (5 destinations). */
+/** Kept for layout unit tests; the iOS-style tab bar always shows small labels. */
 internal fun usesCompactBottomNavigation(smallestScreenWidthDp: Int): Boolean = smallestScreenWidthDp < 600
 
 /**
- * Modern shell: 5 primary bottom destinations + secondary full screens opened from Home cards.
+ * iOS-style shell: slim tab bar of primary destinations + secondary screens opened from Home rows.
  * Each major workflow has its own tab or card surface.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -159,76 +162,23 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxSize().testTag("main_scaffold"),
         topBar = {
             if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME) {
-                CenterAlignedTopAppBar(
-                    title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                current.title,
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Text(
-                                current.subtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    },
-                    navigationIcon = {
-                        if (!isPrimary) {
-                            IconButton(
-                                onClick = { navigate(AppDestination.HOME) },
-                                modifier = Modifier.testTag("nav_back_home"),
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Home")
-                            }
-                        }
-                    },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    ),
+                IosNavBar(
+                    title = current.title,
+                    backLabel = if (isPrimary) null else AppDestination.HOME.label,
+                    onBack = if (isPrimary) null else ({ navigate(AppDestination.HOME) }),
+                    backTestTag = "nav_back_home",
                 )
             }
         },
         bottomBar = {
             if (!hideChrome) {
-                Surface(
-                    shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-                    shadowElevation = 12.dp,
-                    tonalElevation = 3.dp,
+                IosTabBar(
+                    items = primaryNav.map { IosTabItem(it.name.lowercase(), it.label, it.icon) },
+                    // Secondary screens (Map, Tools, …) highlight Home as the hub.
+                    selectedKey = (if (current.primary) current else AppDestination.HOME).name.lowercase(),
+                    onSelect = { item -> navigate(AppDestination.valueOf(item.key.uppercase())) },
                     modifier = Modifier.testTag("primary_nav_bar"),
-                ) {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                        tonalElevation = 0.dp,
-                    ) {
-                        primaryNav.forEach { tab ->
-                            // Secondary screens (Map, Tools, …) highlight Home as the hub.
-                            val selected = current == tab || (!current.primary && tab == AppDestination.HOME)
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = { navigate(tab) },
-                                icon = {
-                                    Icon(
-                                        tab.icon,
-                                        contentDescription = tab.label,
-                                        modifier = Modifier.width(26.dp).height(26.dp),
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        tab.label,
-                                        maxLines = 1,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                    )
-                                },
-                                alwaysShowLabel = true,
-                                modifier = Modifier.testTag("nav_${tab.name.lowercase()}"),
-                            )
-                        }
-                    }
-                }
+                )
             }
         },
     ) { padding ->
