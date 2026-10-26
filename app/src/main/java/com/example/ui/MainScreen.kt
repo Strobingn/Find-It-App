@@ -88,6 +88,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.Switch
 import androidx.compose.ui.draw.clip
@@ -1398,6 +1399,7 @@ private fun ImportTab(
     val offlineMessage by viewModel.offlineBasemapMessage.collectAsStateWithLifecycle()
     val offlineDownloading by viewModel.offlineBasemapDownloading.collectAsStateWithLifecycle()
     val deviceScanning by com.example.data.DeviceLidarScanner.scanning.collectAsStateWithLifecycle()
+    var showBasemaps by rememberSaveable { mutableStateOf(false) }
     androidx.compose.material3.pulltorefresh.PullToRefreshBox(
         isRefreshing = deviceScanning,
         onRefresh = { com.example.ui.components.DeviceLidarScanRequests.request() },
@@ -1420,26 +1422,24 @@ private fun ImportTab(
                 .padding(start = 16.dp, top = 12.dp, end = 16.dp),
         )
 
-        OfflineBasemapManager(
-            suggestedName = metadata.siteName,
-            regions = offlineRegions,
-            plan = offlinePlan,
-            progress = offlineProgress,
-            isDownloading = offlineDownloading,
-            message = offlineMessage,
-            onEstimate = viewModel::estimateOfflineBasemapRegion,
-            onDownload = viewModel::downloadOfflineBasemapRegion,
-            onCancel = viewModel::cancelOfflineBasemapDownload,
-            onOpen = {
-                viewModel.openOfflineBasemapRegion(it)
-                onImported()
-            },
-            onRetry = viewModel::retryOfflineBasemapRegion,
-            onDelete = viewModel::deleteOfflineBasemapRegion,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp),
-        )
+        IosSection(
+            header = "Offline",
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            val ready = offlineRegions.count { it.status == com.example.data.basemap.OfflineBasemapStatus.READY }
+            IosRow(
+                title = "Offline basemaps",
+                subtitle = when {
+                    offlineDownloading -> "Downloading…"
+                    ready > 0 -> "$ready region${if (ready == 1) "" else "s"} ready"
+                    else -> "Save map tiles for areas with no signal"
+                },
+                icon = Icons.Default.Map,
+                showChevron = true,
+                onClick = { showBasemaps = true },
+                modifier = Modifier.testTag("library_basemaps_row"),
+            )
+        }
 
         SurveyLayerImporter(
             layers = surveyLayers,
@@ -1470,6 +1470,29 @@ private fun ImportTab(
             },
         )
     }
+    }
+    if (showBasemaps) {
+        IosSheet(title = "Offline basemaps", onDismiss = { showBasemaps = false }) {
+            OfflineBasemapManager(
+                suggestedName = metadata.siteName,
+                regions = offlineRegions,
+                plan = offlinePlan,
+                progress = offlineProgress,
+                isDownloading = offlineDownloading,
+                message = offlineMessage,
+                onEstimate = viewModel::estimateOfflineBasemapRegion,
+                onDownload = viewModel::downloadOfflineBasemapRegion,
+                onCancel = viewModel::cancelOfflineBasemapDownload,
+                onOpen = {
+                    viewModel.openOfflineBasemapRegion(it)
+                    showBasemaps = false
+                    onImported()
+                },
+                onRetry = viewModel::retryOfflineBasemapRegion,
+                onDelete = viewModel::deleteOfflineBasemapRegion,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 

@@ -1,5 +1,9 @@
 package com.example.ui.components
 
+import com.example.ui.ios.IosRow
+import com.example.ui.ios.IosSection
+import com.example.ui.ios.IosSheet
+import com.example.ui.ios.IosToolbarItem
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -58,6 +62,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -408,90 +413,97 @@ fun TargetLoggerPanel(
         }
     }
 
+    var showFieldTools by remember { mutableStateOf(false) }
+    val recordedTrailPoints = breadcrumbTracks.sumOf { it.points.size }
+
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-            modifier = Modifier.fillMaxWidth(),
+        // Primary action stays big; everything else is a slim toolbar or lives in the Field tools sheet,
+        // so the list of finds gets the screen.
+        Button(
+            onClick = onLogSignal,
+            modifier = Modifier.fillMaxWidth().height(50.dp).testTag("log_signal_button"),
         ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Field finds", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "Current grid position: ${currentSweepX.toInt()}, ${currentSweepY.toInt()}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Icon(Icons.Default.AddLocationAlt, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Log current position")
+        }
+        Text(
+            "Grid ${currentSweepX.toInt()}, ${currentSweepY.toInt()} · only search land you have permission to access. LiDAR is not ownership or metal proof.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag("ethics_sticky_mark"),
+        )
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth().testTag("field_toolbar"),
+        ) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                IosToolbarItem(
+                    "Tools",
+                    Icons.Default.Tune,
+                    modifier = Modifier.testTag("field_tools_button"),
+                ) { showFieldTools = true }
+                IosToolbarItem(
+                    if (isBreadcrumbRecording) "Pause trail" else "Trail",
+                    Icons.Default.Flag,
+                    active = isBreadcrumbRecording,
+                    modifier = Modifier.testTag("breadcrumb_record_button"),
+                    onClick = if (isBreadcrumbRecording) onPauseBreadcrumb else onStartBreadcrumb,
                 )
-                Text(
-                    "Ethics: only search land you have permission to access. LiDAR is not ownership or metal proof.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag("ethics_sticky_mark"),
-                )
-                Button(
-                    onClick = onLogSignal,
-                    modifier = Modifier.fillMaxWidth().height(52.dp).testTag("log_signal_button"),
-                ) {
-                    Icon(Icons.Default.AddLocationAlt, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Log current position")
-                }
-                OutlinedButton(
-                    onClick = { showProjectExport = true },
-                    enabled = !isBuildingProjectExport,
-                    modifier = Modifier.fillMaxWidth().height(52.dp).testTag("project_export_button"),
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (isBuildingProjectExport) "Building export…" else "Export terrain and report")
-                }
-                OutlinedButton(
-                    onClick = planRoute,
+                IosToolbarItem(
+                    "Route · $routeStopCount",
+                    Icons.Default.Route,
                     enabled = routeStopCount >= 2,
-                    modifier = Modifier.fillMaxWidth().height(52.dp).testTag("plan_route_button"),
-                ) {
-                    Icon(Icons.Default.Route, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Plan target route · $routeStopCount stops")
-                }
-                OutlinedButton(
-                    onClick = {
-                        val ordered = loggedSignals
-                            .filter { it.latitude != null && it.longitude != null }
-                            .sortedByDescending { it.signalStrength }
-                            .map { it.id }
-                        onSetNavPlaylist(ordered)
-                    },
-                    enabled = routeStopCount >= 1,
-                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("nav_playlist_from_finds"),
-                ) {
-                    Text("Nav playlist from finds · $routeStopCount")
-                }
-                if (navPlaylistIds.isNotEmpty()) {
-                    Text(
-                        "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.testTag("nav_playlist_status"),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(
-                            onClick = onNavPlaylistNext,
-                            modifier = Modifier.weight(1f).height(48.dp).testTag("nav_playlist_next"),
-                        ) { Text("Next stop") }
-                        OutlinedButton(
-                            onClick = onClearNavPlaylist,
-                            modifier = Modifier.weight(1f).height(48.dp).testTag("nav_playlist_clear"),
-                        ) { Text("Clear playlist") }
-                    }
-                }
+                    modifier = Modifier.testTag("plan_route_button"),
+                    onClick = planRoute,
+                )
+                IosToolbarItem(
+                    if (isBuildingProjectExport) "Building…" else "Report",
+                    Icons.Default.Download,
+                    enabled = !isBuildingProjectExport,
+                    modifier = Modifier.testTag("project_export_button"),
+                ) { showProjectExport = true }
+                IosToolbarItem(
+                    "GIS",
+                    Icons.Default.Download,
+                    enabled = loggedSignals.isNotEmpty(),
+                ) { showExport = true }
             }
         }
 
-        SitesCard(loggedSignals)
+        if (isBreadcrumbRecording) {
+            Text(
+                "● Recording trail · $recordedTrailPoints GPS fix${if (recordedTrailPoints == 1) "" else "es"}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        if (navPlaylistIds.isNotEmpty()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    "Playlist stop ${navPlaylistIndex + 1} of ${navPlaylistIds.size}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f).testTag("nav_playlist_status"),
+                )
+                TextButton(onClick = onNavPlaylistNext, modifier = Modifier.testTag("nav_playlist_next")) { Text("Next stop") }
+                TextButton(onClick = onClearNavPlaylist, modifier = Modifier.testTag("nav_playlist_clear")) { Text("Clear") }
+            }
+        }
 
         plannedRoute?.let { route ->
             PlannedRouteCard(
@@ -504,65 +516,6 @@ fun TargetLoggerPanel(
                 },
             )
         }
-
-        val recordedBreadcrumbPoints = breadcrumbTracks.sumOf { it.points.size }
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                Text("GPS breadcrumb", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(
-                    when {
-                        isBreadcrumbRecording -> "Recording ${recordedBreadcrumbPoints} GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"}. Trails are saved with this terrain project."
-                        recordedBreadcrumbPoints > 0 -> "$recordedBreadcrumbPoints saved GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"} across ${breadcrumbTracks.size} trail${if (breadcrumbTracks.size == 1) "" else "s"}."
-                        else -> "Record a project-scoped path for offline field checking. GPS jitter is filtered automatically."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = if (isBreadcrumbRecording) onPauseBreadcrumb else onStartBreadcrumb,
-                        modifier = Modifier.weight(1f).height(48.dp).testTag("breadcrumb_record_button"),
-                    ) {
-                        Icon(Icons.Default.Flag, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (isBreadcrumbRecording) "Pause trail" else "Start trail")
-                    }
-                    OutlinedButton(
-                        onClick = { confirmClearBreadcrumbs = true },
-                        enabled = breadcrumbTracks.isNotEmpty() && !isBreadcrumbRecording,
-                        modifier = Modifier.weight(1f).height(48.dp),
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Clear trails")
-                    }
-                }
-            }
-        }
-
-        SurveyBoundaryCard(
-            boundaries = surveyBoundaries,
-            breadcrumbTracks = breadcrumbTracks,
-            hasGpsFix = deviceLatitude != null && deviceLongitude != null,
-            deviceLatitude = deviceLatitude,
-            deviceLongitude = deviceLongitude,
-            onCreateFromTrail = onCreateBoundaryFromTrail,
-            onCreateAroundGps = {
-                if (deviceLatitude == null || deviceLongitude == null) onEnableGps()
-                onCreateBoundaryAroundGps()
-            },
-            onDelete = onDeleteSurveyBoundary,
-            onUpdateBoundary = onUpdateBoundary,
-        )
-
-        OfflineSyncQueueCard(
-            entries = pendingSyncEntries,
-            onMarkSent = onMarkSyncSent,
-            onClear = onClearSyncQueue,
-        )
 
         navigationTarget?.let { target ->
             FieldNavigationCard(
@@ -626,25 +579,6 @@ fun TargetLoggerPanel(
                 )
             }
         } else {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { confirmClear = true },
-                    modifier = Modifier.weight(1f).height(48.dp),
-                ) {
-                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Clear")
-                }
-                Button(
-                    onClick = { showExport = true },
-                    modifier = Modifier.weight(1.5f).height(48.dp),
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Export GIS data")
-                }
-            }
-
             // Filters: this trip, starred only, sort mode
             Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -715,6 +649,104 @@ fun TargetLoggerPanel(
                         onToggleStarred = { onToggleStarred(signal) },
                         digLogCount = excavationLogs.count { it.targetId == signal.id },
                         onOpenDigLogs = { digLogSignal = signal },
+                    )
+                }
+            }
+        }
+    }
+
+    if (showFieldTools) {
+        IosSheet(title = "Field tools", onDismiss = { showFieldTools = false }) {
+            IosSection(header = "Navigation") {
+                IosRow(
+                    title = "Nav playlist from finds",
+                    subtitle = "Strongest signal first · $routeStopCount with GPS",
+                    icon = Icons.Default.Route,
+                    showChevron = routeStopCount >= 1,
+                    onClick = if (routeStopCount >= 1) {
+                        {
+                            val ordered = loggedSignals
+                                .filter { it.latitude != null && it.longitude != null }
+                                .sortedByDescending { it.signalStrength }
+                                .map { it.id }
+                            onSetNavPlaylist(ordered)
+                            showFieldTools = false
+                        }
+                    } else {
+                        null
+                    },
+                    modifier = Modifier.testTag("nav_playlist_from_finds"),
+                )
+            }
+            SitesCard(loggedSignals)
+
+            val recordedBreadcrumbPoints = breadcrumbTracks.sumOf { it.points.size }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Text("GPS breadcrumb", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        when {
+                            isBreadcrumbRecording -> "Recording ${recordedBreadcrumbPoints} GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"}. Trails are saved with this terrain project."
+                            recordedBreadcrumbPoints > 0 -> "$recordedBreadcrumbPoints saved GPS fix${if (recordedBreadcrumbPoints == 1) "" else "es"} across ${breadcrumbTracks.size} trail${if (breadcrumbTracks.size == 1) "" else "s"}."
+                            else -> "Record a project-scoped path for offline field checking. GPS jitter is filtered automatically."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = if (isBreadcrumbRecording) onPauseBreadcrumb else onStartBreadcrumb,
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("breadcrumb_record_button"),
+                        ) {
+                            Icon(Icons.Default.Flag, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (isBreadcrumbRecording) "Pause trail" else "Start trail")
+                        }
+                        OutlinedButton(
+                            onClick = { confirmClearBreadcrumbs = true },
+                            enabled = breadcrumbTracks.isNotEmpty() && !isBreadcrumbRecording,
+                            modifier = Modifier.weight(1f).height(48.dp),
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Clear trails")
+                        }
+                    }
+                }
+            }
+
+            SurveyBoundaryCard(
+                boundaries = surveyBoundaries,
+                breadcrumbTracks = breadcrumbTracks,
+                hasGpsFix = deviceLatitude != null && deviceLongitude != null,
+                deviceLatitude = deviceLatitude,
+                deviceLongitude = deviceLongitude,
+                onCreateFromTrail = onCreateBoundaryFromTrail,
+                onCreateAroundGps = {
+                    if (deviceLatitude == null || deviceLongitude == null) onEnableGps()
+                    onCreateBoundaryAroundGps()
+                },
+                onDelete = onDeleteSurveyBoundary,
+                onUpdateBoundary = onUpdateBoundary,
+            )
+
+            OfflineSyncQueueCard(
+                entries = pendingSyncEntries,
+                onMarkSent = onMarkSyncSent,
+                onClear = onClearSyncQueue,
+            )
+            if (loggedSignals.isNotEmpty()) {
+                IosSection {
+                    IosRow(
+                        title = "Clear all finds",
+                        titleColor = MaterialTheme.colorScheme.error,
+                        onClick = {
+                            showFieldTools = false
+                            confirmClear = true
+                        },
                     )
                 }
             }
