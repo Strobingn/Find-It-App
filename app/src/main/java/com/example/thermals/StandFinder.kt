@@ -420,43 +420,75 @@ object StandFinder {
 }
 
 /**
- * Roads and buildings from OpenStreetMap, as point samples (segments are densified), so picks
- * don't land on a road shoulder or in someone's yard.
+ * Roads (polylines) and building footprints (polygons) from OpenStreetMap. Distances are
+ * measured to the actual line segments / footprint edges, and a point inside a footprint
+ * counts as 0 m away, so long walls and big barns can't hide between their corners.
  */
 class MappedObstacles(
-    val roadPoints: List<Pair<Double, Double>>,
-    val buildingPoints: List<Pair<Double, Double>>,
+    val roads: List<List<Pair<Double, Double>>>,
+    val buildings: List<List<Pair<Double, Double>>>,
 ) {
     fun tooClose(lat: Double, lon: Double): Boolean =
-        roadPoints.any { StandFinder.distanceMeters(lat, lon, it.first, it.second) < StandFinder.ROAD_BUFFER_M } ||
-            buildingPoints.any { StandFinder.distanceMeters(lat, lon, it.first, it.second) < StandFinder.BUILDING_BUFFER_M }
+        (nearestRoadMeters(lat, lon) ?: Double.MAX_VALUE) < StandFinder.ROAD_BUFFER_M ||
+            (nearestBuildingMeters(lat, lon) ?: Double.MAX_VALUE) < StandFinder.BUILDING_BUFFER_M
+
+    fun nearestRoadMeters(lat: Double, lon: Double): Double? =
+        roads.minOfOrNull { polylineDistance(lat, lon, it, closed = false) }
+
+    fun nearestBuildingMeters(lat: Double, lon: Double): Double? =
+        buildings.minOfOrNull { if (contains(lat, lon, it)) 0.0 else polylineDistance(lat, lon, it, closed = true) }
 
     /** Feet to the nearest road / building, for the AI's context (null when none mapped). */
-    fun nearestRoadFeet(lat: Double, lon: Double): Double? =
-        roadPoints.minOfOrNull { StandFinder.distanceMeters(lat, lon, it.first, it.second) }?.let { it * 3.28084 }
+    fun nearestRoadFeet(lat: Double, lon: Double): Double? = nearestRoadMeters(lat, lon)?.let { it * FEET_PER_METER }
 
-    fun nearestBuildingFeet(lat: Double, lon: Double): Double? =
-        buildingPoints.minOfOrNull { StandFinder.distanceMeters(lat, lon, it.first, it.second) }?.let { it * 3.28084 }
+    fun nearestBuildingFeet(lat: Double, lon: Double): Double? = nearestBuildingMeters(lat, lon)?.let { it * FEET_PER_METER }
 
-    val isEmpty: Boolean get() = roadPoints.isEmpty() && buildingPoints.isEmpty()
+    val isEmpty: Boolean get() = roads.isEmpty() && buildings.isEmpty()
 
     companion object {
         val NONE = MappedObstacles(emptyList(), emptyList())
+        private const val FEET_PER_METER = 3.28084
+        private const val M_PER_DEG_LAT = 111_320.0
 
-        /** Splits a polyline into points no more than [stepMeters] apart. */
-        fun densify(line: List<Pair<Double, Double>>, stepMeters: Double = 15.0): List<Pair<Double, Double>> {
-            if (line.size < 2) return line
-            val out = mutableListOf(line.first())
-            for (i in 1 until line.size) {
-                val (a, b) = line[i - 1] to line[i]
-                val d = StandFinder.distanceMeters(a.first, a.second, b.first, b.second)
-                val n = (d / stepMeters).toInt().coerceAtLeast(1)
-                for (j in 1..n) {
-                    val f = j.toDouble() / n
-                    out += (a.first + (b.first - a.first) * f) to (a.second + (b.second - a.second) * f)
-                }
+        /** Local east/north metres of [p] relative to ([lat], [lon]) — exact enough over a mile. */
+        private fun project(lat: Double, lon: Double, p: Pair<Double, Double>): Pair<Double, Double> {
+            val x = (p.second - lon) * M_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(lat))
+            val y = (p.first - lat) * M_PER_DEG_LAT
+            return x to y
+        }
+
+        /** Distance from the origin to segment a-b, in metres. */
+        private fun segmentDistance(a: Pair<Double, Double>, b: Pair<Double, Double>): Double {
+            val dx = b.first - a.first
+            val dy = b.second - a.second
+            val len2 = dx * dx + dy * dy
+            val t = if (len2 == 0.0) 0.0 else ((-a.first * dx - a.second * dy) / len2).coerceIn(0.0, 1.0)
+            return kotlin.math.hypot(a.first + t * dx, a.second + t * dy)
+        }
+
+        fun polylineDistance(lat: Double, lon: Double, line: List<Pair<Double, Double>>, closed: Boolean): Double {
+            if (line.isEmpty()) return Double.MAX_VALUE
+            val pts = line.map { project(lat, lon, it) }
+            if (pts.size == 1) return kotlin.math.hypot(pts[0].first, pts[0].second)
+            var best = Double.MAX_VALUE
+            for (i in 1 until pts.size) best = minOf(best, segmentDistance(pts[i - 1], pts[i]))
+            if (closed && pts.first() != pts.last()) best = minOf(best, segmentDistance(pts.last(), pts.first()))
+            return best
+        }
+
+        /** Ray-casting point-in-polygon test. */
+        fun contains(lat: Double, lon: Double, ring: List<Pair<Double, Double>>): Boolean {
+            if (ring.size < 3) return false
+            val pts = ring.map { project(lat, lon, it) }
+            var inside = false
+            var j = pts.size - 1
+            for (i in pts.indices) {
+                val (xi, yi) = pts[i]
+                val (xj, yj) = pts[j]
+                if ((yi > 0) != (yj > 0) && 0 < (xj - xi) * (0 - yi) / (yj - yi) + xi) inside = !inside
+                j = i
             }
-            return out
+            return inside
         }
     }
 }

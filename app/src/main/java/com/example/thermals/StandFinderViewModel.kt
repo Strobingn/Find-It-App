@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class StandFinderState(
     val running: Boolean = false,
@@ -43,27 +44,50 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
             _state.update {
                 StandFinderState(running = true, stage = "Reading the terrain…", centerLat = lat, centerLon = lon)
             }
+            val imageJob = async { service.fetchSatellite(lat, lon) }
+            val obstaclesJob = async { service.fetchObstacles(lat, lon) }
+            val candidates: List<StandCandidate>
+            val obstacles: MappedObstacles
             try {
-                val imageJob = async { service.fetchSatellite(lat, lon) }
-                val obstaclesJob = async { service.fetchObstacles(lat, lon) }
                 val grid = service.fetchGrid(lat, lon)
-                val obstacles = obstaclesJob.await()
+                // Roads/houses are best-effort: don't let a slow Overpass hold up the picks.
+                obstacles = withTimeoutOrNull(OBSTACLE_WAIT_MS) { obstaclesJob.await() } ?: run {
+                    obstaclesJob.cancel()
+                    MappedObstacles.NONE
+                }
                 val field = inputs?.let { ThermalWindEngine.flowField(it.copy(latitude = lat, longitude = lon)) }
                 val prevailingFrom = forecast?.hour(8)?.let { ThermalWindEngine.normalize(it.windTowardDegrees + 180.0) }
-                val candidates = StandFinder.findCandidates(grid, field, prevailingFrom, obstacles = obstacles)
-                val local = StandFinder.localPicks(candidates)
+                candidates = StandFinder.findCandidates(grid, field, prevailingFrom, obstacles = obstacles)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                imageJob.cancel()
+                obstaclesJob.cancel()
+                val message = error.localizedMessage ?: "Couldn't read the terrain"
                 _state.update {
-                    it.copy(
-                        candidates = candidates,
-                        picks = local,
-                        source = "On-device",
-                        stage = if (TerrainAiGateway.preferredProvider(getApplication()) != null) "Asking AI to pick the best spots…" else null,
-                        running = TerrainAiGateway.preferredProvider(getApplication()) != null,
-                        error = if (candidates.isEmpty()) "No stand-worthy terrain found here — try a hillier spot." else null,
-                    )
+                    it.copy(running = false, stage = null, error = "Terrain: " + StandFinderService.explainNetworkFailure(message))
                 }
-                if (TerrainAiGateway.preferredProvider(getApplication()) == null) return@launch
+                return@launch
+            }
 
+            val aiAvailable = TerrainAiGateway.preferredProvider(getApplication()) != null
+            val local = StandFinder.localPicks(candidates)
+            _state.update {
+                it.copy(
+                    candidates = candidates,
+                    picks = local,
+                    source = "On-device",
+                    stage = if (aiAvailable) "Asking AI to pick the best spots…" else null,
+                    running = aiAvailable,
+                    error = if (candidates.isEmpty()) "No stand-worthy terrain found here — try a hillier spot." else null,
+                )
+            }
+            if (!aiAvailable) {
+                imageJob.cancel()
+                return@launch
+            }
+
+            try {
                 val image = imageJob.await()
                 val (picks, source) = service.aiPicks(
                     candidates = candidates,
@@ -84,7 +108,7 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                     it.copy(
                         running = false,
                         stage = null,
-                        error = StandFinderService.explainAiFailure(error.localizedMessage ?: "Stand search failed") +
+                        error = StandFinderService.explainNetworkFailure(error.localizedMessage ?: "AI pick failed") +
                             if (it.picks.isNotEmpty()) " — showing on-device picks." else "",
                     )
                 }
@@ -93,4 +117,9 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun select(rank: Int?) = _state.update { it.copy(selectedRank = rank) }
+
+    private companion object {
+        /** Extra wait for OpenStreetMap after the terrain is in (they're fetched in parallel). */
+        const val OBSTACLE_WAIT_MS = 4_000L
+    }
 }

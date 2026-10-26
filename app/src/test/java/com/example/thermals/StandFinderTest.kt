@@ -145,7 +145,7 @@ class StandFinderTest {
         val free = StandFinder.findCandidates(grid, null, null)
         val saddle = free.first { it.feature == StandFeature.SADDLE }
         // A road running right through the saddle removes it.
-        val road = MappedObstacles.densify(listOf((saddle.latitude to saddle.longitude - 0.002), (saddle.latitude to saddle.longitude + 0.002)))
+        val road = listOf(listOf((saddle.latitude to saddle.longitude - 0.002), (saddle.latitude to saddle.longitude + 0.002)))
         val blocked = StandFinder.findCandidates(grid, null, null, obstacles = MappedObstacles(road, emptyList()))
         assertTrue(blocked.none { StandFinder.distanceMeters(it.latitude, it.longitude, saddle.latitude, saddle.longitude) < 1.0 })
         assertTrue(blocked.all { !MappedObstacles(road, emptyList()).tooClose(it.latitude, it.longitude) })
@@ -161,9 +161,8 @@ class StandFinderTest {
             ]}
         """.trimIndent()
         val obstacles = StandFinderService.parseObstacles(body)
-        assertTrue(obstacles.roadPoints.size > 2) // densified
-        assertTrue(obstacles.roadPoints.all { it.first == 42.75 })
-        assertEquals(2, obstacles.buildingPoints.size)
+        assertEquals(1, obstacles.roads.size)
+        assertEquals(1, obstacles.buildings.size)
         assertTrue(obstacles.tooClose(42.75, -75.4995))
         assertTrue(!obstacles.tooClose(42.76, -75.4995)) // footpath ignored
     }
@@ -174,10 +173,75 @@ class StandFinderTest {
         assertEquals("0.50 mi", StandFinder.formatDistance(804.67))
     }
 
+    /** Square footprint [sideM] wide centred on ([lat], [lon]). */
+    private fun square(lat: Double, lon: Double, sideM: Double): List<Pair<Double, Double>> {
+        val dLat = sideM / 2 / 111_320.0
+        val dLon = sideM / 2 / (111_320.0 * cos(Math.toRadians(lat)))
+        return listOf(lat - dLat to lon - dLon, lat - dLat to lon + dLon, lat + dLat to lon + dLon, lat + dLat to lon - dLon, lat - dLat to lon - dLon)
+    }
+
+    @Test
+    fun longWallsAndBigBuildingsCountAlongTheirEdgesAndInside() {
+        val barn = square(42.75, -75.5, 120.0)
+        val obstacles = MappedObstacles(emptyList(), listOf(barn))
+        // 30 m outside the middle of a 120 m wall: > 67 m from either corner, but 30 m from the wall.
+        val outside = 42.75 + (60.0 + 30.0) / 111_320.0
+        assertEquals(30.0, obstacles.nearestBuildingMeters(outside, -75.5)!!, 0.5)
+        assertTrue(obstacles.tooClose(outside, -75.5))
+        // Dead centre of the barn is inside it.
+        assertEquals(0.0, obstacles.nearestBuildingMeters(42.75, -75.5)!!, 0.0)
+        assertTrue(obstacles.tooClose(42.75, -75.5))
+        // Well clear of it is fine.
+        assertTrue(!obstacles.tooClose(42.75 + 200.0 / 111_320.0, -75.5))
+    }
+
+    @Test
+    fun roadDistanceIsToTheSegmentNotItsEnds() {
+        // A 1 km straight road with no points in between; 20 m off its middle is still too close.
+        val road = listOf(listOf(42.75 to -75.5 - 0.006, 42.75 to -75.5 + 0.006))
+        val obstacles = MappedObstacles(road, emptyList())
+        val beside = 42.75 + 20.0 / 111_320.0
+        assertEquals(20.0, obstacles.nearestRoadMeters(beside, -75.5)!!, 0.5)
+        assertTrue(obstacles.tooClose(beside, -75.5))
+    }
+
+    @Test
+    fun aiPhotoPicksOnRoadsOrInYardsAreDropped() {
+        val image = StandFinderService.SatelliteImage(ByteArray(0), "image/jpeg", 42.75, -75.5, StandFinder.zoomForSpan(42.75, 900.0, 640), 640, 640)
+        val (roadLat, roadLon) = StandFinder.imagePercentToLatLon(60.0, 50.0, 42.75, -75.5, image.zoom, 640, 640)
+        val (houseLat, houseLon) = StandFinder.imagePercentToLatLon(40.0, 40.0, 42.75, -75.5, image.zoom, 640, 640)
+        val obstacles = MappedObstacles(
+            roads = listOf(listOf(roadLat - 0.003 to roadLon, roadLat + 0.003 to roadLon)),
+            buildings = listOf(square(houseLat, houseLon, 15.0)),
+        )
+        val text = """[
+            {"rank":1,"kind":"stand","x":60,"y":50,"title":"On the road"},
+            {"rank":2,"kind":"area","x":40,"y":40,"title":"In the yard"},
+            {"rank":3,"kind":"stand","x":20,"y":75,"title":"Back corner"}
+        ]"""
+        val picks = StandFinderService.parsePicks(text, emptyList(), image, 42.75, -75.5, obstacles)
+        assertEquals(listOf("Back corner"), picks.map { it.title })
+        // With everything blocked nothing is returned, so the on-device picks stay up.
+        val none = StandFinderService.parsePicks("""[{"rank":1,"x":60,"y":50}]""", emptyList(), image, 42.75, -75.5, obstacles)
+        assertTrue(none.isEmpty())
+    }
+
+    @Test
+    fun terrainHostFailuresAreNotBlamedOnTheAi() {
+        val msg = StandFinderService.explainNetworkFailure("Unable to resolve host \"api.open-meteo.com\": No address associated with hostname")
+        assertTrue(msg.contains("api.open-meteo.com"))
+        assertTrue(!msg.contains("api.x.ai"))
+        assertTrue(!msg.contains("AI"))
+    }
+
     @Test
     fun blockedAiServersGetAPlainExplanation() {
-        val msg = StandFinderService.explainAiFailure("All cloud providers failed. Grok: Unable to resolve host \"api.x.ai\": No address associated with hostname")
+        val msg = StandFinderService.explainNetworkFailure(
+            "All cloud providers failed. Grok: Unable to resolve host \"api.x.ai\": No address associated with hostname; " +
+                "Gemini: Unable to resolve host \"generativelanguage.googleapis.com\": No address associated with hostname",
+        )
         assertTrue(msg.contains("blocking the AI servers"))
-        assertEquals("HTTP 500", StandFinderService.explainAiFailure("HTTP 500"))
+        assertTrue(msg.contains("api.x.ai") && msg.contains("generativelanguage.googleapis.com"))
+        assertEquals("HTTP 500", StandFinderService.explainNetworkFailure("HTTP 500"))
     }
 }
