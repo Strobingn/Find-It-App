@@ -5,40 +5,28 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SmallFloatingActionButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,8 +49,6 @@ import com.example.data.field.FieldWaypoint
 import com.example.data.historicmap.HistoricTopoEras
 import com.example.data.relief.LidarTerrainServer
 import com.example.data.relief.LidarTerrainTiles
-import com.example.data.relief.ReliefMode
-import com.example.data.relief.ReliefSettings
 import com.example.data.survey.SurveyFeature
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.ui.components.mapbox.HistoricTopoOverlay
@@ -110,28 +96,12 @@ import com.mapbox.maps.plugin.locationcomponent.location
 import com.mapbox.maps.plugin.viewport.data.OverviewViewportStateOptions
 import com.mapbox.maps.toCameraOptions
 import java.util.Locale
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.withContext
-
-/** Base map styles offered on the Mapbox tab. */
-private enum class MapboxBaseStyle(val label: String, val uri: String) {
-    SATELLITE("Satellite", Style.SATELLITE_STREETS),
-    SATELLITE_CLEAN("Satellite (no labels)", Style.SATELLITE),
-    OUTDOORS("Outdoors", Style.OUTDOORS),
-}
-
-/** Control panels on the Mapbox tab. */
-private enum class MapboxPanel(val label: String) {
-    MAP("Map"),
-    TERRAIN("3D"),
-    LIDAR("LiDAR"),
-    TOPO("Old topo"),
-}
 
 private object MapboxIds {
     const val DEM_SOURCE = "findit-dem"
@@ -223,51 +193,25 @@ fun MapboxTerrainMapScreen(
     val scope = rememberCoroutineScope()
     val alignmentStore = remember(context) { TerrainMapAlignmentStore(context.applicationContext) }
 
-    // --- Map panel -------------------------------------------------------------------------
-    var baseStyle by rememberSaveable { mutableStateOf(MapboxBaseStyle.SATELLITE) }
-    var terrain3d by rememberSaveable { mutableStateOf(true) }
-    var exaggeration by rememberSaveable { mutableFloatStateOf(1.5f) }
-    var hillshade by rememberSaveable { mutableStateOf(false) }
-    var usgsTopo by rememberSaveable { mutableStateOf(false) }
-    var showLidar by rememberSaveable { mutableStateOf(true) }
-    var lidarOpacity by rememberSaveable { mutableFloatStateOf(0.72f) }
-    var controlsExpanded by rememberSaveable { mutableStateOf(true) }
-    var panel by rememberSaveable { mutableStateOf(MapboxPanel.MAP) }
+    val controls = rememberSaveable(saver = MapboxControls.Saver) { MapboxControls() }
+    val baseStyle by controls::baseStyle
+    val terrain3d by controls::terrain3d
+    val exaggeration by controls::exaggeration
+    val hillshade by controls::hillshade
+    val usgsTopo by controls::usgsTopo
+    val showLidar by controls::showLidar
+    val lidarOpacity by controls::lidarOpacity
+    val reliefOn by controls::reliefOn
+    val reliefOpacity by controls::reliefOpacity
+    val reliefSettings = controls.reliefSettings
 
-    // --- LiDAR relief panel ----------------------------------------------------------------
-    var reliefOn by rememberSaveable { mutableStateOf(false) }
-    var reliefOpacity by rememberSaveable { mutableFloatStateOf(0.85f) }
-    var reliefMode by rememberSaveable { mutableStateOf(ReliefMode.HILLSHADE) }
-    var sunAzimuth by rememberSaveable { mutableFloatStateOf(315f) }
-    var sunAltitude by rememberSaveable { mutableFloatStateOf(35f) }
-    var zFactor by rememberSaveable { mutableFloatStateOf(2f) }
-    var multiDirection by rememberSaveable { mutableStateOf(true) }
-    var multiColour by rememberSaveable { mutableStateOf(false) }
-    var radiusMeters by rememberSaveable { mutableFloatStateOf(10f) }
-    var brightness by rememberSaveable { mutableFloatStateOf(0f) }
-    var contrast by rememberSaveable { mutableFloatStateOf(1f) }
-    val reliefSettings = ReliefSettings(
-        mode = reliefMode,
-        azimuthDeg = sunAzimuth,
-        altitudeDeg = sunAltitude,
-        zFactor = zFactor,
-        multiDirection = multiDirection,
-        multiColour = multiColour,
-        radiusMeters = radiusMeters,
-        brightness = brightness,
-        contrast = contrast,
-    )
-
-    // --- Old topo panel --------------------------------------------------------------------
-    var topoOn by rememberSaveable { mutableStateOf(false) }
-    var topoOpacity by rememberSaveable { mutableFloatStateOf(0.85f) }
-    var topoDecade by rememberSaveable { mutableStateOf<Int?>(null) }
+    val topoOn by controls::topoOn
+    val topoOpacity by controls::topoOpacity
+    var topoDecade by controls::topoDecade
     var topoDecades by remember { mutableStateOf<List<Int>>(emptyList()) }
 
-    // --- 3D panel -----------------------------------------------------------------------------
-    // USGS lidar elevation by default: sharper than Mapbox's global DEM wherever 3DEP has flown.
-    var lidarTerrain by rememberSaveable { mutableStateOf(true) }
-    var lidarNote by remember { mutableStateOf<String?>(null) }
+    var lidarTerrain by controls::lidarTerrain
+    var lidarNote by controls::lidarNote
     var lidarServer by remember { mutableStateOf<LidarTerrainServer?>(null) }
     val lidarStatsFlow = remember(lidarServer) { lidarServer?.stats ?: MutableStateFlow(LidarTerrainServer.Stats()) }
     val lidarStats by lidarStatsFlow.collectAsState()
@@ -498,279 +442,29 @@ fun MapboxTerrainMapScreen(
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(8.dp)
-                .widthIn(max = 520.dp),
+                .padding(6.dp)
+                .widthIn(max = 420.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.93f),
+            MapboxControlCard(
+                controls = controls,
+                status = MapboxControlStatus(
+                    zoom = { mapViewportState.cameraState?.zoom ?: 0.0 },
+                    lidarStats = { lidarStats },
+                    lidarStarting = lidarTerrain && lidarServer == null,
+                    hasMyLidar = lidarImage.bitmap != null && lidarImage.corners != null,
+                    myLidarUnplaced = terrainBitmap != null && corners == null,
+                    reliefLoading = reliefLoading,
+                    reliefResolution = reliefResolution,
+                    reliefMinZoom = LidarReliefOverlay.MIN_ZOOM,
+                    topoDecades = topoDecades,
+                    topoSheetLines = topoRecords.filter { r -> topoSheets.any { it.recordId == r.id } }.map { r ->
+                        "${r.editionYear ?: ""} · ${r.title.substringAfter("Quadrangle for ", r.title)} · 1:${HistoricTopoEras.scaleOf(r)}"
+                    },
+                    topoStatus = topoStatus,
                 ),
-            ) {
-                Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Row(
-                            Modifier
-                                .weight(1f)
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            MapboxPanel.entries.forEach { option ->
-                                FilterChip(
-                                    selected = panel == option && controlsExpanded,
-                                    onClick = {
-                                        panel = option
-                                        controlsExpanded = true
-                                    },
-                                    label = { Text(option.label) },
-                                    modifier = Modifier.testTag("mapbox_panel_${option.name.lowercase(Locale.US)}"),
-                                )
-                            }
-                        }
-                        IconButton(onClick = { controlsExpanded = !controlsExpanded }) {
-                            Icon(
-                                if (controlsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = if (controlsExpanded) "Hide map controls" else "Show map controls",
-                            )
-                        }
-                    }
-                    if (controlsExpanded) {
-                        Column(
-                            Modifier
-                                .heightIn(max = 360.dp)
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            when (panel) {
-                                MapboxPanel.MAP -> {
-                                    ChipRow {
-                                        MapboxBaseStyle.entries.forEach { option ->
-                                            FilterChip(
-                                                selected = baseStyle == option,
-                                                onClick = { baseStyle = option },
-                                                label = { Text(option.label) },
-                                                modifier = Modifier.testTag("mapbox_style_${option.name.lowercase(Locale.US)}"),
-                                            )
-                                        }
-                                    }
-                                    ChipRow {
-                                        FilterChip(selected = hillshade, onClick = { hillshade = !hillshade }, label = { Text("Hillshade") })
-                                        FilterChip(selected = usgsTopo, onClick = { usgsTopo = !usgsTopo }, label = { Text("USGS topo") })
-                                        if (lidarImage.bitmap != null && lidarImage.corners != null) {
-                                            FilterChip(selected = showLidar, onClick = { showLidar = !showLidar }, label = { Text("My LiDAR") })
-                                        }
-                                    }
-                                    if (showLidar && lidarImage.bitmap != null && lidarImage.corners != null) {
-                                        LabeledSlider("My LiDAR opacity", "${(lidarOpacity * 100).toInt()}%", lidarOpacity, { lidarOpacity = it }, 0.1f..1f)
-                                    }
-                                    if (terrainBitmap != null && corners == null) {
-                                        Text(
-                                            "This terrain isn't georeferenced yet, so your LiDAR layer can't be placed. " +
-                                                "Position it on the Google map tab first.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
-                                    }
-                                }
-
-                                MapboxPanel.LIDAR -> {
-                                    ChipRow {
-                                        FilterChip(
-                                            selected = reliefOn,
-                                            onClick = { reliefOn = !reliefOn },
-                                            label = { Text(if (reliefOn) "1 m LiDAR on" else "1 m LiDAR off") },
-                                            modifier = Modifier.testTag("mapbox_relief_toggle"),
-                                        )
-                                    }
-                                    ChipRow {
-                                        ReliefMode.entries.forEach { mode ->
-                                            FilterChip(
-                                                selected = reliefMode == mode,
-                                                onClick = {
-                                                    reliefMode = mode
-                                                    reliefOn = true
-                                                },
-                                                label = { Text(mode.label) },
-                                            )
-                                        }
-                                    }
-                                    Text(reliefMode.description, style = MaterialTheme.typography.bodySmall)
-                                    if (reliefMode == ReliefMode.HILLSHADE) {
-                                        ChipRow {
-                                            FilterChip(selected = !multiColour, onClick = { multiColour = false }, label = { Text("Grey") })
-                                            FilterChip(selected = multiColour, onClick = { multiColour = true }, label = { Text("Multi-colour") })
-                                            FilterChip(selected = !multiDirection, onClick = { multiDirection = false }, label = { Text("One sun") })
-                                            FilterChip(selected = multiDirection, onClick = { multiDirection = true }, label = { Text("Four suns") })
-                                        }
-                                    }
-                                    val usesLight = reliefMode in setOf(ReliefMode.HILLSHADE, ReliefMode.VAT, ReliefMode.MULTI_LIGHT_PCA)
-                                    val usesZ = reliefMode in setOf(
-                                        ReliefMode.HILLSHADE, ReliefMode.SLOPE, ReliefMode.RED_RELIEF, ReliefMode.VAT,
-                                        ReliefMode.MULTI_LIGHT_PCA, ReliefMode.SVF_SLOPE,
-                                    )
-                                    val usesRadius = reliefMode !in setOf(ReliefMode.HILLSHADE, ReliefMode.SLOPE, ReliefMode.MULTI_LIGHT_PCA)
-                                    if (usesLight && reliefMode != ReliefMode.MULTI_LIGHT_PCA) {
-                                        CommitSlider("Sun direction", { "${it.roundToInt()}° ${compass(it)}" }, sunAzimuth, 0f..360f) { sunAzimuth = it }
-                                    }
-                                    if (usesLight) {
-                                        CommitSlider("Sun height", { "${it.roundToInt()}°" }, sunAltitude, 5f..80f) { sunAltitude = it }
-                                    }
-                                    if (usesZ) {
-                                        CommitSlider("Z factor", { String.format(Locale.US, "×%.1f", it) }, zFactor, 0.5f..10f) { zFactor = it }
-                                    }
-                                    if (usesRadius) {
-                                        CommitSlider("Search radius", { "${it.roundToInt()} m" }, radiusMeters, 2f..30f) { radiusMeters = it }
-                                    }
-                                    CommitSlider("Brightness", { signedPercent(it * 2) }, brightness, -0.5f..0.5f) { brightness = it }
-                                    CommitSlider("Contrast", { String.format(Locale.US, "×%.1f", it) }, contrast, 0.5f..2f) { contrast = it }
-                                    LabeledSlider("Opacity", "${(reliefOpacity * 100).toInt()}%", reliefOpacity, { reliefOpacity = it }, 0.1f..1f)
-                                    val zoom = mapViewportState.cameraState?.zoom ?: 0.0
-                                    val note = when {
-                                        !reliefOn -> null
-                                        zoom < LidarReliefOverlay.MIN_ZOOM -> "Zoom in further to draw LiDAR."
-                                        reliefLoading > 0 -> "Loading LiDAR… ($reliefLoading)"
-                                        reliefResolution != null -> String.format(Locale.US, "USGS 3DEP elevation, ≈%.1f m per pixel here.", reliefResolution)
-                                        else -> null
-                                    }
-                                    note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                                    TextButton(onClick = {
-                                        sunAzimuth = 315f
-                                        sunAltitude = 35f
-                                        zFactor = 2f
-                                        multiDirection = true
-                                        multiColour = false
-                                        radiusMeters = 10f
-                                        brightness = 0f
-                                        contrast = 1f
-                                    }) { Text("Reset look") }
-                                }
-
-                                MapboxPanel.TOPO -> {
-                                    ChipRow {
-                                        FilterChip(
-                                            selected = topoOn,
-                                            onClick = { topoOn = !topoOn },
-                                            label = { Text(if (topoOn) "Old topo on" else "Old topo off") },
-                                            modifier = Modifier.testTag("mapbox_topo_toggle"),
-                                        )
-                                    }
-                                    val decade = topoDecade
-                                    if (topoOn && topoDecades.isNotEmpty() && decade != null) {
-                                        val index = topoDecades.indexOf(decade).coerceAtLeast(0)
-                                        Text(
-                                            "Topo era ${decade}s",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.Bold,
-                                        )
-                                        if (topoDecades.size > 1) {
-                                            Slider(
-                                                value = index.toFloat(),
-                                                onValueChange = { topoDecade = topoDecades[it.roundToInt().coerceIn(0, topoDecades.lastIndex)] },
-                                                valueRange = 0f..topoDecades.lastIndex.toFloat(),
-                                                steps = (topoDecades.size - 2).coerceAtLeast(0),
-                                            )
-                                            Row {
-                                                Text("${topoDecades.first()}s", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
-                                                Text("${topoDecades.last()}s", style = MaterialTheme.typography.labelSmall)
-                                            }
-                                        }
-                                        LabeledSlider("Opacity", "${(topoOpacity * 100).toInt()}%", topoOpacity, { topoOpacity = it }, 0.1f..1f)
-                                        val shown = topoRecords.filter { r -> topoSheets.any { it.recordId == r.id } }
-                                        shown.forEach { r ->
-                                            Text(
-                                                "${r.editionYear ?: ""} · ${r.title.substringAfter("Quadrangle for ", r.title)} · 1:${HistoricTopoEras.scaleOf(r)}",
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
-                                        }
-                                    } else if (topoOn) {
-                                        val zoom = mapViewportState.cameraState?.zoom ?: 0.0
-                                        Text(
-                                            if (zoom < 9.0) "Zoom in to a town or farm to find its old topo maps." else "Looking for old topo maps here…",
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
-                                    }
-                                    topoStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                                    Text(
-                                        "USGS Historical Topographic Maps, cut to their map edges and placed by their own " +
-                                            "survey coordinates. Each sheet downloads once (about 8–20 MB).",
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                }
-
-                                MapboxPanel.TERRAIN -> {
-                                    ChipRow {
-                                        FilterChip(
-                                            selected = terrain3d,
-                                            onClick = {
-                                                terrain3d = !terrain3d
-                                                tilt(if (terrain3d) TILT_DEGREES else 0.0)
-                                            },
-                                            label = { Text(if (terrain3d) "3D terrain on" else "3D terrain off") },
-                                            modifier = Modifier.testTag("mapbox_terrain_toggle"),
-                                        )
-                                    }
-                                    if (terrain3d) {
-                                        Text("Elevation", style = MaterialTheme.typography.labelMedium)
-                                        ChipRow {
-                                            FilterChip(
-                                                selected = lidarTerrain,
-                                                onClick = {
-                                                    lidarTerrain = true
-                                                    lidarNote = null
-                                                },
-                                                label = { Text("USGS lidar (1 m)") },
-                                                modifier = Modifier.testTag("mapbox_terrain_lidar"),
-                                            )
-                                            FilterChip(
-                                                selected = !lidarTerrain,
-                                                onClick = { lidarTerrain = false },
-                                                label = { Text("Mapbox (worldwide)") },
-                                                modifier = Modifier.testTag("mapbox_terrain_mapbox"),
-                                            )
-                                        }
-                                        LabeledSlider(
-                                            "Exaggeration",
-                                            String.format(Locale.US, "%.1fx", exaggeration),
-                                            exaggeration,
-                                            { exaggeration = it },
-                                            1f..6f,
-                                        )
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            OutlinedButton(onClick = { tilt(TILT_DEGREES) }) { Text("Tilt") }
-                                            OutlinedButton(onClick = { tilt(0.0) }) { Text("Top-down") }
-                                        }
-                                        val note = when {
-                                            !lidarTerrain -> lidarNote
-                                            lidarServer == null -> "Starting USGS lidar elevation…"
-                                            lidarStats.inFlight > 0 -> "Loading lidar elevation… (${lidarStats.inFlight})"
-                                            lidarStats.failed > 0 && lidarStats.served == 0 ->
-                                                "Lidar elevation isn't loading yet. Check your connection."
-                                            else -> null
-                                        }
-                                        note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                                        Text(
-                                            if (lidarTerrain) {
-                                                "Bare-earth ground from USGS 3DEP: about 1 m where lidar has been flown, " +
-                                                    "coarser elsewhere, US only. Raise the exaggeration to make low banks, " +
-                                                    "pits and old roads stand out. Drag with two fingers to tilt and turn."
-                                            } else {
-                                                "Mapbox's worldwide elevation. Smoother than USGS lidar but loads instantly " +
-                                                    "and works outside the US. Drag with two fingers to tilt and turn."
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                        )
-                                    } else {
-                                        Text(
-                                            "Turn on 3D terrain to see the ground in relief. Any layer, including 1 m LiDAR " +
-                                                "relief and old topo, drapes over it.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+                onTilt = ::tilt,
+            )
 
             if (routeWaypoints.isNotEmpty()) {
                 Card(
@@ -823,69 +517,6 @@ fun MapboxTerrainMapScreen(
                 modifier = Modifier.testTag("mapbox_my_location"),
             ) { Icon(Icons.Default.MyLocation, contentDescription = "My location") }
         }
-    }
-}
-
-private fun compass(degrees: Float): String {
-    val names = listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-    return names[((degrees / 45f).roundToInt() % 8 + 8) % 8]
-}
-
-private fun signedPercent(v: Float): String {
-    val p = (v * 100).roundToInt()
-    return when {
-        p == 0 -> "Normal"
-        p > 0 -> "+$p%"
-        else -> "$p%"
-    }
-}
-
-@Composable
-private fun ChipRow(content: @Composable () -> Unit) {
-    Row(
-        Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) { content() }
-}
-
-@Composable
-private fun LabeledSlider(
-    label: String,
-    valueLabel: String,
-    value: Float,
-    onValueChange: (Float) -> Unit,
-    range: ClosedFloatingPointRange<Float>,
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Row {
-            Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-            Text(valueLabel, style = MaterialTheme.typography.labelMedium)
-        }
-        Slider(value = value, onValueChange = onValueChange, valueRange = range)
-    }
-}
-
-/** A slider that only commits when the finger lifts, so expensive re-renders run once per change. */
-@Composable
-private fun CommitSlider(
-    label: String,
-    valueLabel: (Float) -> String,
-    value: Float,
-    range: ClosedFloatingPointRange<Float>,
-    onCommit: (Float) -> Unit,
-) {
-    var draft by remember(value) { mutableFloatStateOf(value) }
-    Column(Modifier.fillMaxWidth()) {
-        Row {
-            Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-            Text(valueLabel(draft), style = MaterialTheme.typography.labelMedium)
-        }
-        Slider(
-            value = draft,
-            onValueChange = { draft = it },
-            onValueChangeFinished = { onCommit(draft) },
-            valueRange = range,
-        )
     }
 }
 
@@ -1093,9 +724,6 @@ private fun Style.applyVectorData(vectors: MapboxVectorData) {
 }
 
 private fun Boolean.toVisibility(): Visibility = if (this) Visibility.VISIBLE else Visibility.NONE
-
-/** Camera tilt for 3D views: steep enough to read relief, low enough to keep the horizon out. */
-private const val TILT_DEGREES = 60.0
 
 /** How long lidar elevation gets to show up before 3D falls back to Mapbox elevation. */
 private const val LIDAR_CHECK_MS = 25_000L
