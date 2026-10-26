@@ -53,27 +53,24 @@ class ThreeDepElevationClient(
 ) {
     init {
         cacheDir.mkdirs()
+        // Downloads cut short by the app being killed leave temp files behind.
+        val stale = System.currentTimeMillis() - STALE_TEMP_MS
+        cacheDir.listFiles { f ->
+            (f.name.endsWith(".part") || f.name.startsWith("tile_")) && f.lastModified() < stale
+        }?.forEach { it.delete() }
     }
 
     /** Blocking; call off the main thread. Returns null on network failure. */
     fun fetch(key: TileKey): ElevationChunk? {
         val file = File(cacheDir, "${key.z}_${key.x}_${key.y}.tif")
         if (!file.isFile || file.length() == 0L) {
-            val tmp = File(cacheDir, file.name + ".part")
-            val ok = runCatching {
-                val request = Request.Builder()
-                    .url(exportUrl(key))
-                    .header("User-Agent", "FindIt-LidarSurveyApp/${BuildConfig.VERSION_NAME} (Android)")
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    val body = response.body ?: return@use false
-                    val type = response.header("Content-Type").orEmpty()
-                    if (!response.isSuccessful || type.contains("json") || type.contains("html")) return@use false
-                    tmp.outputStream().use { out -> body.byteStream().copyTo(out) }
-                    true
-                }
-            }.getOrDefault(false)
-            if (!ok || !tmp.renameTo(file)) {
+            val (minX, minY, maxX, maxY) = mercatorBounds(key)
+            val pad = ElevationChunk.PAD * (maxX - minX) / ElevationChunk.SIZE
+            // Unique temp name: the relief overlay and the terrain tiles may fetch the same block at once.
+            val tmp = File.createTempFile(file.name, ".part", cacheDir)
+            if (!download(exportUrl(minX - pad, minY - pad, maxX + pad, maxY + pad, ElevationChunk.FULL), tmp) ||
+                !tmp.renameTo(file)
+            ) {
                 tmp.delete()
                 return null
             }
@@ -89,14 +86,40 @@ class ThreeDepElevationClient(
         return ElevationChunk(key, values, groundMetersPerPixel(key))
     }
 
-    private fun exportUrl(key: TileKey): String {
+    /**
+     * Blocking; call off the main thread. Elevation covering exactly one Web Mercator tile at
+     * [size]×[size], pixel centres at the tile's (i + 0.5) / size like a Mapbox DEM tile.
+     * NaN where USGS has none; null on network failure.
+     */
+    fun fetchTile(key: TileKey, size: Int): FloatArray? {
         val (minX, minY, maxX, maxY) = mercatorBounds(key)
-        val px = (maxX - minX) / ElevationChunk.SIZE
-        val pad = ElevationChunk.PAD * px
-        val bbox = String.format(Locale.US, "%.3f,%.3f,%.3f,%.3f", minX - pad, minY - pad, maxX + pad, maxY + pad)
-        val full = ElevationChunk.FULL
+        val tmp = File.createTempFile("tile_${key.z}_${key.x}_${key.y}_", ".tif", cacheDir)
+        try {
+            if (!download(exportUrl(minX, minY, maxX, maxY, size), tmp)) return null
+            return runCatching { readFloatTiff(tmp) }.getOrNull()?.takeIf { it.size == size * size }
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    private fun download(url: String, dest: File): Boolean = runCatching {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "FindIt-LidarSurveyApp/${BuildConfig.VERSION_NAME} (Android)")
+            .build()
+        client.newCall(request).execute().use { response ->
+            val body = response.body ?: return@use false
+            val type = response.header("Content-Type").orEmpty()
+            if (!response.isSuccessful || type.contains("json") || type.contains("html")) return@use false
+            dest.outputStream().use { out -> body.byteStream().copyTo(out) }
+            true
+        }
+    }.getOrDefault(false)
+
+    private fun exportUrl(minX: Double, minY: Double, maxX: Double, maxY: Double, size: Int): String {
+        val bbox = String.format(Locale.US, "%.3f,%.3f,%.3f,%.3f", minX, minY, maxX, maxY)
         return "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage" +
-            "?bbox=$bbox&bboxSR=3857&imageSR=3857&size=$full,$full&format=tiff&pixelType=F32" +
+            "?bbox=$bbox&bboxSR=3857&imageSR=3857&size=$size,$size&format=tiff&pixelType=F32" +
             "&noData=-9999&noDataInterpretation=esriNoDataMatchAny&interpolation=RSP_BilinearInterpolation" +
             "&renderingRule=%7B%22rasterFunction%22%3A%22None%22%7D&f=image"
     }
@@ -131,7 +154,7 @@ class ThreeDepElevationClient(
                         val x = bx + c
                         if (x >= width) break
                         val v = floats.get(r * bw + c)
-                        out[y * width + x] = if (v < -9000f || v.isNaN()) Float.NaN else v
+                        out[y * width + x] = if (v.isNaN() || v < MIN_PLAUSIBLE || v > MAX_PLAUSIBLE) Float.NaN else v
                     }
                 }
             }
@@ -140,7 +163,7 @@ class ThreeDepElevationClient(
     }
 
     private fun trimCache() {
-        val files = cacheDir.listFiles { f -> f.name.endsWith(".tif") }?.sortedBy { it.lastModified() } ?: return
+        val files = cacheDir.listFiles { f -> f.name.endsWith(".tif") && !f.name.startsWith("tile_") }?.sortedBy { it.lastModified() } ?: return
         var total = files.sumOf { it.length() }
         for (f in files) {
             if (total <= maxCacheBytes) break
@@ -150,6 +173,13 @@ class ThreeDepElevationClient(
     }
 
     companion object {
+        /**
+         * Heights outside this range are NoData or resampling garbage: next to NoData the server
+         * returns values such as -9999 and 5e36. Death Valley (-86 m) and Denali (6190 m) fit easily.
+         */
+        private const val MIN_PLAUSIBLE = -500f
+        private const val MAX_PLAUSIBLE = 9000f
+        private const val STALE_TEMP_MS = 60 * 60 * 1000L
         private const val EARTH_RADIUS = 6_378_137.0
         private const val ORIGIN = PI * EARTH_RADIUS
 

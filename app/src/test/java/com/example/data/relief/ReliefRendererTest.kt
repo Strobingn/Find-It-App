@@ -68,7 +68,7 @@ class ReliefRendererTest {
     @Test
     fun terrainRgbRoundTrips() {
         for (h in listOf(-50f, 0f, 87.3f, 4321.9f)) {
-            assertEquals(h.toDouble(), TerrainModelBuilder.decode(TerrainModelBuilder.encode(h)), 0.051)
+            assertEquals(h.toDouble(), TerrainRgb.decode(TerrainRgb.code(h)), 0.051)
         }
     }
 

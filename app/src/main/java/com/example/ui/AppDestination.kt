@@ -69,7 +69,7 @@ enum class AppDestination(
     MAPBOX(
         label = "3D Map",
         title = "Mapbox terrain map",
-        subtitle = "Satellite, 3D terrain, USGS topo",
+        subtitle = "Satellite, 3D lidar terrain, old topo maps",
         icon = Icons.Default.Terrain,
         primary = false,
     ),

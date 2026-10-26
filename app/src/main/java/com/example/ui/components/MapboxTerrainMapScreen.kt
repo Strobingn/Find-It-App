@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -60,15 +59,15 @@ import com.example.data.ElevationGrid
 import com.example.data.field.BreadcrumbTrack
 import com.example.data.field.FieldWaypoint
 import com.example.data.historicmap.HistoricTopoEras
+import com.example.data.relief.LidarTerrainServer
+import com.example.data.relief.LidarTerrainTiles
 import com.example.data.relief.ReliefMode
 import com.example.data.relief.ReliefSettings
-import com.example.data.relief.TerrainModel
-import com.example.data.relief.TerrainModelBuilder
-import com.example.data.relief.ThreeDepElevationClient
 import com.example.data.survey.SurveyFeature
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.ui.components.mapbox.HistoricTopoOverlay
 import com.example.ui.components.mapbox.LidarReliefOverlay
+import com.mapbox.bindgen.Value
 import com.mapbox.common.MapboxOptions
 import com.mapbox.geojson.FeatureCollection
 import com.mapbox.geojson.Point
@@ -81,6 +80,7 @@ import com.mapbox.maps.extension.compose.MapEffect
 import com.mapbox.maps.extension.compose.MapboxMap
 import com.mapbox.maps.extension.compose.animation.viewport.rememberMapViewportState
 import com.mapbox.maps.extension.style.layers.addLayer
+import com.mapbox.maps.extension.style.layers.addLayerAbove
 import com.mapbox.maps.extension.style.layers.addLayerBelow
 import com.mapbox.maps.extension.style.layers.generated.RasterLayer
 import com.mapbox.maps.extension.style.layers.generated.circleLayer
@@ -109,14 +109,13 @@ import com.mapbox.maps.plugin.locationcomponent.createDefault2DPuck
 import com.mapbox.maps.plugin.locationcomponent.location
 import com.mapbox.maps.plugin.viewport.data.OverviewViewportStateOptions
 import com.mapbox.maps.toCameraOptions
-import java.io.File
 import java.util.Locale
-import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Base map styles offered on the Mapbox tab. */
@@ -129,17 +128,18 @@ private enum class MapboxBaseStyle(val label: String, val uri: String) {
 /** Control panels on the Mapbox tab. */
 private enum class MapboxPanel(val label: String) {
     MAP("Map"),
+    TERRAIN("3D"),
     LIDAR("LiDAR"),
     TOPO("Old topo"),
-    MODEL("3D model"),
 }
 
 private object MapboxIds {
     const val DEM_SOURCE = "findit-dem"
-    const val MODEL_DEM_SOURCE = "findit-dem-1m"
+    const val LIDAR_DEM_SOURCE = "findit-dem-lidar"
     const val USGS_SOURCE = "findit-usgs-topo"
     const val USGS_LAYER = "findit-usgs-topo-layer"
     const val HILLSHADE_LAYER = "findit-hillshade"
+    const val LIDAR_HILLSHADE_LAYER = "findit-hillshade-lidar"
     const val LIDAR_SOURCE = "findit-lidar"
     const val LIDAR_LAYER = "findit-lidar-layer"
     const val SURVEY_POLYGON_SOURCE = "findit-survey-polygons"
@@ -172,8 +172,8 @@ private data class MapboxDisplayState(
     val usgsTopo: Boolean,
     val showLidar: Boolean,
     val lidarOpacity: Float,
-    /** Use the 1 m model's elevation for 3D terrain instead of Mapbox's global DEM. */
-    val useModel: Boolean,
+    /** USGS lidar terrain tiles from [LidarTerrainServer]; null uses Mapbox's global DEM. */
+    val lidarTileUrl: String?,
 )
 
 /** The LiDAR hillshade bitmap and where it sits. Identity equality: rebuilt only when inputs change. */
@@ -191,7 +191,7 @@ private class MapboxVectorData(
 
 /**
  * Mapbox-powered site map: satellite/outdoor base maps, 3D terrain, live 1 m LiDAR relief from
- * USGS 3DEP, auto-aligned historic USGS topo maps by era, a 1 m 3D model of the view, and the
+ * USGS 3DEP, auto-aligned historic USGS topo maps by era, 3D ground from USGS lidar, and the
  * active LiDAR hillshade placed with the same saved alignment as the Google map tab.
  */
 @OptIn(FlowPreview::class)
@@ -264,10 +264,13 @@ fun MapboxTerrainMapScreen(
     var topoDecade by rememberSaveable { mutableStateOf<Int?>(null) }
     var topoDecades by remember { mutableStateOf<List<Int>>(emptyList()) }
 
-    // --- 3D model panel --------------------------------------------------------------------
-    var model by remember { mutableStateOf<TerrainModel?>(null) }
-    var modelStatus by remember { mutableStateOf<String?>(null) }
-    var modelBusy by remember { mutableStateOf(false) }
+    // --- 3D panel -----------------------------------------------------------------------------
+    // USGS lidar elevation by default: sharper than Mapbox's global DEM wherever 3DEP has flown.
+    var lidarTerrain by rememberSaveable { mutableStateOf(true) }
+    var lidarNote by remember { mutableStateOf<String?>(null) }
+    var lidarServer by remember { mutableStateOf<LidarTerrainServer?>(null) }
+    val lidarStatsFlow = remember(lidarServer) { lidarServer?.stats ?: MutableStateFlow(LidarTerrainServer.Stats()) }
+    val lidarStats by lidarStatsFlow.collectAsState()
 
     var hasLocationPermission by remember {
         mutableStateOf(
@@ -314,14 +317,14 @@ fun MapboxTerrainMapScreen(
         )
     }
     val display = MapboxDisplayState(
-        terrain3d, exaggeration, hillshade, usgsTopo, showLidar, lidarOpacity, useModel = model != null,
+        terrain3d, exaggeration, hillshade, usgsTopo, showLidar, lidarOpacity,
+        lidarTileUrl = lidarServer?.tileUrl?.takeIf { lidarTerrain },
     )
 
     // Style reloads wipe runtime layers; the load callback re-applies whatever is current.
     val latestDisplay by rememberUpdatedState(display)
     val latestLidar by rememberUpdatedState(lidarImage)
     val latestVectors by rememberUpdatedState(vectorData)
-    val latestModel by rememberUpdatedState(model)
     val latestReliefOn by rememberUpdatedState(reliefOn)
     val latestReliefOpacity by rememberUpdatedState(reliefOpacity)
     val latestTopoOn by rememberUpdatedState(topoOn)
@@ -357,7 +360,7 @@ fun MapboxTerrainMapScreen(
             OverviewViewportStateOptions.Builder()
                 .geometry(Polygon.fromLngLats(listOf(points + points.first())))
                 .padding(EdgeInsets(padding, padding, padding, padding))
-                .pitch(if (terrain3d) 50.0 else 0.0)
+                .pitch(if (terrain3d) TILT_DEGREES else 0.0)
                 .build(),
         )
     }
@@ -382,46 +385,37 @@ fun MapboxTerrainMapScreen(
         decade?.let { topoOverlay.showEra(it, b.minLat, b.maxLat, b.minLon, b.maxLon, lat, lon) }
     }
 
-    fun buildModel() {
-        val camera = mapViewportState.cameraState ?: return
-        val lat = camera.center.latitude()
-        val lon = camera.center.longitude()
-        val view = viewBounds() ?: return
-        // Keep the model to about 3 km across so it builds in a reasonable time.
-        val halfLat = minOf((view.maxLat - view.minLat) / 2, 1500.0 / 111_320.0)
-        val halfLon = minOf((view.maxLon - view.minLon) / 2, 1500.0 / (111_320.0 * cos(Math.toRadians(lat))))
-        modelBusy = true
-        modelStatus = "Fetching 1 m elevation…"
-        scope.launch {
-            val builder = TerrainModelBuilder(
-                ThreeDepElevationClient(File(context.cacheDir, "3dep-elevation")),
-                File(context.filesDir, "terrain-models"),
-            )
-            val built = withContext(Dispatchers.IO) {
-                runCatching {
-                    builder.build(lon - halfLon, lat - halfLat, lon + halfLon, lat + halfLat) { done, total ->
-                        scope.launch(Dispatchers.Main) { modelStatus = "Fetching 1 m elevation… $done of $total" }
-                    }
-                }.getOrNull()
-            }
-            modelBusy = false
-            if (built == null) {
-                modelStatus = "No USGS 1 m elevation here, or the download failed."
-            } else {
-                model = built
-                modelStatus = null
-                terrain3d = true
-                if (exaggeration < 2f) exaggeration = 2.5f
-                frameCorners(
-                    listOf(
-                        Point.fromLngLat(built.minLon, built.maxLat),
-                        Point.fromLngLat(built.maxLon, built.maxLat),
-                        Point.fromLngLat(built.maxLon, built.minLat),
-                        Point.fromLngLat(built.minLon, built.minLat),
-                    ),
-                )
+    fun tilt(degrees: Double) {
+        mapViewportState.easeTo(CameraOptions.Builder().pitch(degrees).build())
+    }
+
+    // The tile server binds a socket, so start it off the main thread the first time it's wanted.
+    LaunchedEffect(lidarTerrain) {
+        if (lidarTerrain && lidarServer == null) {
+            lidarServer = withContext(Dispatchers.IO) { runCatching { LidarTerrainServer.get(context) }.getOrNull() }
+            if (lidarServer == null) {
+                lidarTerrain = false
+                lidarNote = "Couldn't start USGS lidar elevation, so 3D uses Mapbox elevation."
             }
         }
+    }
+    // Safety net: if Mapbox never manages to read lidar tiles, fall back rather than leave 3D flat.
+    LaunchedEffect(lidarTerrain, terrain3d, lidarServer) {
+        val server = lidarServer ?: return@LaunchedEffect
+        if (!lidarTerrain || !terrain3d) return@LaunchedEffect
+        delay(LIDAR_CHECK_MS)
+        // Counted since the server started, so tiles Mapbox already holds can't look like a failure.
+        val now = server.stats.value
+        val zoom = mapViewportState.cameraState?.zoom ?: 0.0
+        if (zoom < 4.0) return@LaunchedEffect
+        lidarNote = when {
+            now.requested == 0 -> "The map didn't load USGS lidar elevation, so 3D uses Mapbox elevation."
+            now.served == 0 && now.noData >= 4 -> "USGS lidar covers the US only, so 3D uses Mapbox elevation here."
+            now.served + now.noData == 0 && now.failed >= 4 ->
+                "USGS lidar elevation isn't loading (no signal, or the USGS server is busy), so 3D uses Mapbox elevation."
+            else -> return@LaunchedEffect
+        }
+        lidarTerrain = false
     }
 
     LaunchedEffect(terrainKey, corners) {
@@ -454,7 +448,6 @@ fun MapboxTerrainMapScreen(
             MapEffect(Unit) { mapView -> mapViewRef = mapView }
             MapEffect(baseStyle) { mapView ->
                 mapView.mapboxMap.loadStyle(baseStyle.uri) { style ->
-                    style.applyTerrainModel(latestModel)
                     style.installFindItLayers(latestDisplay, latestLidar, latestVectors)
                     reliefOverlay.install(
                         style,
@@ -468,12 +461,6 @@ fun MapboxTerrainMapScreen(
                         visible = latestReliefOn,
                     )
                     topoOverlay.apply(style, LidarReliefOverlay.LAYER_ID, latestTopoOpacity.toDouble(), latestTopoOn)
-                }
-            }
-            MapEffect(model) { mapView ->
-                mapView.mapboxMap.getStyle { style ->
-                    style.applyTerrainModel(model)
-                    style.applyDisplay(latestDisplay)
                 }
             }
             MapEffect(display) { mapView ->
@@ -567,24 +554,11 @@ fun MapboxTerrainMapScreen(
                                         }
                                     }
                                     ChipRow {
-                                        FilterChip(
-                                            selected = terrain3d,
-                                            onClick = {
-                                                terrain3d = !terrain3d
-                                                mapViewportState.easeTo(
-                                                    CameraOptions.Builder().pitch(if (terrain3d) 50.0 else 0.0).build(),
-                                                )
-                                            },
-                                            label = { Text("3D terrain") },
-                                        )
                                         FilterChip(selected = hillshade, onClick = { hillshade = !hillshade }, label = { Text("Hillshade") })
                                         FilterChip(selected = usgsTopo, onClick = { usgsTopo = !usgsTopo }, label = { Text("USGS topo") })
                                         if (lidarImage.bitmap != null && lidarImage.corners != null) {
                                             FilterChip(selected = showLidar, onClick = { showLidar = !showLidar }, label = { Text("My LiDAR") })
                                         }
-                                    }
-                                    if (terrain3d) {
-                                        LabeledSlider("Exaggeration", String.format(Locale.US, "%.1fx", exaggeration), exaggeration, { exaggeration = it }, 1f..5f)
                                     }
                                     if (showLidar && lidarImage.bitmap != null && lidarImage.corners != null) {
                                         LabeledSlider("My LiDAR opacity", "${(lidarOpacity * 100).toInt()}%", lidarOpacity, { lidarOpacity = it }, 0.1f..1f)
@@ -722,24 +696,74 @@ fun MapboxTerrainMapScreen(
                                     )
                                 }
 
-                                MapboxPanel.MODEL -> {
-                                    Text(
-                                        "Builds a 3D model of the ground in view (up to about 3 km across) from USGS 1 m lidar. " +
-                                            "Raise the exaggeration to make low banks, pits and hollows easier to see. Any layer, " +
-                                            "including 1 m LiDAR relief and old topo, drapes over it.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(onClick = { buildModel() }, enabled = !modelBusy) {
-                                            Text(if (model == null) "Build 3D model here" else "Rebuild here")
-                                        }
-                                        if (model != null) {
-                                            OutlinedButton(onClick = { model = null }) { Text("Exit model") }
-                                        }
+                                MapboxPanel.TERRAIN -> {
+                                    ChipRow {
+                                        FilterChip(
+                                            selected = terrain3d,
+                                            onClick = {
+                                                terrain3d = !terrain3d
+                                                tilt(if (terrain3d) TILT_DEGREES else 0.0)
+                                            },
+                                            label = { Text(if (terrain3d) "3D terrain on" else "3D terrain off") },
+                                            modifier = Modifier.testTag("mapbox_terrain_toggle"),
+                                        )
                                     }
-                                    modelStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                                    if (model != null) {
-                                        LabeledSlider("Exaggeration", String.format(Locale.US, "%.1fx", exaggeration), exaggeration, { exaggeration = it }, 1f..8f)
+                                    if (terrain3d) {
+                                        Text("Elevation", style = MaterialTheme.typography.labelMedium)
+                                        ChipRow {
+                                            FilterChip(
+                                                selected = lidarTerrain,
+                                                onClick = {
+                                                    lidarTerrain = true
+                                                    lidarNote = null
+                                                },
+                                                label = { Text("USGS lidar (1 m)") },
+                                                modifier = Modifier.testTag("mapbox_terrain_lidar"),
+                                            )
+                                            FilterChip(
+                                                selected = !lidarTerrain,
+                                                onClick = { lidarTerrain = false },
+                                                label = { Text("Mapbox (worldwide)") },
+                                                modifier = Modifier.testTag("mapbox_terrain_mapbox"),
+                                            )
+                                        }
+                                        LabeledSlider(
+                                            "Exaggeration",
+                                            String.format(Locale.US, "%.1fx", exaggeration),
+                                            exaggeration,
+                                            { exaggeration = it },
+                                            1f..6f,
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            OutlinedButton(onClick = { tilt(TILT_DEGREES) }) { Text("Tilt") }
+                                            OutlinedButton(onClick = { tilt(0.0) }) { Text("Top-down") }
+                                        }
+                                        val note = when {
+                                            !lidarTerrain -> lidarNote
+                                            lidarServer == null -> "Starting USGS lidar elevation…"
+                                            lidarStats.inFlight > 0 -> "Loading lidar elevation… (${lidarStats.inFlight})"
+                                            lidarStats.failed > 0 && lidarStats.served == 0 ->
+                                                "Lidar elevation isn't loading yet. Check your connection."
+                                            else -> null
+                                        }
+                                        note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                                        Text(
+                                            if (lidarTerrain) {
+                                                "Bare-earth ground from USGS 3DEP: about 1 m where lidar has been flown, " +
+                                                    "coarser elsewhere, US only. Raise the exaggeration to make low banks, " +
+                                                    "pits and old roads stand out. Drag with two fingers to tilt and turn."
+                                            } else {
+                                                "Mapbox's worldwide elevation. Smoother than USGS lidar but loads instantly " +
+                                                    "and works outside the US. Drag with two fingers to tilt and turn."
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    } else {
+                                        Text(
+                                            "Turn on 3D terrain to see the ground in relief. Any layer, including 1 m LiDAR " +
+                                                "relief and old topo, drapes over it.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
                                     }
                                 }
                             }
@@ -887,30 +911,6 @@ private fun MapboxTokenMissing(modifier: Modifier) {
 
 // --- Runtime style layers -------------------------------------------------------------------
 
-/** Adds (or replaces) the 1 m terrain model's elevation source, or removes it. */
-private fun Style.applyTerrainModel(model: TerrainModel?) {
-    if (model == null) {
-        if (styleSourceExists(MapboxIds.MODEL_DEM_SOURCE)) {
-            removeTerrain()
-            removeStyleSource(MapboxIds.MODEL_DEM_SOURCE)
-        }
-        return
-    }
-    if (styleSourceExists(MapboxIds.MODEL_DEM_SOURCE)) {
-        removeTerrain()
-        removeStyleSource(MapboxIds.MODEL_DEM_SOURCE)
-    }
-    addSource(
-        rasterDemSource(MapboxIds.MODEL_DEM_SOURCE) {
-            tiles(listOf(model.tileUrlTemplate))
-            tileSize(256)
-            minzoom(model.minZoom.toLong())
-            maxzoom(model.maxZoom.toLong())
-            bounds(listOf(model.minLon, model.minLat, model.maxLon, model.maxLat))
-        },
-    )
-}
-
 /** Adds every Find It source and layer to a freshly loaded style, bottom to top. */
 private fun Style.installFindItLayers(
     display: MapboxDisplayState,
@@ -1028,19 +1028,53 @@ private fun Style.applyLidarImage(lidar: MapboxLidarImage) {
     }
 }
 
+/**
+ * Adds the USGS lidar elevation source and its hillshade once per style. The tile server lives as
+ * long as the app, so its URL never changes under a loaded style.
+ */
+private fun Style.ensureLidarDem(tileUrl: String) {
+    if (!styleSourceExists(MapboxIds.LIDAR_DEM_SOURCE)) {
+        addSource(
+            rasterDemSource(MapboxIds.LIDAR_DEM_SOURCE) {
+                tiles(listOf(tileUrl))
+                tileSize(LidarTerrainTiles.TILE.toLong())
+                maxzoom(LidarTerrainTiles.MAX_ZOOM.toLong())
+                attribution("Elevation: USGS 3DEP")
+            },
+        )
+    }
+    // Wait for the Find It layers: the lidar hillshade sits just above Mapbox's.
+    if (styleLayerExists(MapboxIds.LIDAR_HILLSHADE_LAYER) || !styleLayerExists(MapboxIds.HILLSHADE_LAYER)) return
+    addLayerAbove(
+        hillshadeLayer(MapboxIds.LIDAR_HILLSHADE_LAYER, MapboxIds.LIDAR_DEM_SOURCE) {
+            hillshadeExaggeration(0.6)
+            hillshadeShadowColor("#000000")
+            hillshadeHighlightColor("#FFFFFF")
+            visibility(Visibility.NONE)
+        },
+        MapboxIds.HILLSHADE_LAYER,
+    )
+}
+
 /** Applies toggles and sliders: terrain, layer visibility and opacity. */
 private fun Style.applyDisplay(display: MapboxDisplayState) {
-    val demSource = if (display.useModel && styleSourceExists(MapboxIds.MODEL_DEM_SOURCE)) {
-        MapboxIds.MODEL_DEM_SOURCE
-    } else {
-        MapboxIds.DEM_SOURCE
-    }
+    display.lidarTileUrl?.let { ensureLidarDem(it) }
+    val useLidar = display.lidarTileUrl != null && styleSourceExists(MapboxIds.LIDAR_DEM_SOURCE)
+    val demSource = if (useLidar) MapboxIds.LIDAR_DEM_SOURCE else MapboxIds.DEM_SOURCE
     if (display.terrain3d && styleSourceExists(demSource)) {
-        setTerrain(terrain(demSource) { exaggeration(display.exaggeration.toDouble()) })
+        val exaggeration = display.exaggeration.toDouble()
+        if (getStyleTerrainProperty("source").value.contents == demSource) {
+            // Same ground, new height: change the one property instead of rebuilding the terrain.
+            setStyleTerrainProperty("exaggeration", Value(exaggeration))
+        } else {
+            setTerrain(terrain(demSource) { exaggeration(exaggeration) })
+        }
     } else {
         removeTerrain()
     }
-    getLayer(MapboxIds.HILLSHADE_LAYER)?.visibility(display.hillshade.toVisibility())
+    // Hillshade follows whichever elevation the 3D ground uses, so shading and shape agree.
+    getLayer(MapboxIds.HILLSHADE_LAYER)?.visibility((display.hillshade && !useLidar).toVisibility())
+    getLayer(MapboxIds.LIDAR_HILLSHADE_LAYER)?.visibility((display.hillshade && useLidar).toVisibility())
     getLayer(MapboxIds.USGS_LAYER)?.visibility(display.usgsTopo.toVisibility())
     getLayerAs<RasterLayer>(MapboxIds.LIDAR_LAYER)?.let { layer ->
         layer.visibility(display.showLidar.toVisibility())
@@ -1059,3 +1093,9 @@ private fun Style.applyVectorData(vectors: MapboxVectorData) {
 }
 
 private fun Boolean.toVisibility(): Visibility = if (this) Visibility.VISIBLE else Visibility.NONE
+
+/** Camera tilt for 3D views: steep enough to read relief, low enough to keep the horizon out. */
+private const val TILT_DEGREES = 60.0
+
+/** How long lidar elevation gets to show up before 3D falls back to Mapbox elevation. */
+private const val LIDAR_CHECK_MS = 25_000L
