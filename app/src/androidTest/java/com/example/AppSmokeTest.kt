@@ -6,6 +6,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -59,6 +60,11 @@ class AppSmokeTest {
             thermal.setLatitude("42.75")
             thermal.setLongitude("-75.50")
         }
+
+        // The app opens on a landing screen; the tab bar lives in the workspace behind it.
+        rule.onNodeWithTag("open_workspace").performScrollTo().performClick()
+        settle(2_000)
+        assertAppAlive()
 
         AppDestination.primaryDestinations.forEach { dest ->
             rule.onNodeWithTag("nav_${dest.name.lowercase()}").performClick()
