@@ -54,7 +54,7 @@ class StandFinderTest {
         assertEquals(StandFeature.SADDLE, StandFinder.findCandidates(grid, null, null).first().feature)
         for (i in candidates.indices) for (j in i + 1 until candidates.size) {
             val d = StandFinder.distanceMeters(candidates[i].latitude, candidates[i].longitude, candidates[j].latitude, candidates[j].longitude)
-            assertTrue("candidates $i,$j only ${d}m apart", d >= 250.0)
+            assertTrue("candidates $i,$j only ${d}m apart", d >= StandFinder.MIN_PICK_SPACING_M)
         }
         candidates.forEach { assertTrue(it.bestScore in 0.0..1.0) }
         assertTrue(candidates.zipWithNext().all { (a, b) -> a.bestScore >= b.bestScore })
@@ -131,5 +131,53 @@ class StandFinderTest {
         assertTrue(user.contains("Back 40"))
         assertTrue(user.contains("Saddle"))
         assertTrue(user.lines().any { it.startsWith("1 |") })
+    }
+
+    @Test
+    fun searchAreaIsHalfAMile() {
+        val acrossFeet = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) * 3.28084
+        assertEquals(2_640.0, acrossFeet, 60.0)
+    }
+
+    @Test
+    fun picksStayOffMappedRoadsAndHouses() {
+        val grid = ridgeWithSaddle()
+        val free = StandFinder.findCandidates(grid, null, null)
+        val saddle = free.first { it.feature == StandFeature.SADDLE }
+        // A road running right through the saddle removes it.
+        val road = MappedObstacles.densify(listOf((saddle.latitude to saddle.longitude - 0.002), (saddle.latitude to saddle.longitude + 0.002)))
+        val blocked = StandFinder.findCandidates(grid, null, null, obstacles = MappedObstacles(road, emptyList()))
+        assertTrue(blocked.none { StandFinder.distanceMeters(it.latitude, it.longitude, saddle.latitude, saddle.longitude) < 1.0 })
+        assertTrue(blocked.all { !MappedObstacles(road, emptyList()).tooClose(it.latitude, it.longitude) })
+    }
+
+    @Test
+    fun parsesOverpassRoadsButNotFootpaths() {
+        val body = """
+            {"elements":[
+              {"type":"way","tags":{"highway":"residential"},"geometry":[{"lat":42.75,"lon":-75.50},{"lat":42.75,"lon":-75.499}]},
+              {"type":"way","tags":{"highway":"footway"},"geometry":[{"lat":42.76,"lon":-75.50},{"lat":42.76,"lon":-75.499}]},
+              {"type":"way","tags":{"building":"house"},"geometry":[{"lat":42.751,"lon":-75.501},{"lat":42.7511,"lon":-75.501}]}
+            ]}
+        """.trimIndent()
+        val obstacles = StandFinderService.parseObstacles(body)
+        assertTrue(obstacles.roadPoints.size > 2) // densified
+        assertTrue(obstacles.roadPoints.all { it.first == 42.75 })
+        assertEquals(2, obstacles.buildingPoints.size)
+        assertTrue(obstacles.tooClose(42.75, -75.4995))
+        assertTrue(!obstacles.tooClose(42.76, -75.4995)) // footpath ignored
+    }
+
+    @Test
+    fun distancesAreInFeetAndMiles() {
+        assertEquals("330 ft", StandFinder.formatDistance(100.0))
+        assertEquals("0.50 mi", StandFinder.formatDistance(804.67))
+    }
+
+    @Test
+    fun blockedAiServersGetAPlainExplanation() {
+        val msg = StandFinderService.explainAiFailure("All cloud providers failed. Grok: Unable to resolve host \"api.x.ai\": No address associated with hostname")
+        assertTrue(msg.contains("blocking the AI servers"))
+        assertEquals("HTTP 500", StandFinderService.explainAiFailure("HTTP 500"))
     }
 }

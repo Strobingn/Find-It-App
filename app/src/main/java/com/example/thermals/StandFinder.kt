@@ -10,7 +10,9 @@ import kotlin.math.hypot
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
+import java.util.Locale
 
 /** Terrain features whitetails use, in rough order of how good a stand spot they make. */
 enum class StandFeature(val label: String, val baseScore: Double, val blurb: String) {
@@ -103,7 +105,19 @@ data class StandPick(
 object StandFinder {
 
     const val GRID_SIZE = 17
-    const val GRID_SPACING_M = 100.0
+
+    /** 16 × 50 m = 800 m ≈ ½ mile across. */
+    const val GRID_SPACING_M = 50.0
+
+    /** Picks are kept at least this far apart (~400 ft). */
+    const val MIN_PICK_SPACING_M = 120.0
+
+    /** Anything farther than this from the search center is ignored (~0.4 mi). */
+    const val MAX_PICK_DISTANCE_M = 650.0
+
+    /** Stay this far from mapped roads (~130 ft) and buildings (~200 ft). */
+    const val ROAD_BUFFER_M = 40.0
+    const val BUILDING_BUFFER_M = 60.0
 
     /**
      * Finds stand-worthy terrain in the grid and scores each spot for the morning and evening sits.
@@ -112,7 +126,14 @@ object StandFinder {
      * in the evening from bedding back down. A spot scores well for a sit when the scent drift
      * (thermal + wind at that spot's own slope) points away from where deer come from.
      */
-    fun findCandidates(grid: ElevationGrid, field: ThermalWindEngine.FlowField?, prevailingFromDeg: Double?, maxCandidates: Int = 12): List<StandCandidate> {
+    fun findCandidates(
+        grid: ElevationGrid,
+        field: ThermalWindEngine.FlowField?,
+        prevailingFromDeg: Double?,
+        maxCandidates: Int = 12,
+        /** Mapped roads and buildings to stay away from (empty when unavailable). */
+        obstacles: MappedObstacles = MappedObstacles.NONE,
+    ): List<StandCandidate> {
         val raw = mutableListOf<Triple<Int, Int, StandFeature>>()
         val n = grid.size
         val s = grid.spacingMeters
@@ -166,7 +187,8 @@ object StandFinder {
         val kept = mutableListOf<StandCandidate>()
         for (cand in scored) {
             if (kept.size >= maxCandidates) break
-            if (kept.none { distanceMeters(it.latitude, it.longitude, cand.latitude, cand.longitude) < 250.0 }) kept += cand
+            if (obstacles.tooClose(cand.latitude, cand.longitude)) continue
+            if (kept.none { distanceMeters(it.latitude, it.longitude, cand.latitude, cand.longitude) < MIN_PICK_SPACING_M }) kept += cand
         }
         return kept.mapIndexed { i, cand -> cand.copy(id = i + 1) }
     }
@@ -220,7 +242,8 @@ object StandFinder {
         val nw = grid.at(r - 1, c - 1)
         val se = grid.at(r + 1, c + 1)
         val spacing = grid.spacingMeters
-        val tol = 1.5 // meters; below DEM noise
+        val k = spacing / 100.0 // relief thresholds below were tuned on a 100 m grid
+        val tol = 1.0 // meters; at DEM noise
 
         // Saddle: higher on both ends of one axis, lower on both ends of the perpendicular axis.
         val pairs = listOf((n to s) to (e to w), (ne to sw) to (nw to se))
@@ -238,10 +261,10 @@ object StandFinder {
         // Bench: nearly flat here but steep just above and below along the fall line.
         if (slope < 7.0) {
             val (u2, upSlope) = steepnessAround(grid, r, c, spacing)
-            if (u2 != null && upSlope > 11.0 && tpi > -6.0 && tpi < 6.0) return StandFeature.BENCH
+            if (u2 != null && upSlope > 11.0 && tpi > -6.0 * k && tpi < 6.0 * k) return StandFeature.BENCH
         }
         // Ridge point: sticks up above its surroundings.
-        if (tpi > 8.0 && slope in 3.0..25.0) {
+        if (tpi > 8.0 * k && slope in 3.0..25.0) {
             // Leeward upper slope of a ridge doubles as bedding when the wind is known.
             if (prevailingFromDeg != null && uphill != null) {
                 val aspect = ThermalWindEngine.normalize(uphill + 180.0)
@@ -250,7 +273,7 @@ object StandFinder {
             return StandFeature.RIDGE_POINT
         }
         // Draw head: a hollow (below surroundings) where the ground keeps rising beyond it.
-        if (tpi < -6.0 && slope in 4.0..30.0) return StandFeature.DRAW_HEAD
+        if (tpi < -6.0 * k && slope in 4.0..30.0) return StandFeature.DRAW_HEAD
         return null
     }
 
@@ -306,7 +329,7 @@ object StandFinder {
                 bestTime = window.label,
                 wind = "Best with scent going ${ThermalWindEngine.compass(c.bestScentToward)}" +
                     (deerFrom?.let { " — away from deer coming from the ${ThermalWindEngine.compass(it)}" } ?: ""),
-                why = "A ${c.feature.blurb}. %.0f ft, %.0f° slope.".format(c.elevationFeet, c.slopeDegrees),
+                why = "A ${c.feature.blurb}. %,.0f ft elevation, %.0f° slope.".format(c.elevationFeet, c.slopeDegrees),
                 entry = deerFrom?.let { "Walk in from the ${ThermalWindEngine.compass(it + 180.0)} side so you never cross where deer come from." }
                     ?: "Approach on the downwind side.",
                 scentToward = c.bestScentToward,
@@ -328,6 +351,12 @@ object StandFinder {
                 candidateId = c.id,
             )
         }
+    }
+
+    /** US-style distance: feet under a tenth of a mile, otherwise miles. */
+    fun formatDistance(meters: Double): String {
+        val feet = meters * 3.28084
+        return if (feet < 528.0) "%,d ft".format(Locale.US, (feet / 10.0).roundToInt() * 10) else "%.2f mi".format(Locale.US, feet / 5280.0)
     }
 
     fun angleDiff(a: Double, b: Double): Double = abs(((a - b + 540.0) % 360.0) - 180.0)
@@ -387,5 +416,47 @@ object StandFinder {
         val xp = ((x(lon) - x(centerLon)) / widthPx + 0.5) * 100.0
         val yp = ((y(lat) - y(centerLat)) / heightPx + 0.5) * 100.0
         return xp to yp
+    }
+}
+
+/**
+ * Roads and buildings from OpenStreetMap, as point samples (segments are densified), so picks
+ * don't land on a road shoulder or in someone's yard.
+ */
+class MappedObstacles(
+    val roadPoints: List<Pair<Double, Double>>,
+    val buildingPoints: List<Pair<Double, Double>>,
+) {
+    fun tooClose(lat: Double, lon: Double): Boolean =
+        roadPoints.any { StandFinder.distanceMeters(lat, lon, it.first, it.second) < StandFinder.ROAD_BUFFER_M } ||
+            buildingPoints.any { StandFinder.distanceMeters(lat, lon, it.first, it.second) < StandFinder.BUILDING_BUFFER_M }
+
+    /** Feet to the nearest road / building, for the AI's context (null when none mapped). */
+    fun nearestRoadFeet(lat: Double, lon: Double): Double? =
+        roadPoints.minOfOrNull { StandFinder.distanceMeters(lat, lon, it.first, it.second) }?.let { it * 3.28084 }
+
+    fun nearestBuildingFeet(lat: Double, lon: Double): Double? =
+        buildingPoints.minOfOrNull { StandFinder.distanceMeters(lat, lon, it.first, it.second) }?.let { it * 3.28084 }
+
+    val isEmpty: Boolean get() = roadPoints.isEmpty() && buildingPoints.isEmpty()
+
+    companion object {
+        val NONE = MappedObstacles(emptyList(), emptyList())
+
+        /** Splits a polyline into points no more than [stepMeters] apart. */
+        fun densify(line: List<Pair<Double, Double>>, stepMeters: Double = 15.0): List<Pair<Double, Double>> {
+            if (line.size < 2) return line
+            val out = mutableListOf(line.first())
+            for (i in 1 until line.size) {
+                val (a, b) = line[i - 1] to line[i]
+                val d = StandFinder.distanceMeters(a.first, a.second, b.first, b.second)
+                val n = (d / stepMeters).toInt().coerceAtLeast(1)
+                for (j in 1..n) {
+                    val f = j.toDouble() / n
+                    out += (a.first + (b.first - a.first) * f) to (a.second + (b.second - a.second) * f)
+                }
+            }
+            return out
+        }
     }
 }
