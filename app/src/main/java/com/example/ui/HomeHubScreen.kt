@@ -1,5 +1,8 @@
 package com.example.ui
 
+import com.example.update.CrashLog
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import android.content.Intent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -97,6 +100,7 @@ fun HomeHubScreen(
     }
 
     val updateController = rememberAppUpdateController(checkOnLaunch = false)
+    var crashReport by remember { mutableStateOf(CrashLog.read(context)) }
 
     val workspaceCards = listOf(
         AppDestination.TERRAIN,
@@ -141,6 +145,46 @@ fun HomeHubScreen(
                     contentDescription = null,
                     modifier = Modifier.size(36.dp),
                 )
+            }
+        }
+
+        crashReport?.let { report ->
+            item {
+                IosSection(
+                    header = "Last crash",
+                    footer = "Share sends the error report (no location or personal data) so it can be fixed.",
+                    modifier = Modifier.testTag("home_last_crash"),
+                ) {
+                    IosRow(
+                        title = "The app crashed last time",
+                        subtitle = CrashLog.summary(report),
+                        titleColor = MaterialTheme.colorScheme.error,
+                    )
+                    IosDivider(startInset = 16.dp)
+                    IosRow(
+                        title = "Share crash report",
+                        icon = Icons.Default.Share,
+                        showChevron = true,
+                        onClick = {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "Find It crash report")
+                                putExtra(Intent.EXTRA_TEXT, report)
+                            }
+                            context.startActivity(Intent.createChooser(send, "Share crash report"))
+                        },
+                        modifier = Modifier.testTag("home_share_crash"),
+                    )
+                    IosDivider(startInset = IosIconRowDividerInset)
+                    IosRow(
+                        title = "Dismiss",
+                        titleColor = MaterialTheme.colorScheme.primary,
+                        onClick = {
+                            CrashLog.clear(context)
+                            crashReport = null
+                        },
+                    )
+                }
             }
         }
 
