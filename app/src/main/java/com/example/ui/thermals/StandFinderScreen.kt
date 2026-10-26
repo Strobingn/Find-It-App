@@ -34,6 +34,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -59,6 +61,7 @@ import com.example.ui.ios.IosRow
 import com.example.ui.ios.IosSection
 import com.example.ui.ios.IosSheet
 import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.MapsInitializer
 import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
@@ -100,8 +103,14 @@ fun StandFinderScreen(
         thermalViewModel.offerSiteLocation((bounds.minLat + bounds.maxLat) / 2.0, (bounds.minLon + bounds.maxLon) / 2.0, siteMetadata.siteName)
     }
 
+    // Make sure the Maps SDK (and BitmapDescriptorFactory, used for the numbered pins) is ready.
+    remember(context) { runCatching { MapsInitializer.initialize(context.applicationContext) } }
+
     val lat = thermal.latitude
     val lon = thermal.longitude
+    // Camera animations only start after the map has loaded: maps-compose throws (and kills the
+    // app) if a pending animation sees the map detach before it was ever attached.
+    var mapLoaded by remember { mutableStateOf(false) }
     val cameraPositionState = rememberCameraPositionState {
         position = if (lat != null && lon != null) {
             CameraPosition.fromLatLngZoom(LatLng(lat, lon), 15f)
@@ -109,14 +118,15 @@ fun StandFinderScreen(
             CameraPosition.fromLatLngZoom(LatLng(39.5, -98.35), 3.5f)
         }
     }
-    LaunchedEffect(lat, lon) {
-        if (lat != null && lon != null) {
-            cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15f), 800)
+    LaunchedEffect(lat, lon, mapLoaded) {
+        if (mapLoaded && lat != null && lon != null) {
+            runCatching { cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15f), 800) }
         }
     }
-    LaunchedEffect(finder.selectedRank) {
+    LaunchedEffect(finder.selectedRank, mapLoaded) {
+        if (!mapLoaded) return@LaunchedEffect
         finder.selected?.let { pick ->
-            cameraPositionState.animate(CameraUpdateFactory.newLatLng(LatLng(pick.latitude, pick.longitude)), 500)
+            runCatching { cameraPositionState.animate(CameraUpdateFactory.newLatLng(LatLng(pick.latitude, pick.longitude)), 500) }
         }
     }
 
@@ -139,11 +149,12 @@ fun StandFinderScreen(
             cameraPositionState = cameraPositionState,
             properties = MapProperties(mapType = MapType.HYBRID),
             uiSettings = MapUiSettings(zoomControlsEnabled = false, mapToolbarEnabled = false, compassEnabled = true),
+            onMapLoaded = { mapLoaded = true },
             onMapLongClick = { latLng -> thermalViewModel.useLocation(latLng.latitude, latLng.longitude, "Map pin") },
         ) {
             // Search center.
             if (lat != null && lon != null) {
-                val centerIcon = remember { dotIcon(Color.White, 22) }
+                val centerIcon = remember { runCatching { dotIcon(Color.White, 22) }.getOrNull() }
                 Marker(
                     state = remember(lat, lon) { MarkerState(position = LatLng(lat, lon)) },
                     title = "Search center",
@@ -173,7 +184,7 @@ fun StandFinderScreen(
                     )
                 }
                 val icon = remember(pick.rank, pick.kind) {
-                    numberedPin(pick.rank, if (pick.kind == StandPick.Kind.AREA) AreaPinColor else StandPinColor)
+                    runCatching { numberedPin(pick.rank, if (pick.kind == StandPick.Kind.AREA) AreaPinColor else StandPinColor) }.getOrNull()
                 }
                 Marker(
                     state = remember(pick.latitude, pick.longitude) { MarkerState(position = position) },
