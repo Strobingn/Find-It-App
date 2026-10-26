@@ -88,6 +88,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel as composeViewModel
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.Switch
 import androidx.compose.ui.draw.clip
@@ -100,6 +101,7 @@ import com.example.ui.ios.IosSheet
 import com.example.ui.ios.IosNavBar
 import com.example.ui.ios.IosTabBar
 import com.example.ui.ios.IosTabItem
+import com.example.ui.thermals.StandFinderScreen
 import com.example.ui.thermals.ThermalWindMapScreen
 import com.example.ui.thermals.ThermalWindScreen
 import com.example.R
@@ -172,7 +174,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     Scaffold(
         modifier = modifier.fillMaxSize().testTag("main_scaffold"),
         topBar = {
-            if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME && current != AppDestination.WIND_MAP) {
+            if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME && current != AppDestination.WIND_MAP && current != AppDestination.STANDS) {
                 IosNavBar(
                     title = current.title,
                     backLabel = if (isPrimary) null else AppDestination.HOME.label,
@@ -207,6 +209,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
             AppDestination.FIELD -> FindsTab(viewModel, padding)
             AppDestination.THERMALS -> ThermalsTab(viewModel, padding)
             AppDestination.WIND_MAP -> WindMapTab(viewModel, padding)
+            AppDestination.STANDS -> StandsTab(viewModel, padding)
             AppDestination.AI -> GeminiTab(viewModel, padding)
             AppDestination.LIBRARY -> ImportTab(viewModel, padding) {
                 navigate(AppDestination.TERRAIN)
@@ -1250,6 +1253,15 @@ private fun WindMapTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 }
 
 @Composable
+private fun StandsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
+    val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    StandFinderScreen(
+        padding = padding,
+        siteMetadata = metadata.takeIf { it.isGeoreferenced },
+    )
+}
+
+@Composable
 private fun GeminiTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     AiAnalysisWorkspace(viewModel = viewModel, padding = padding)
 }
@@ -1398,6 +1410,7 @@ private fun ImportTab(
     val offlineMessage by viewModel.offlineBasemapMessage.collectAsStateWithLifecycle()
     val offlineDownloading by viewModel.offlineBasemapDownloading.collectAsStateWithLifecycle()
     val deviceScanning by com.example.data.DeviceLidarScanner.scanning.collectAsStateWithLifecycle()
+    var showBasemaps by rememberSaveable { mutableStateOf(false) }
     androidx.compose.material3.pulltorefresh.PullToRefreshBox(
         isRefreshing = deviceScanning,
         onRefresh = { com.example.ui.components.DeviceLidarScanRequests.request() },
@@ -1420,26 +1433,24 @@ private fun ImportTab(
                 .padding(start = 16.dp, top = 12.dp, end = 16.dp),
         )
 
-        OfflineBasemapManager(
-            suggestedName = metadata.siteName,
-            regions = offlineRegions,
-            plan = offlinePlan,
-            progress = offlineProgress,
-            isDownloading = offlineDownloading,
-            message = offlineMessage,
-            onEstimate = viewModel::estimateOfflineBasemapRegion,
-            onDownload = viewModel::downloadOfflineBasemapRegion,
-            onCancel = viewModel::cancelOfflineBasemapDownload,
-            onOpen = {
-                viewModel.openOfflineBasemapRegion(it)
-                onImported()
-            },
-            onRetry = viewModel::retryOfflineBasemapRegion,
-            onDelete = viewModel::deleteOfflineBasemapRegion,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp),
-        )
+        IosSection(
+            header = "Offline",
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            val ready = offlineRegions.count { it.status == com.example.data.basemap.OfflineBasemapStatus.READY }
+            IosRow(
+                title = "Offline basemaps",
+                subtitle = when {
+                    offlineDownloading -> "Downloading…"
+                    ready > 0 -> "$ready region${if (ready == 1) "" else "s"} ready"
+                    else -> "Save map tiles for areas with no signal"
+                },
+                icon = Icons.Default.Map,
+                showChevron = true,
+                onClick = { showBasemaps = true },
+                modifier = Modifier.testTag("library_basemaps_row"),
+            )
+        }
 
         SurveyLayerImporter(
             layers = surveyLayers,
@@ -1470,6 +1481,29 @@ private fun ImportTab(
             },
         )
     }
+    }
+    if (showBasemaps) {
+        IosSheet(title = "Offline basemaps", onDismiss = { showBasemaps = false }) {
+            OfflineBasemapManager(
+                suggestedName = metadata.siteName,
+                regions = offlineRegions,
+                plan = offlinePlan,
+                progress = offlineProgress,
+                isDownloading = offlineDownloading,
+                message = offlineMessage,
+                onEstimate = viewModel::estimateOfflineBasemapRegion,
+                onDownload = viewModel::downloadOfflineBasemapRegion,
+                onCancel = viewModel::cancelOfflineBasemapDownload,
+                onOpen = {
+                    viewModel.openOfflineBasemapRegion(it)
+                    showBasemaps = false
+                    onImported()
+                },
+                onRetry = viewModel::retryOfflineBasemapRegion,
+                onDelete = viewModel::deleteOfflineBasemapRegion,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 

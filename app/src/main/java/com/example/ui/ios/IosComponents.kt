@@ -318,6 +318,42 @@ fun IosRow(
     }
 }
 
+/** iOS toolbar item: icon over a 10sp label; tint when active, grey otherwise, faded when disabled. */
+@Composable
+fun IosToolbarItem(
+    label: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val tint = when {
+        !enabled -> MaterialTheme.colorScheme.outline
+        active -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .widthIn(min = 56.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.height(2.dp))
+        Text(
+            label,
+            color = tint,
+            fontSize = 10.sp,
+            lineHeight = 12.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
 /** Icon-tile inset for dividers between rows that have icons (16 + 29 + 12). */
 val IosIconRowDividerInset: Dp = IosMetrics.SectionInset + IosMetrics.IconTile + 12.dp
 

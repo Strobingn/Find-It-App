@@ -1,5 +1,6 @@
 package com.example.ui
 
+import com.example.ui.ios.IosSegmentedControl
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -415,453 +416,465 @@ fun AiAnalysisWorkspace(
         )
     }
 
+    var aiPane by rememberSaveable { mutableStateOf(0) }
     Column(
         modifier = Modifier.fillMaxSize().padding(padding),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalArrangement = Arrangement.spacedBy(7.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+        // iOS segmented control: map analysis and chat each get the whole screen instead of splitting it.
+        IosSegmentedControl(
+            options = listOf("Map analysis", "Chat"),
+            selectedIndex = aiPane,
+            onSelect = { aiPane = it },
+            modifier = Modifier
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .testTag("ai_pane_switch"),
+        )
+        if (aiPane == 0) {
+            Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            if (aiState.showSourceHillshade) {
-                                sourceRenderLabel
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                if (aiState.showSourceHillshade) {
+                                    sourceRenderLabel
+                                } else {
+                                    aiState.localResult?.let { aiState.selectedLayer.label } ?: "AI terrain layer"
+                                },
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                when {
+                                    localLayerPending -> "Rendering ${pendingLocalLayer.value?.label ?: "AI layer"}…"
+                                    centerMarkerMode.value -> "Pan/zoom until the target is centered, then save it"
+                                    isRefining -> "Reloading original LAZ detail without changing your zoom…"
+                                    canRefine -> "${"%.1f".format(zoomLevel.value)}× · tap Refine for source detail"
+                                    else -> "Pre-1900 silver-site profile · pinch and drag"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        FilledTonalButton(
+                            onClick = {
+                                val requested = visibleBounds.value.sanitized()
+                                viewModel.refineTerrain(requested, viewModel.recommendedAiRefineResolution())
+                            },
+                            enabled = canRefine && !isRefining && !centerMarkerMode.value,
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_refine_now_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) {
+                            Text(
+                                if (!canRefine) "No LAZ source" else if (isRefining) "Refining…" else "Refine",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                        Button(
+                            onClick = { assistantViewModel.runLocalAnalysis(grid, summary, signals) },
+                            enabled = !aiState.isLocalAnalyzing,
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_run_local_analysis_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) {
+                            if (aiState.isLocalAnalyzing) {
+                                CircularProgressIndicator(modifier = Modifier.height(14.dp), strokeWidth = 2.dp)
                             } else {
-                                aiState.localResult?.let { aiState.selectedLayer.label } ?: "AI terrain layer"
-                            },
-                            fontWeight = FontWeight.Bold,
-                        )
+                                Text(if (aiState.localResult == null) "Analyze" else "Re-run", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+
+                    if (aiState.localResult != null) {
                         Text(
-                            when {
-                                localLayerPending -> "Rendering ${pendingLocalLayer.value?.label ?: "AI layer"}…"
-                                centerMarkerMode.value -> "Pan/zoom until the target is centered, then save it"
-                                isRefining -> "Reloading original LAZ detail without changing your zoom…"
-                                canRefine -> "${"%.1f".format(zoomLevel.value)}× · tap Refine for source detail"
-                                else -> "Pre-1900 silver-site profile · pinch and drag"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
+                            "Historic silver profile: homesites, cellar holes, refuse/privy pits, wagon roads, camps and stone walls",
+                            style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            FilterChip(
+                                selected = aiState.showSourceHillshade,
+                                onClick = {
+                                    pendingLocalLayer.value = null
+                                    assistantViewModel.selectSourceHillshade()
+                                },
+                                label = { Text("Source: $sourceRenderLabel", style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.height(CompactButtonHeight),
+                            )
+                            TerrainDerivedLayer.entries.forEach { layer ->
+                                FilterChip(
+                                    selected = !aiState.showSourceHillshade && aiState.selectedLayer == layer,
+                                    onClick = {
+                                        localBitmapAtRequest.value = aiState.localLayerBitmap
+                                        pendingLocalLayer.value = layer
+                                        assistantViewModel.selectLocalLayer(layer)
+                                    },
+                                    enabled = pendingLocalLayer.value == null,
+                                    label = { Text(layer.label, style = MaterialTheme.typography.labelSmall) },
+                                    modifier = Modifier.height(CompactButtonHeight),
+                                )
+                            }
+                        }
                     }
-                    FilledTonalButton(
-                        onClick = {
-                            val requested = visibleBounds.value.sanitized()
-                            viewModel.refineTerrain(requested, viewModel.recommendedAiRefineResolution())
-                        },
-                        enabled = canRefine && !isRefining && !centerMarkerMode.value,
-                        modifier = Modifier.height(CompactButtonHeight).testTag("ai_refine_now_button"),
-                        contentPadding = CompactButtonPadding,
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        OutlinedButton(
+                            onClick = { centerMarkerMode.value = !centerMarkerMode.value },
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_marker_mode_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) {
+                            Text(
+                                if (centerMarkerMode.value) "Cancel marker" else "Mark map center",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                val bounds = visibleBounds.value.sanitized()
+                                val centerX = ((bounds.left + bounds.right) * 50.0).toFloat()
+                                val centerY = ((bounds.top + bounds.bottom) * 50.0).toFloat()
+                                saveMarker(
+                                    centerX,
+                                    centerY,
+                                    MetalType.MANUAL_MARKER,
+                                    DetectionSource.MANUAL,
+                                    0f,
+                                    "Manual historic-site marker placed at the center of the zoomed AI viewport.",
+                                )
+                                centerMarkerMode.value = false
+                            },
+                            enabled = centerMarkerMode.value,
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_save_manual_marker_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) { Text("Save center", style = MaterialTheme.typography.labelSmall) }
+                        Button(
+                            onClick = {
+                                showHistoricTargets.value = !showHistoricTargets.value
+                            },
+                            enabled = historicTargets.isNotEmpty(),
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_add_target_markers_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) {
+                            Text(
+                                if (showHistoricTargets.value) "Hide historic targets" else "Mark historic targets",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                        if (historicTargets.isNotEmpty()) {
+                            OutlinedButton(
+                                onClick = { showTargetDetails.value = !showTargetDetails.value },
+                                modifier = Modifier.height(CompactButtonHeight).testTag("ai_show_target_details_button"),
+                                contentPadding = CompactButtonPadding,
+                            ) {
+                                Text(
+                                    if (showTargetDetails.value) "Hide details" else "Show details",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                        if (huntZones.size > 1) {
+                            OutlinedButton(
+                                onClick = { showHuntZones.value = !showHuntZones.value },
+                                modifier = Modifier.height(CompactButtonHeight).testTag("ai_toggle_hunt_zones_button"),
+                                contentPadding = CompactButtonPadding,
+                            ) {
+                                Text(
+                                    if (showHuntZones.value) "Hide zones" else "Zones (${huntZones.size})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                        if (visibleCloudTargets.isNotEmpty()) {
+                            OutlinedButton(
+                                onClick = { showCloudTargets.value = !showCloudTargets.value },
+                                modifier = Modifier.height(CompactButtonHeight).testTag("ai_toggle_cloud_targets_button"),
+                                contentPadding = CompactButtonPadding,
+                            ) {
+                                Text(
+                                    if (showCloudTargets.value) "Hide cloud AI (${visibleCloudTargets.size})" else "Show cloud AI (${visibleCloudTargets.size})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { assistantViewModel.classifyTargets(grid, summary, sourceBitmap) },
+                            enabled = !aiState.isClassifyingTargets && grid.width > 2 && aiState.activeProvider != null,
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_classify_targets_button"),
+                            contentPadding = CompactButtonPadding,
+                        ) {
+                            if (aiState.isClassifyingTargets) {
+                                CircularProgressIndicator(modifier = Modifier.height(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("Classify disturbance targets", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                        if (analyzedDatasets.size >= 2) {
+                            OutlinedButton(
+                                onClick = { showDatasetComparison.value = true },
+                                modifier = Modifier.height(CompactButtonHeight).testTag("ai_compare_datasets_button"),
+                                contentPadding = CompactButtonPadding,
+                            ) { Text("Compare datasets", style = MaterialTheme.typography.labelSmall) }
+                            OutlinedButton(
+                                onClick = { showTwoEpochCompare.value = true },
+                                modifier = Modifier.height(CompactButtonHeight).testTag("ai_two_epoch_button"),
+                                contentPadding = CompactButtonPadding,
+                            ) { Text("Two-epoch Δ", style = MaterialTheme.typography.labelSmall) }
+                        }
+                        Text("${signals.size} saved", style = MaterialTheme.typography.labelMedium)
+                    }
+
+                    aiState.classificationError?.let { error ->
                         Text(
-                            if (!canRefine) "No LAZ source" else if (isRefining) "Refining…" else "Refine",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 4.dp),
                         )
                     }
-                    Button(
-                        onClick = { assistantViewModel.runLocalAnalysis(grid, summary, signals) },
-                        enabled = !aiState.isLocalAnalyzing,
-                        modifier = Modifier.height(CompactButtonHeight).testTag("ai_run_local_analysis_button"),
-                        contentPadding = CompactButtonPadding,
-                    ) {
-                        if (aiState.isLocalAnalyzing) {
-                            CircularProgressIndicator(modifier = Modifier.height(14.dp), strokeWidth = 2.dp)
-                        } else {
-                            Text(if (aiState.localResult == null) "Analyze" else "Re-run", style = MaterialTheme.typography.labelSmall)
+                    if (aiState.classifiedTargets.isNotEmpty()) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).testTag("ai_classified_targets_list"),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(aiState.classifiedTargets) { target ->
+                                Text(
+                                    text = "${target.label} · ${(target.confidence * 100f).toInt()}% — ${target.description}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
+
+                    if (showHuntZones.value && huntZones.isNotEmpty()) {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 180.dp)
+                                .testTag("ai_hunt_zone_list"),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            items(huntZones, key = { it.id }) { zone ->
+                                HuntZoneCard(
+                                    zone = zone,
+                                    onNavigate = GeoSpatialLibrary.gridToGeographic(
+                                        zone.centerXPercent,
+                                        zone.centerYPercent,
+                                        metadata,
+                                    )?.let { (lat, lon) ->
+                                        {
+                                            viewModel.setNavigationTarget(
+                                                NavigationTarget(
+                                                    label = "Zone ${zone.id} · ${zone.dominantType.label}",
+                                                    latitude = lat,
+                                                    longitude = lon,
+                                                ),
+                                            )
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    if (showTargetDetails.value && historicTargets.isNotEmpty()) {
+                        if (selectedCandidateSummary.isNotBlank()) {
+                            Text(
+                                "AI focus set — dig brief / evidence chain will prioritize it",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .padding(bottom = 4.dp)
+                                    .testTag("ai_focus_candidate_hint"),
+                            )
+                        }
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                                .testTag("ai_target_details_list"),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            items(historicTargets.sortedByDescending { it.score }, key = { "${it.type}-${it.xPercent}-${it.yPercent}" }) { target ->
+                                TargetDetailCard(
+                                    target = target,
+                                    zoneId = targetZoneIds[target],
+                                    depthEstimate = aiState.localResult?.layers?.let {
+                                        DigDepthEstimator.estimate(target, it)
+                                    },
+                                    onNavigate = GeoSpatialLibrary.gridToGeographic(
+                                        target.xPercent,
+                                        target.yPercent,
+                                        metadata,
+                                    )?.let { (lat, lon) ->
+                                        {
+                                            viewModel.setNavigationTarget(
+                                                NavigationTarget(
+                                                    label = "${target.type.label} · ${(target.score * 100f).toInt()}%",
+                                                    latitude = lat,
+                                                    longitude = lon,
+                                                ),
+                                            )
+                                        }
+                                    },
+                                    onFocusForAi = {
+                                        selectedCandidateSummary = buildString {
+                                            append(target.type.label)
+                                            append(" · score=").append((target.score * 100f).toInt()).append("%")
+                                            append(" · x=").append("%.1f".format(target.xPercent)).append("%")
+                                            append(" y=").append("%.1f".format(target.yPercent)).append("%")
+                                            if (target.evidence.isNotEmpty()) {
+                                                append(" · evidence=").append(target.evidence.joinToString("; "))
+                                            }
+                                            if (target.cautionReasons.isNotEmpty()) {
+                                                append(" · cautions=").append(target.cautionReasons.joinToString("; "))
+                                            }
+                                        }
+                                    },
+                                    onLog = {
+                                        saveMarker(
+                                            target.xPercent,
+                                            target.yPercent,
+                                            MetalType.MAGNETIC_ANOMALY,
+                                            DetectionSource.AI_ANALYSIS,
+                                            target.score * 100f,
+                                            "Historic AI candidate: ${target.type.label} · ${target.evidence.joinToString(" · ")}",
+                                            detectedFeatureType = target.type.name,
+                                        )
+                                    },
+                                )
+                            }
                         }
                     }
                 }
+            }
 
-                if (aiState.localResult != null) {
+            LidarMapCanvas(
+                bitmap = analysisBitmap,
+                isRendering = isRendering || aiState.isLocalAnalyzing || localLayerPending,
+                sweepX = 50f,
+                sweepY = 50f,
+                loggedSignals = signals.filterNot { it.source == DetectionSource.CLOUD_AI },
+                onSweepPositionChanged = { _, _ -> },
+                onStopSweeping = {},
+                gridSpacing = gridSpacing,
+                geoMetadata = metadata,
+                currentLat = null,
+                currentLon = null,
+                mode = LidarCanvasMode.EXPLORE,
+                viewportResetKey = 0,
+                showSurveyCursor = false,
+                showCoordinateHud = false,
+                overlayTargets = classifiedTargetOverlays + cloudTargetOverlays +
+                    if (showHistoricTargets.value) targetOverlays else emptyList(),
+                onViewportChanged = { bounds, zoom, _, _ ->
+                    visibleBounds.value = bounds
+                    zoomLevel.value = zoom
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .testTag("ai_single_analysis_map"),
+            )
+
+            if (isRefining) {
+                val progress = refinementProgress
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    LinearProgressIndicator(
+                        progress = { progress?.fraction?.coerceIn(0f, 1f) ?: 0f },
+                        modifier = Modifier.fillMaxWidth().testTag("ai_refine_progress"),
+                    )
                     Text(
-                        "Historic silver profile: homesites, cellar holes, refuse/privy pits, wagon roads, camps and stone walls",
+                        progress?.message ?: "Preparing refinement…",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            } else if (aiState.isLocalAnalyzing || localLayerPending) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
+            if (alternateDatasets.size > 1) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                        .testTag("ai_secondary_dataset_picker"),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        "Compare secondary site",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                     Row(
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        FilterChip(
-                            selected = aiState.showSourceHillshade,
-                            onClick = {
-                                pendingLocalLayer.value = null
-                                assistantViewModel.selectSourceHillshade()
-                            },
-                            label = { Text("Source: $sourceRenderLabel", style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.height(CompactButtonHeight),
-                        )
-                        TerrainDerivedLayer.entries.forEach { layer ->
+                        alternateDatasets.forEach { ds ->
                             FilterChip(
-                                selected = !aiState.showSourceHillshade && aiState.selectedLayer == layer,
-                                onClick = {
-                                    localBitmapAtRequest.value = aiState.localLayerBitmap
-                                    pendingLocalLayer.value = layer
-                                    assistantViewModel.selectLocalLayer(layer)
+                                selected = secondaryDataset?.datasetKey == ds.datasetKey,
+                                onClick = { selectedSecondaryKey = ds.datasetKey },
+                                label = {
+                                    Text(
+                                        ds.displayName.take(28).ifBlank { ds.datasetKey.take(12) },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                    )
                                 },
-                                enabled = pendingLocalLayer.value == null,
-                                label = { Text(layer.label, style = MaterialTheme.typography.labelSmall) },
                                 modifier = Modifier.height(CompactButtonHeight),
                             )
                         }
                     }
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedButton(
-                        onClick = { centerMarkerMode.value = !centerMarkerMode.value },
-                        modifier = Modifier.height(CompactButtonHeight).testTag("ai_marker_mode_button"),
-                        contentPadding = CompactButtonPadding,
-                    ) {
-                        Text(
-                            if (centerMarkerMode.value) "Cancel marker" else "Mark map center",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-                    Button(
-                        onClick = {
-                            val bounds = visibleBounds.value.sanitized()
-                            val centerX = ((bounds.left + bounds.right) * 50.0).toFloat()
-                            val centerY = ((bounds.top + bounds.bottom) * 50.0).toFloat()
-                            saveMarker(
-                                centerX,
-                                centerY,
-                                MetalType.MANUAL_MARKER,
-                                DetectionSource.MANUAL,
-                                0f,
-                                "Manual historic-site marker placed at the center of the zoomed AI viewport.",
-                            )
-                            centerMarkerMode.value = false
-                        },
-                        enabled = centerMarkerMode.value,
-                        modifier = Modifier.height(CompactButtonHeight).testTag("ai_save_manual_marker_button"),
-                        contentPadding = CompactButtonPadding,
-                    ) { Text("Save center", style = MaterialTheme.typography.labelSmall) }
-                    Button(
-                        onClick = {
-                            showHistoricTargets.value = !showHistoricTargets.value
-                        },
-                        enabled = historicTargets.isNotEmpty(),
-                        modifier = Modifier.height(CompactButtonHeight).testTag("ai_add_target_markers_button"),
-                        contentPadding = CompactButtonPadding,
-                    ) {
-                        Text(
-                            if (showHistoricTargets.value) "Hide historic targets" else "Mark historic targets",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-                    if (historicTargets.isNotEmpty()) {
-                        OutlinedButton(
-                            onClick = { showTargetDetails.value = !showTargetDetails.value },
-                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_show_target_details_button"),
-                            contentPadding = CompactButtonPadding,
-                        ) {
-                            Text(
-                                if (showTargetDetails.value) "Hide details" else "Show details",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        }
-                    }
-                    if (huntZones.size > 1) {
-                        OutlinedButton(
-                            onClick = { showHuntZones.value = !showHuntZones.value },
-                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_toggle_hunt_zones_button"),
-                            contentPadding = CompactButtonPadding,
-                        ) {
-                            Text(
-                                if (showHuntZones.value) "Hide zones" else "Zones (${huntZones.size})",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        }
-                    }
-                    if (visibleCloudTargets.isNotEmpty()) {
-                        OutlinedButton(
-                            onClick = { showCloudTargets.value = !showCloudTargets.value },
-                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_toggle_cloud_targets_button"),
-                            contentPadding = CompactButtonPadding,
-                        ) {
-                            Text(
-                                if (showCloudTargets.value) "Hide cloud AI (${visibleCloudTargets.size})" else "Show cloud AI (${visibleCloudTargets.size})",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = { assistantViewModel.classifyTargets(grid, summary, sourceBitmap) },
-                        enabled = !aiState.isClassifyingTargets && grid.width > 2 && aiState.activeProvider != null,
-                        modifier = Modifier.height(CompactButtonHeight).testTag("ai_classify_targets_button"),
-                        contentPadding = CompactButtonPadding,
-                    ) {
-                        if (aiState.isClassifyingTargets) {
-                            CircularProgressIndicator(modifier = Modifier.height(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Text("Classify disturbance targets", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                    if (analyzedDatasets.size >= 2) {
-                        OutlinedButton(
-                            onClick = { showDatasetComparison.value = true },
-                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_compare_datasets_button"),
-                            contentPadding = CompactButtonPadding,
-                        ) { Text("Compare datasets", style = MaterialTheme.typography.labelSmall) }
-                        OutlinedButton(
-                            onClick = { showTwoEpochCompare.value = true },
-                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_two_epoch_button"),
-                            contentPadding = CompactButtonPadding,
-                        ) { Text("Two-epoch Δ", style = MaterialTheme.typography.labelSmall) }
-                    }
-                    Text("${signals.size} saved", style = MaterialTheme.typography.labelMedium)
-                }
-
-                aiState.classificationError?.let { error ->
-                    Text(
-                        text = error,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(vertical = 4.dp),
-                    )
-                }
-                if (aiState.classifiedTargets.isNotEmpty()) {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).testTag("ai_classified_targets_list"),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        items(aiState.classifiedTargets) { target ->
-                            Text(
-                                text = "${target.label} · ${(target.confidence * 100f).toInt()}% — ${target.description}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-                }
-
-                if (showHuntZones.value && huntZones.isNotEmpty()) {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 180.dp)
-                            .testTag("ai_hunt_zone_list"),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        items(huntZones, key = { it.id }) { zone ->
-                            HuntZoneCard(
-                                zone = zone,
-                                onNavigate = GeoSpatialLibrary.gridToGeographic(
-                                    zone.centerXPercent,
-                                    zone.centerYPercent,
-                                    metadata,
-                                )?.let { (lat, lon) ->
-                                    {
-                                        viewModel.setNavigationTarget(
-                                            NavigationTarget(
-                                                label = "Zone ${zone.id} · ${zone.dominantType.label}",
-                                                latitude = lat,
-                                                longitude = lon,
-                                            ),
-                                        )
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
-
-                if (showTargetDetails.value && historicTargets.isNotEmpty()) {
-                    if (selectedCandidateSummary.isNotBlank()) {
-                        Text(
-                            "AI focus set — dig brief / evidence chain will prioritize it",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .padding(bottom = 4.dp)
-                                .testTag("ai_focus_candidate_hint"),
-                        )
-                    }
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 220.dp)
-                            .testTag("ai_target_details_list"),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        items(historicTargets.sortedByDescending { it.score }, key = { "${it.type}-${it.xPercent}-${it.yPercent}" }) { target ->
-                            TargetDetailCard(
-                                target = target,
-                                zoneId = targetZoneIds[target],
-                                depthEstimate = aiState.localResult?.layers?.let {
-                                    DigDepthEstimator.estimate(target, it)
-                                },
-                                onNavigate = GeoSpatialLibrary.gridToGeographic(
-                                    target.xPercent,
-                                    target.yPercent,
-                                    metadata,
-                                )?.let { (lat, lon) ->
-                                    {
-                                        viewModel.setNavigationTarget(
-                                            NavigationTarget(
-                                                label = "${target.type.label} · ${(target.score * 100f).toInt()}%",
-                                                latitude = lat,
-                                                longitude = lon,
-                                            ),
-                                        )
-                                    }
-                                },
-                                onFocusForAi = {
-                                    selectedCandidateSummary = buildString {
-                                        append(target.type.label)
-                                        append(" · score=").append((target.score * 100f).toInt()).append("%")
-                                        append(" · x=").append("%.1f".format(target.xPercent)).append("%")
-                                        append(" y=").append("%.1f".format(target.yPercent)).append("%")
-                                        if (target.evidence.isNotEmpty()) {
-                                            append(" · evidence=").append(target.evidence.joinToString("; "))
-                                        }
-                                        if (target.cautionReasons.isNotEmpty()) {
-                                            append(" · cautions=").append(target.cautionReasons.joinToString("; "))
-                                        }
-                                    }
-                                },
-                                onLog = {
-                                    saveMarker(
-                                        target.xPercent,
-                                        target.yPercent,
-                                        MetalType.MAGNETIC_ANOMALY,
-                                        DetectionSource.AI_ANALYSIS,
-                                        target.score * 100f,
-                                        "Historic AI candidate: ${target.type.label} · ${target.evidence.joinToString(" · ")}",
-                                        detectedFeatureType = target.type.name,
-                                    )
-                                },
-                            )
-                        }
-                    }
-                }
             }
+        } else {
+            AiCloudPanel(
+                terrainSummary = summary,
+                grid = grid,
+                metadata = metadata,
+                terrainKey = terrainKey,
+                assistantViewModel = assistantViewModel,
+                loggedSignals = signals,
+                onConfirmAiSuggestions = { signalId, metal, outcome, status, notes ->
+                    viewModel.applyAiFindSuggestions(signalId, metal, outcome, status, notes)
+                },
+                fieldSessionPack = fieldPack,
+                onClearFocusedCandidate = { selectedCandidateSummary = "" },
+                onApplyLighting = { azimuth, altitude ->
+                    viewModel.updateSunAzimuth(azimuth)
+                    viewModel.updateSunAltitude(altitude)
+                },
+                onApplyVizMode = viewModel::updateVisualizationMode,
+                onApplyNavTargets = { ids ->
+                    // Apply multi-stop playlist immediately, then clear the AI pending handoff.
+                    viewModel.setNavPlaylist(ids)
+                    assistantViewModel.consumeNavTargets()
+                },
+                // weight(1f), not fillMaxSize(): this Column isn't scrollable, and the header +
+                // map above already claim their own height, so a fillMaxSize() panel here asked
+                // for the full column height on top of that and pushed its own internal chat
+                // list - including the text input at the bottom of it - past the visible screen
+                // with no way to scroll to it. weight(1f) bounds it to the actual remaining space.
+                modifier = Modifier.weight(1f),
+            )
         }
-
-        LidarMapCanvas(
-            bitmap = analysisBitmap,
-            isRendering = isRendering || aiState.isLocalAnalyzing || localLayerPending,
-            sweepX = 50f,
-            sweepY = 50f,
-            loggedSignals = signals.filterNot { it.source == DetectionSource.CLOUD_AI },
-            onSweepPositionChanged = { _, _ -> },
-            onStopSweeping = {},
-            gridSpacing = gridSpacing,
-            geoMetadata = metadata,
-            currentLat = null,
-            currentLon = null,
-            mode = LidarCanvasMode.EXPLORE,
-            viewportResetKey = 0,
-            showSurveyCursor = false,
-            showCoordinateHud = false,
-            overlayTargets = classifiedTargetOverlays + cloudTargetOverlays +
-                if (showHistoricTargets.value) targetOverlays else emptyList(),
-            onViewportChanged = { bounds, zoom, _, _ ->
-                visibleBounds.value = bounds
-                zoomLevel.value = zoom
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .testTag("ai_single_analysis_map"),
-        )
-
-        if (isRefining) {
-            val progress = refinementProgress
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                LinearProgressIndicator(
-                    progress = { progress?.fraction?.coerceIn(0f, 1f) ?: 0f },
-                    modifier = Modifier.fillMaxWidth().testTag("ai_refine_progress"),
-                )
-                Text(
-                    progress?.message ?: "Preparing refinement…",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        } else if (aiState.isLocalAnalyzing || localLayerPending) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
-
-        if (alternateDatasets.size > 1) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-                    .testTag("ai_secondary_dataset_picker"),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    "Compare secondary site",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    alternateDatasets.forEach { ds ->
-                        FilterChip(
-                            selected = secondaryDataset?.datasetKey == ds.datasetKey,
-                            onClick = { selectedSecondaryKey = ds.datasetKey },
-                            label = {
-                                Text(
-                                    ds.displayName.take(28).ifBlank { ds.datasetKey.take(12) },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1,
-                                )
-                            },
-                            modifier = Modifier.height(CompactButtonHeight),
-                        )
-                    }
-                }
-            }
-        }
-
-        AiCloudPanel(
-            terrainSummary = summary,
-            grid = grid,
-            metadata = metadata,
-            terrainKey = terrainKey,
-            assistantViewModel = assistantViewModel,
-            loggedSignals = signals,
-            onConfirmAiSuggestions = { signalId, metal, outcome, status, notes ->
-                viewModel.applyAiFindSuggestions(signalId, metal, outcome, status, notes)
-            },
-            fieldSessionPack = fieldPack,
-            onClearFocusedCandidate = { selectedCandidateSummary = "" },
-            onApplyLighting = { azimuth, altitude ->
-                viewModel.updateSunAzimuth(azimuth)
-                viewModel.updateSunAltitude(altitude)
-            },
-            onApplyVizMode = viewModel::updateVisualizationMode,
-            onApplyNavTargets = { ids ->
-                // Apply multi-stop playlist immediately, then clear the AI pending handoff.
-                viewModel.setNavPlaylist(ids)
-                assistantViewModel.consumeNavTargets()
-            },
-            // weight(1f), not fillMaxSize(): this Column isn't scrollable, and the header +
-            // map above already claim their own height, so a fillMaxSize() panel here asked
-            // for the full column height on top of that and pushed its own internal chat
-            // list - including the text input at the bottom of it - past the visible screen
-            // with no way to scroll to it. weight(1f) bounds it to the actual remaining space.
-            modifier = Modifier.weight(1f),
-        )
     }
 
     if (showDatasetComparison.value) {

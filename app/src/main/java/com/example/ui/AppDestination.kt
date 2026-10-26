@@ -8,6 +8,7 @@ import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Forest
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Landscape
 import androidx.compose.material.icons.filled.Layers
@@ -55,10 +56,17 @@ enum class AppDestination(
         primary = true,
     ),
     WIND_MAP(
-        label = "Wind Map",
+        label = "Wind",
         title = "Thermal wind map",
         subtitle = "Live 3D map of thermal and scent flow",
         icon = Icons.Default.Explore,
+        primary = true,
+    ),
+    STANDS(
+        label = "Stands",
+        title = "AI stand finder",
+        subtitle = "Best stand sites and hunt areas on a map",
+        icon = Icons.Default.Forest,
         primary = true,
     ),
     AI(
