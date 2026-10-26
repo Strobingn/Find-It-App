@@ -94,6 +94,8 @@ object TerrainViewshedAnalyzer {
         val visibility = BooleanArray(grid.width * grid.height)
         val cancelScan = AtomicBoolean(false)
 
+        val maxRadiusSq = if (maxRadiusCells.isFinite()) maxRadiusCells * maxRadiusCells else Float.POSITIVE_INFINITY
+
         // Cells are independent, so row ranges scan in parallel with identical results.
         // Cancellation is polled once per row for responsive aborts on any worker count.
         fun scanRows(startRow: Int, endRow: Int, counts: IntArray) {
@@ -103,13 +105,15 @@ object TerrainViewshedAnalyzer {
                     cancelScan.set(true)
                     break
                 }
+                val rowOffset = row * grid.width
+                val dY = row - observerY
+                val dYSq = dY * dY
                 for (col in 0 until grid.width) {
-                    val distanceCells = hypot(
-                        (col - observerX).toDouble(),
-                        (row - observerY).toDouble(),
-                    ).toFloat()
-                    if (distanceCells > maxRadiusCells) continue
-                    val index = row * grid.width + col
+                    val dX = col - observerX
+                    val distanceSq = dX * dX + dYSq
+                    if (distanceSq > maxRadiusSq) continue
+                    val distanceCells = kotlin.math.sqrt(distanceSq)
+                    val index = rowOffset + col
                     if (!grid.validData[index]) continue
                     counts[0]++
                     val isVisible = isLineOfSightClear(
@@ -299,34 +303,44 @@ object TerrainViewshedAnalyzer {
         vegetationFilter: Float,
     ): Boolean {
         if (targetDistanceCells < 0.5f) return true
+        val dX = targetCol.toFloat() - observerX
+        val dY = targetRow.toFloat() - observerY
         val steps = ceil(
             maxOf(
-                abs(targetCol - observerX).toDouble(),
-                abs(targetRow - observerY).toDouble(),
+                abs(dX).toDouble(),
+                abs(dY).toDouble(),
             ),
         ).toInt().coerceAtLeast(1)
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
         val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
 
-        var maxBlockingAngle = Float.NEGATIVE_INFINITY
+        val stepsF = steps.toFloat()
+        val stepX = dX / stepsF
+        val stepY = dY / stepsF
+
         for (step in 1 until steps) {
-            val fraction = step.toFloat() / steps
-            val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
+            val col = (observerX + step * stepX).roundToInt()
                 .coerceIn(0, grid.width - 1)
-            val row = (observerY + (targetRow - observerY) * fraction).roundToInt()
+            val row = (observerY + step * stepY).roundToInt()
                 .coerceIn(0, grid.height - 1)
+            if (col == targetCol && row == targetRow) continue
             val index = row * grid.width + col
             if (!grid.validData[index]) continue
-            if (col == targetCol && row == targetRow) continue
-            val distanceCells = hypot(
-                (col - observerX).toDouble(),
-                (row - observerY).toDouble(),
-            ).toFloat()
-            if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
+
+            val cDx = col - observerX
+            val cDy = row - observerY
+            val distanceSq = cDx * cDx + cDy * cDy
+            if (distanceSq < 0.25f) continue
+            val distanceCells = kotlin.math.sqrt(distanceSq)
+            if (distanceCells >= targetDistanceCells) continue
+
             val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
                 (distanceCells * cellSize)
-            if (angle > maxBlockingAngle) maxBlockingAngle = angle
+
+            // As soon as an intermediate terrain cell matches or exceeds the target's elevation angle,
+            // the target is blocked from the eye position and line of sight fails immediately.
+            if (angle >= targetAngle) return false
         }
-        return targetAngle > maxBlockingAngle
+        return true
     }
 }
