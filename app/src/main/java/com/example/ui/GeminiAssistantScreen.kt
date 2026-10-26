@@ -49,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -66,6 +67,7 @@ import com.example.ai.GeminiTerrainImageEncoder
 import com.example.ai.AiTargetClassifier
 import com.example.ai.OpenAiApiClient
 import com.example.ai.TerrainAiGateway
+import com.example.ai.GrokApiClient
 import com.example.ai.TerrainAiProvider
 import com.example.ai.TerrainVisionSession
 import com.example.ai.TerrainVisionSnapshot
@@ -175,8 +177,10 @@ data class AiTerrainState(
     val isSending: Boolean = false,
     val cloudError: String? = null,
     val cloudStage: String = "Cloud AI ready",
+    val grokConfigured: Boolean = false,
     val openAiConfigured: Boolean = false,
     val geminiConfigured: Boolean = false,
+    val hasDeviceGrokKey: Boolean = false,
     val hasDeviceOpenAiKey: Boolean = false,
     val hasDeviceGeminiKey: Boolean = false,
     val activeProvider: TerrainAiProvider? = null,
@@ -261,6 +265,18 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
             historicMapAgreementScore = score,
             rankedCandidates = ranked ?: current.rankedCandidates,
         )
+    }
+
+    fun saveGrokKey(value: String) {
+        val saved = GrokApiClient.saveDeviceApiKey(appContext, value)
+        _state.value = _state.value.withProviderStatus().copy(
+            cloudError = if (saved) null else "Enter a valid xAI (Grok) API key.",
+        )
+    }
+
+    fun clearGrokKey() {
+        GrokApiClient.clearDeviceApiKey(appContext)
+        _state.value = _state.value.withProviderStatus().copy(cloudError = null)
     }
 
     fun saveOpenAiKey(value: String) {
@@ -560,7 +576,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         if (_state.value.isClassifyingTargets || grid.width <= 2 || grid.height <= 2) return
         val provider = _state.value.providerPreference ?: TerrainAiGateway.preferredProvider(appContext)
         if (provider == null) {
-            _state.value = _state.value.copy(classificationError = "Configure OpenAI or Gemini under AI settings first.")
+            _state.value = _state.value.copy(classificationError = "Configure Grok, OpenAI or Gemini under AI settings first.")
             return
         }
         _state.value = _state.value.copy(
@@ -621,11 +637,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun selectCloudProvider(provider: TerrainAiProvider?) {
-        val unavailable = when (provider) {
-            TerrainAiProvider.OPENAI -> !OpenAiApiClient.isConfigured(appContext)
-            TerrainAiProvider.GEMINI -> !GeminiApiClient.isConfigured(appContext)
-            null -> false
-        }
+        val unavailable = provider != null && !TerrainAiGateway.isConfigured(appContext, provider)
         _state.value = _state.value.copy(
             providerPreference = provider.takeUnless { unavailable },
             cloudError = if (unavailable) "${provider?.label} is not configured on this device." else null,
@@ -845,7 +857,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         val preference = _state.value.providerPreference
         if (TerrainAiGateway.preferredProvider(appContext) == null) {
             _state.value = _state.value.copy(
-                cloudError = "Add an OpenAI key for the primary provider or a Gemini key for fallback. Offline analysis still works without a key.",
+                cloudError = "Add a Grok (xAI) key for chat, or an OpenAI / Gemini key as fallback. Offline analysis still works without a key.",
             )
             return
         }
@@ -870,6 +882,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
             cloudStage = "Preparing the terrain image…",
         )
 
+        val streamingId = ids.getAndIncrement()
         viewModelScope.launch {
             try {
                 val image = if (attachViewportImage) {
@@ -878,7 +891,16 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                 } else {
                     null
                 }
+                var lastPaint = 0L
                 val answer = gateway.generate(
+                    onPartialText = { partial ->
+                        // Show the reply as it is written; throttle repaints to ~15 fps.
+                        val now = System.currentTimeMillis()
+                        if (partial.isEmpty() || now - lastPaint >= 66L) {
+                            lastPaint = now
+                            _state.value = _state.value.withStreamingReply(streamingId, removeCloudMapTargetTags(partial))
+                        }
+                    },
                     conversation = withUser.map {
                         GeminiConversationTurn(
                             role = if (it.role == AiMessageRole.MODEL) "model" else "user",
@@ -912,10 +934,10 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     emptyList()
                 }
                 val fallbackNote = answer.fallbackReason?.let {
-                    "\n\nFallback used because OpenAI returned: $it"
+                    "\n\nFallback used — $it"
                 }.orEmpty()
                 _state.value = _state.value.copy(
-                    messages = _state.value.messages + AiMessage(
+                    messages = _state.value.messages.filterNot { it.id == streamingId } + AiMessage(
                         id = ids.getAndIncrement(),
                         role = AiMessageRole.MODEL,
                         text = removeCloudMapTargetTags(answer.text) + fallbackNote,
@@ -933,9 +955,14 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     cloudTerrainKey = if (cloudTargets.isNotEmpty()) terrainKey else _state.value.cloudTerrainKey,
                 ).withProviderStatus()
             } catch (cancelled: CancellationException) {
+                _state.value = _state.value.copy(
+                    messages = _state.value.messages.filterNot { it.id == streamingId },
+                    isSending = false,
+                )
                 throw cancelled
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
+                    messages = _state.value.messages.filterNot { it.id == streamingId },
                     isSending = false,
                     cloudError = error.localizedMessage ?: "Cloud AI request failed",
                     cloudStage = "Cloud AI request stopped",
@@ -1102,7 +1129,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                     emptyList()
                 }
                 val fallbackNote = answer.fallbackReason?.let {
-                    "\n\nFallback used because OpenAI returned: $it"
+                    "\n\nFallback used — $it"
                 }.orEmpty()
                 val lighting = if (feature == FieldAiFeature.LIGHTING_ADVISOR) {
                     FieldAiCopilot.parseLightingRecommendation(answer.text)
@@ -1193,7 +1220,19 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         ).withProviderStatus()
     }
 
+    /** Inserts or updates the in-progress model reply; an empty text removes it (provider fell back). */
+    private fun AiTerrainState.withStreamingReply(id: Long, text: String): AiTerrainState {
+        val without = messages.filterNot { it.id == id }
+        return if (text.isBlank()) {
+            copy(messages = without)
+        } else {
+            copy(messages = without + AiMessage(id = id, role = AiMessageRole.MODEL, text = text, provider = TerrainAiProvider.GROK))
+        }
+    }
+
     private fun AiTerrainState.withProviderStatus(): AiTerrainState = copy(
+        grokConfigured = GrokApiClient.isConfigured(appContext),
+        hasDeviceGrokKey = GrokApiClient.hasDeviceApiKey(appContext),
         openAiConfigured = OpenAiApiClient.isConfigured(appContext),
         geminiConfigured = GeminiApiClient.isConfigured(appContext),
         hasDeviceOpenAiKey = OpenAiApiClient.hasDeviceApiKey(appContext),
@@ -1257,9 +1296,8 @@ fun GeminiAssistantScreen(
                         Text("Terrain intelligence", fontWeight = FontWeight.Bold)
                         Text(
                             when (state.activeProvider) {
-                                TerrainAiProvider.OPENAI -> "OpenAI ${OpenAiApiClient.configuredModel()} primary · Gemini ${GeminiApiClient.configuredModel()} fallback"
-                                TerrainAiProvider.GEMINI -> "Gemini ${GeminiApiClient.configuredModel()} fallback active · OpenAI not configured"
-                                null -> "Offline analysis ready · add OpenAI or Gemini for cloud analysis"
+                                null -> "Offline analysis ready · add Grok, OpenAI or Gemini for cloud analysis"
+                                else -> TerrainAiGateway.activeSummary(LocalContext.current)
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

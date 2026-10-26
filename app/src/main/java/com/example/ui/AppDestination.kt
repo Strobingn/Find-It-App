@@ -5,6 +5,7 @@ import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Home
@@ -51,6 +52,13 @@ enum class AppDestination(
         title = "Thermal wind",
         subtitle = "Hour-by-hour scent drift and AI hunt plan",
         icon = Icons.Default.Air,
+        primary = true,
+    ),
+    WIND_MAP(
+        label = "Wind Map",
+        title = "Thermal wind map",
+        subtitle = "Live 3D map of thermal and scent flow",
+        icon = Icons.Default.Explore,
         primary = true,
     ),
     AI(

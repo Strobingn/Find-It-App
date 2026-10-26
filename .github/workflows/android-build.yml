@@ -30,6 +30,9 @@ jobs:
           OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_REASONING_EFFORT: ${{ vars.GROK_REASONING_EFFORT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -43,6 +46,9 @@ jobs:
             printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
             printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
             printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'XAI_API_KEY=%s\n' "$XAI_API_KEY"
+            printf 'GROK_MODEL=%s\n' "${GROK_MODEL:-grok-4.7}"
+            printf 'GROK_REASONING_EFFORT=%s\n' "${GROK_REASONING_EFFORT:-medium}"
             printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
             printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
             printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
@@ -134,6 +140,9 @@ jobs:
           OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_REASONING_EFFORT: ${{ vars.GROK_REASONING_EFFORT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -147,6 +156,9 @@ jobs:
             printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
             printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
             printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'XAI_API_KEY=%s\n' "$XAI_API_KEY"
+            printf 'GROK_MODEL=%s\n' "${GROK_MODEL:-grok-4.7}"
+            printf 'GROK_REASONING_EFFORT=%s\n' "${GROK_REASONING_EFFORT:-medium}"
             printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
             printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
             printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"
@@ -276,6 +288,9 @@ jobs:
           OPENAI_PROXY_TOKEN: ${{ secrets.OPENAI_PROXY_TOKEN }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_REASONING_EFFORT: ${{ vars.GROK_REASONING_EFFORT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -289,6 +304,9 @@ jobs:
             printf 'OPENAI_PROXY_TOKEN=%s\n' "$OPENAI_PROXY_TOKEN"
             printf 'OPENAI_BASE_URL=%s\n' "${OPENAI_BASE_URL:-https://api.openai.com/v1/responses}"
             printf 'OPENAI_MODEL=%s\n' "${OPENAI_MODEL:-gpt-5.2}"
+            printf 'XAI_API_KEY=%s\n' "$XAI_API_KEY"
+            printf 'GROK_MODEL=%s\n' "${GROK_MODEL:-grok-4.7}"
+            printf 'GROK_REASONING_EFFORT=%s\n' "${GROK_REASONING_EFFORT:-medium}"
             printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
             printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.5-flash}"
             printf 'SENTRY_DSN=%s\n' "$SENTRY_DSN"

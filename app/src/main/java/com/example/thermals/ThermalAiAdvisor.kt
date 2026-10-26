@@ -20,6 +20,7 @@ class ThermalAiAdvisor(context: Context) {
         question: String? = null,
         history: List<Pair<String, String>> = emptyList(),
         onStage: (String) -> Unit = {},
+        onPartialText: ((String) -> Unit)? = null,
     ): TerrainAiAnswer {
         val context = buildContext(forecast, locationLabel, dateLabel)
         val turns = mutableListOf<GeminiConversationTurn>()
@@ -36,14 +37,16 @@ class ThermalAiAdvisor(context: Context) {
             systemContext = context,
             onProviderStage = onStage,
             featureName = "thermal_wind",
+            // Short, structured answer: quick reasoning and streamed text so it starts showing in seconds.
+            fast = true,
+            onPartialText = onPartialText,
         )
     }
 
     companion object {
         const val DEFAULT_REQUEST =
-            "Give me a thermal and scent plan for this hunt: when the thermals switch, which way my scent goes " +
-                "through the morning sit, midday and the evening sit, where to set up relative to bedding/feeding " +
-                "on this slope, and how to walk in and out without blowing deer out."
+            "Hunt plan for this slope: morning sit, midday, evening sit, and how to walk in and out without " +
+                "letting deer smell me."
 
         /** Pure prompt builder so it can be unit tested without a network call. */
         fun buildContext(forecast: ThermalForecast, locationLabel: String, dateLabel: String): String = buildString {
@@ -52,7 +55,8 @@ class ThermalAiAdvisor(context: Context) {
             appendLine("ROLE: You are a whitetail/big-game hunting advisor who specializes in thermals and scent control.")
             appendLine("Base every direction on the computed data below. Do not invent weather. Bearings are degrees true; 'toward' means where scent/air moves TO.")
             appendLine("If the user asks something the data cannot answer (e.g. where deer bed), say what you'd need and give the rule of thumb.")
-            appendLine("Answer in short sections with plain compass words (NE, SW…) and clock times. No markdown tables.")
+            appendLine("Be brief: under 170 words unless asked for more. Use these short sections: Morning sit · Midday · Evening sit · Entry/exit.")
+            appendLine("Each section: 1–2 sentences with the clock time, where scent goes (plain compass words like NE, SW) and where to sit. No tables, no preamble.")
             appendLine()
             appendLine("SITE: $locationLabel  (lat %.5f, lon %.5f)".format(inputs.latitude, inputs.longitude))
             appendLine("DATE: $dateLabel")
@@ -69,7 +73,7 @@ class ThermalAiAdvisor(context: Context) {
             appendLine("DAILY TEMP RANGE: %.0f°F".format(forecast.dailyRangeF))
             appendLine()
             appendLine("HOURLY (local): time | temp°F | sky% | thermal phase | thermal mph→dir | ground wind mph→dir | NET SCENT mph→dir | thermal share | confidence")
-            forecast.hours.filter { it.hour in 4..21 }.forEach { h ->
+            forecast.hours.filter { it.hour in 5..20 }.forEach { h ->
                 appendLine(
                     "%s | %.0f | %.0f | %s | %s | %.1f→%s | %.1f→%s | %.0f%% | %.0f%%".format(
                         ThermalWindEngine.formatHour(h.hour.toDouble()),

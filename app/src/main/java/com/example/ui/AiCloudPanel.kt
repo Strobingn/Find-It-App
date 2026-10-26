@@ -62,6 +62,10 @@ import com.example.ai.FieldAiFeature
 import com.example.ai.FieldAiSessionPack
 import com.example.ai.FieldOfflineAssist
 import com.example.ai.GeminiApiClient
+import com.example.ai.GrokApiClient
+import com.example.ui.ios.IosSection
+import com.example.ui.ios.IosSheet
+import com.example.ai.TerrainAiGateway
 import com.example.ai.OpenAiApiClient
 import com.example.ai.TerrainAiProvider
 import com.example.ai.TerrainVisionSession
@@ -236,9 +240,10 @@ fun AiCloudPanel(
     val viewport by TerrainVisionSession.snapshot.collectAsStateWithLifecycle()
     var packFilter by rememberSaveable { mutableStateOf(AiPackFilter.ALL) }
     var draft by rememberSaveable { mutableStateOf("") }
+    var grokKey by rememberSaveable { mutableStateOf("") }
     var openAiKey by rememberSaveable { mutableStateOf("") }
     var geminiKey by rememberSaveable { mutableStateOf("") }
-    var showKeys by rememberSaveable { mutableStateOf(!state.openAiConfigured && !state.geminiConfigured) }
+    var showKeys by rememberSaveable { mutableStateOf(false) }
     var attachImage by rememberSaveable { mutableStateOf(true) }
     var dismissedSuggestionMessageId by rememberSaveable { mutableStateOf<Long?>(null) }
     var selectedSuggestionSignalId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -385,10 +390,10 @@ fun AiCloudPanel(
                         Column(Modifier.weight(1f)) {
                             Text("AI analysis", fontWeight = FontWeight.Bold)
                             Text(
-                                when (state.activeProvider) {
-                                    TerrainAiProvider.OPENAI -> "OpenAI ${OpenAiApiClient.configuredModel()} primary · Gemini fallback ready"
-                                    TerrainAiProvider.GEMINI -> "Gemini ${GeminiApiClient.configuredModel()} active"
-                                    null -> "Add an OpenAI or Gemini key"
+                                if (state.activeProvider == null) {
+                                    "Add a Grok, OpenAI or Gemini key"
+                                } else {
+                                    TerrainAiGateway.activeSummary(context)
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -406,7 +411,7 @@ fun AiCloudPanel(
                             onClick = { showKeys = !showKeys },
                             modifier = Modifier.height(CompactButtonHeight),
                             contentPadding = CompactButtonPadding,
-                        ) { Text("Keys", style = MaterialTheme.typography.labelSmall) }
+                        ) { Text("Settings", style = MaterialTheme.typography.labelSmall) }
                         IconButton(
                             onClick = {
                                 val reply = lastModelMessage?.text?.takeIf { it.isNotBlank() } ?: return@IconButton
@@ -430,96 +435,6 @@ fun AiCloudPanel(
                         }
                         IconButton(onClick = assistantViewModel::clearConversation, modifier = Modifier.height(CompactButtonHeight)) {
                             Icon(Icons.Default.DeleteSweep, contentDescription = "Clear conversation", modifier = Modifier.height(18.dp))
-                        }
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        FilterChip(
-                            selected = state.providerPreference == null,
-                            onClick = { assistantViewModel.selectCloudProvider(null) },
-                            enabled = !state.isSending,
-                            label = { Text("Auto", style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.height(CompactButtonHeight),
-                        )
-                        FilterChip(
-                            selected = state.providerPreference == TerrainAiProvider.OPENAI,
-                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.OPENAI) },
-                            enabled = state.openAiConfigured && !state.isSending,
-                            label = { Text("OpenAI", style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.height(CompactButtonHeight),
-                        )
-                        FilterChip(
-                            selected = state.providerPreference == TerrainAiProvider.GEMINI,
-                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.GEMINI) },
-                            enabled = state.geminiConfigured && !state.isSending,
-                            label = { Text("Gemini", style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.height(CompactButtonHeight),
-                        )
-                    }
-                }
-            }
-        }
-
-        if (showKeys) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = openAiKey,
-                            onValueChange = { openAiKey = it.trim().take(256) },
-                            label = { Text("OpenAI API key") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    assistantViewModel.saveOpenAiKey(openAiKey)
-                                    openAiKey = ""
-                                },
-                                enabled = openAiKey.length >= 20,
-                                modifier = Modifier.height(CompactButtonHeight),
-                                contentPadding = CompactButtonPadding,
-                            ) { Text("Save OpenAI", style = MaterialTheme.typography.labelSmall) }
-                            if (state.hasDeviceOpenAiKey) {
-                                OutlinedButton(
-                                    onClick = assistantViewModel::clearOpenAiKey,
-                                    modifier = Modifier.height(CompactButtonHeight),
-                                    contentPadding = CompactButtonPadding,
-                                ) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = geminiKey,
-                            onValueChange = { geminiKey = it.trim().take(256) },
-                            label = { Text("Gemini API key") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = {
-                                    assistantViewModel.saveGeminiKey(geminiKey)
-                                    geminiKey = ""
-                                },
-                                enabled = geminiKey.length >= 20,
-                                modifier = Modifier.height(CompactButtonHeight),
-                                contentPadding = CompactButtonPadding,
-                            ) { Text("Save Gemini", style = MaterialTheme.typography.labelSmall) }
-                            if (state.hasDeviceGeminiKey) {
-                                OutlinedButton(
-                                    onClick = assistantViewModel::clearGeminiKey,
-                                    modifier = Modifier.height(CompactButtonHeight),
-                                    contentPadding = CompactButtonPadding,
-                                ) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
-                            }
                         }
                     }
                 }
@@ -1131,6 +1046,133 @@ fun AiCloudPanel(
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.height(16.dp))
                     Spacer(Modifier.width(5.dp))
                     Text("Send", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+    if (showKeys) {
+        IosSheet(title = "AI settings", onDismiss = { showKeys = false }) {
+            IosSection(header = "Provider", footer = "Auto tries Grok first, then OpenAI, then Gemini.") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilterChip(
+                            selected = state.providerPreference == null,
+                            onClick = { assistantViewModel.selectCloudProvider(null) },
+                            enabled = !state.isSending,
+                            label = { Text("Auto", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                        FilterChip(
+                            selected = state.providerPreference == TerrainAiProvider.GROK,
+                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.GROK) },
+                            enabled = state.grokConfigured && !state.isSending,
+                            label = { Text("Grok", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                        FilterChip(
+                            selected = state.providerPreference == TerrainAiProvider.OPENAI,
+                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.OPENAI) },
+                            enabled = state.openAiConfigured && !state.isSending,
+                            label = { Text("OpenAI", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                        FilterChip(
+                            selected = state.providerPreference == TerrainAiProvider.GEMINI,
+                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.GEMINI) },
+                            enabled = state.geminiConfigured && !state.isSending,
+                            label = { Text("Gemini", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.height(CompactButtonHeight),
+                        )
+                    }
+            }
+            IosSection(header = "API keys", footer = "Keys are stored encrypted on this phone.") {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = grokKey,
+                            onValueChange = { grokKey = it.trim().take(256) },
+                            label = { Text("Grok (xAI) API key") },
+                            supportingText = {
+                                Text("${GrokApiClient.configuredModel()} · ${GrokApiClient.configuredReasoningEffort()} reasoning · requests kept under 200K tokens")
+                            },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_grok_key"),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    assistantViewModel.saveGrokKey(grokKey)
+                                    grokKey = ""
+                                },
+                                enabled = grokKey.length >= 20,
+                                modifier = Modifier.height(CompactButtonHeight),
+                                contentPadding = CompactButtonPadding,
+                            ) { Text("Save Grok", style = MaterialTheme.typography.labelSmall) }
+                            if (state.hasDeviceGrokKey) {
+                                OutlinedButton(
+                                    onClick = assistantViewModel::clearGrokKey,
+                                    modifier = Modifier.height(CompactButtonHeight),
+                                    contentPadding = CompactButtonPadding,
+                                ) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = openAiKey,
+                            onValueChange = { openAiKey = it.trim().take(256) },
+                            label = { Text("OpenAI API key") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    assistantViewModel.saveOpenAiKey(openAiKey)
+                                    openAiKey = ""
+                                },
+                                enabled = openAiKey.length >= 20,
+                                modifier = Modifier.height(CompactButtonHeight),
+                                contentPadding = CompactButtonPadding,
+                            ) { Text("Save OpenAI", style = MaterialTheme.typography.labelSmall) }
+                            if (state.hasDeviceOpenAiKey) {
+                                OutlinedButton(
+                                    onClick = assistantViewModel::clearOpenAiKey,
+                                    modifier = Modifier.height(CompactButtonHeight),
+                                    contentPadding = CompactButtonPadding,
+                                ) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = geminiKey,
+                            onValueChange = { geminiKey = it.trim().take(256) },
+                            label = { Text("Gemini API key") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    assistantViewModel.saveGeminiKey(geminiKey)
+                                    geminiKey = ""
+                                },
+                                enabled = geminiKey.length >= 20,
+                                modifier = Modifier.height(CompactButtonHeight),
+                                contentPadding = CompactButtonPadding,
+                            ) { Text("Save Gemini", style = MaterialTheme.typography.labelSmall) }
+                            if (state.hasDeviceGeminiKey) {
+                                OutlinedButton(
+                                    onClick = assistantViewModel::clearGeminiKey,
+                                    modifier = Modifier.height(CompactButtonHeight),
+                                    contentPadding = CompactButtonPadding,
+                                ) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
+                            }
+                        }
                 }
             }
         }

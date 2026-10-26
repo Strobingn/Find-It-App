@@ -38,7 +38,13 @@ enum class GroundCover(val label: String, val windFactor: Double) {
 
 data class ManualReading(val hour: Int, val temperatureF: Double)
 
-data class ThermalAiExchange(val question: String, val answer: String, val provider: String)
+data class ThermalAiExchange(
+    val question: String,
+    val answer: String,
+    val provider: String,
+    /** Identifies the forecast this answer was written for, so an unchanged plan isn't re-requested. */
+    val forecastKey: Int = 0,
+)
 
 data class ThermalUiState(
     val latitudeText: String = "",
@@ -67,6 +73,8 @@ data class ThermalUiState(
     val aiStage: String? = null,
     val aiError: String? = null,
     val aiExchanges: List<ThermalAiExchange> = emptyList(),
+    /** Text of the answer being streamed right now. */
+    val aiStreamingText: String? = null,
     val aiProviderStatus: String = "",
 ) {
     val latitude: Double? get() = latitudeText.trim().toDoubleOrNull()?.takeIf { it in -90.0..90.0 }
@@ -242,38 +250,57 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
     fun askAi(question: String?) {
         val snapshot = _state.value
         val forecast = snapshot.forecast ?: return
+        val forecastKey = forecast.inputs.hashCode()
+        val isPlan = question.isNullOrBlank()
+        // Same conditions, same plan: reuse it instead of waiting on the cloud again.
+        if (isPlan && snapshot.aiExchanges.any { it.question == PLAN_TITLE && it.forecastKey == forecastKey }) {
+            val cached = snapshot.aiExchanges.last { it.question == PLAN_TITLE && it.forecastKey == forecastKey }
+            _state.update { it.copy(aiExchanges = it.aiExchanges - cached + cached, aiError = null) }
+            return
+        }
         aiJob?.cancel()
         aiJob = viewModelScope.launch {
-            _state.update { it.copy(aiBusy = true, aiError = null, aiStage = "Preparing thermal data…") }
+            _state.update { it.copy(aiBusy = true, aiError = null, aiStage = "Preparing thermal data…", aiStreamingText = null) }
+            var lastPaint = 0L
             try {
                 val answer = advisor.brief(
                     forecast = forecast,
                     locationLabel = snapshot.locationLabel.ifBlank { "Hunting stand" },
                     dateLabel = dateLabel(snapshot),
                     question = question,
-                    history = snapshot.aiExchanges.takeLast(3).map { it.question to it.answer },
+                    history = snapshot.aiExchanges.takeLast(2).map { it.question to it.answer },
                     onStage = { stage -> _state.update { it.copy(aiStage = stage) } },
+                    onPartialText = { partial ->
+                        val now = System.currentTimeMillis()
+                        if (partial.isEmpty() || now - lastPaint >= 66L) {
+                            lastPaint = now
+                            _state.update { it.copy(aiStreamingText = partial.ifEmpty { null }) }
+                        }
+                    },
                 )
-                val provider = answer.provider.label + (answer.fallbackReason?.let { " (fallback: $it)" } ?: "")
+                val provider = answer.provider.label + (answer.fallbackReason?.let { " (fallback after $it)" } ?: "")
                 _state.update {
                     it.copy(
                         aiBusy = false,
                         aiStage = null,
+                        aiStreamingText = null,
                         aiExchanges = it.aiExchanges + ThermalAiExchange(
-                            question = question?.takeIf { q -> q.isNotBlank() } ?: "Hunt plan",
+                            question = if (isPlan) PLAN_TITLE else question!!.trim(),
                             answer = answer.text,
                             provider = provider,
+                            forecastKey = forecastKey,
                         ),
                     )
                 }
             } catch (cancelled: CancellationException) {
-                _state.update { it.copy(aiBusy = false, aiStage = null) }
+                _state.update { it.copy(aiBusy = false, aiStage = null, aiStreamingText = null) }
                 throw cancelled
             } catch (error: Throwable) {
                 _state.update {
                     it.copy(
                         aiBusy = false,
                         aiStage = null,
+                        aiStreamingText = null,
                         aiError = (error.localizedMessage ?: "AI request failed") +
                             " The local thermal read above still applies.",
                     )
@@ -296,6 +323,8 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     companion object {
+        const val PLAN_TITLE = "Hunt plan"
+
         /** Assemble engine inputs from UI state; null until there is a location. */
         fun buildInputs(s: ThermalUiState, today: Calendar = Calendar.getInstance()): ThermalInputs? {
             val lat = s.latitude ?: return null

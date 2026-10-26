@@ -1,77 +1,97 @@
 package com.example.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 
-// Neutral grayscale only — no hue anywhere in either scheme, including selected /
-// highlighted states (FilterChip, NavigationBar indicator, etc.).
+// iOS-style system palette, still neutral greyscale (project rule: no brand hue in chrome).
+// Dark mirrors iOS dark "grouped" surfaces: true-black canvas, #1C1C1E cells, #2C2C2E raised
+// cells, #38383A hairline separators, #98989F secondary labels. The tint is graphite (near-white)
+// instead of iOS blue.
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFFBDBDBD),
-    primaryContainer = Color(0xFF424242),
-    onPrimary = Color(0xFF000000),
+    primary = IosDark.Tint,
+    onPrimary = Color.Black,
+    primaryContainer = IosDark.Gray4,
     onPrimaryContainer = Color.White,
-    secondary = Color(0xFF424242),
-    onSecondary = Color(0xFFEEEEEE),
-    secondaryContainer = Color(0xFF2A2A2A),
-    onSecondaryContainer = Color(0xFFE0E0E0),
-    tertiary = Color(0xFF616161),
-    onTertiary = Color(0xFFF5F5F5),
-    tertiaryContainer = Color(0xFF2A2A2A),
-    onTertiaryContainer = Color(0xFFE0E0E0),
-    background = Color(0xFF000000),
-    onBackground = Color(0xFFE0E0E0),
-    surface = Color(0xFF121212),
-    onSurface = Color(0xFFEEEEEE),
-    surfaceVariant = Color(0xFF1E1E1E),
-    onSurfaceVariant = Color(0xFFBDBDBD),
-    surfaceContainer = Color(0xFF1E1E1E),
-    surfaceContainerHigh = Color(0xFF2A2A2A),
-    surfaceContainerHighest = Color(0xFF333333),
-    surfaceContainerLow = Color(0xFF181818),
-    surfaceContainerLowest = Color(0xFF000000),
-    outline = Color(0xFF424242),
-    outlineVariant = Color(0xFF2A2A2A),
-    scrim = Color.Black.copy(alpha = 0.6f),
-    inverseOnSurface = Color(0xFF212121),
-    inversePrimary = Color(0xFF616161),
-    error = Color(0xFFCF6679),
-    onError = Color(0xFF000000),
+    secondary = IosDark.Gray,
+    onSecondary = Color.Black,
+    secondaryContainer = IosDark.Gray5,
+    onSecondaryContainer = Color.White,
+    tertiary = IosDark.Gray2,
+    onTertiary = Color.White,
+    tertiaryContainer = IosDark.Gray5,
+    onTertiaryContainer = Color.White,
+    background = IosDark.GroupedBackground,
+    onBackground = IosDark.Label,
+    surface = IosDark.GroupedBackground,
+    onSurface = IosDark.Label,
+    surfaceVariant = IosDark.Cell,
+    onSurfaceVariant = IosDark.SecondaryLabel,
+    surfaceTint = Color.Transparent,
+    surfaceContainerLowest = IosDark.GroupedBackground,
+    surfaceContainerLow = IosDark.Cell,
+    surfaceContainer = IosDark.Cell,
+    surfaceContainerHigh = IosDark.RaisedCell,
+    surfaceContainerHighest = IosDark.RaisedCell,
+    outline = IosDark.Gray3,
+    outlineVariant = IosDark.Separator,
+    scrim = Color.Black.copy(alpha = 0.55f),
+    inverseSurface = IosDark.Label,
+    inverseOnSurface = Color.Black,
+    inversePrimary = IosDark.Gray2,
+    error = IosDark.Red,
+    onError = Color.Black,
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF616161),
-    primaryContainer = Color(0xFFE0E0E0),
-    onPrimary = Color(0xFFFFFFFF),
-    onPrimaryContainer = Color(0xFF212121),
-    secondary = Color(0xFF616161),
-    onSecondary = Color(0xFFF5F5F5),
-    secondaryContainer = Color(0xFFE0E0E0),
-    onSecondaryContainer = Color(0xFF212121),
-    tertiary = Color(0xFF757575),
-    onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFEEEEEE),
-    onTertiaryContainer = Color(0xFF212121),
-    background = Color(0xFFF5F5F5),
-    onBackground = Color(0xFF212121),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF212121),
-    surfaceVariant = Color(0xFFE0E0E0),
-    onSurfaceVariant = Color(0xFF424242),
-    surfaceContainer = Color(0xFFF0F0F0),
-    surfaceContainerHigh = Color(0xFFE8E8E8),
-    surfaceContainerHighest = Color(0xFFE0E0E0),
-    outline = Color(0xFF757575),
-    outlineVariant = Color(0xFF9E9E9E),
-    scrim = Color.Black.copy(alpha = 0.4f),
-    inverseOnSurface = Color(0xFFFAFAFA),
-    inversePrimary = Color(0xFFBDBDBD),
-    error = Color(0xFFB00020),
+    primary = IosLight.Tint,
+    onPrimary = Color.White,
+    primaryContainer = IosLight.Gray5,
+    onPrimaryContainer = Color.Black,
+    secondary = IosLight.Gray,
+    onSecondary = Color.White,
+    secondaryContainer = IosLight.Gray5,
+    onSecondaryContainer = Color.Black,
+    tertiary = IosLight.Gray2,
+    onTertiary = Color.White,
+    tertiaryContainer = IosLight.Gray6,
+    onTertiaryContainer = Color.Black,
+    background = IosLight.GroupedBackground,
+    onBackground = IosLight.Label,
+    surface = IosLight.GroupedBackground,
+    onSurface = IosLight.Label,
+    surfaceVariant = IosLight.Cell,
+    onSurfaceVariant = IosLight.SecondaryLabel,
+    surfaceTint = Color.Transparent,
+    surfaceContainerLowest = IosLight.GroupedBackground,
+    surfaceContainerLow = IosLight.Cell,
+    surfaceContainer = IosLight.Cell,
+    surfaceContainerHigh = IosLight.RaisedCell,
+    surfaceContainerHighest = IosLight.RaisedCell,
+    outline = IosLight.Gray3,
+    outlineVariant = IosLight.Separator,
+    scrim = Color.Black.copy(alpha = 0.35f),
+    inverseSurface = Color.Black,
+    inverseOnSurface = Color.White,
+    inversePrimary = IosLight.Gray3,
+    error = IosLight.Red,
     onError = Color.White,
+)
+
+/** iOS-like corner radii: 10 for controls, 12 for grouped cells/cards, 14+ for sheets. */
+val AppShapes = Shapes(
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(14.dp),
+    extraLarge = RoundedCornerShape(20.dp),
 )
 
 @Composable
@@ -83,6 +103,7 @@ fun MyApplicationTheme(
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
         typography = Typography,
+        shapes = AppShapes,
         content = content,
     )
 }
