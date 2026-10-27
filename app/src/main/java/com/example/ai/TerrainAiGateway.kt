@@ -8,6 +8,8 @@ enum class TerrainAiProvider(val label: String) {
     GROK("Grok"),
     OPENAI("OpenAI"),
     GEMINI("Gemini"),
+    /** Gemma 4 running on the phone — no network. Always the last fallback. */
+    ON_DEVICE("Offline"),
 }
 
 data class TerrainAiAnswer(
@@ -79,6 +81,20 @@ internal class TerrainAiGateway(context: Context) {
                     }
                     TerrainAiProvider.OPENAI -> openAi.generate(conversation, systemContext, image)
                     TerrainAiProvider.GEMINI -> gemini.generate(conversation, systemContext, image)
+                    TerrainAiProvider.ON_DEVICE -> OnDeviceGemma.generate(
+                        context = appContext,
+                        conversation = conversation,
+                        systemContext = systemContext,
+                        image = image,
+                        onDelta = onPartialText?.let { sink ->
+                            val streamed = StringBuilder()
+                            ({ delta: String ->
+                                streamed.append(delta)
+                                sink(streamed.toString())
+                            })
+                        },
+                        onStage = onProviderStage,
+                    )
                 }
             }
             return TerrainAiAnswer(text = text, provider = provider, fallbackReason = fallbackReason)
@@ -116,14 +132,15 @@ internal class TerrainAiGateway(context: Context) {
     }
 
     companion object {
-        /** Grok → OpenAI → Gemini, keeping only the configured ones. */
+        /** Grok → OpenAI → Gemini → offline Gemma, keeping only the configured ones. */
         fun fallbackOrder(configured: Set<TerrainAiProvider>): List<TerrainAiProvider> =
-            listOf(TerrainAiProvider.GROK, TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI).filter { it in configured }
+            listOf(TerrainAiProvider.GROK, TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI, TerrainAiProvider.ON_DEVICE).filter { it in configured }
 
         fun configuredProviders(context: Context): Set<TerrainAiProvider> = buildSet {
             if (GrokApiClient.isConfigured(context)) add(TerrainAiProvider.GROK)
             if (OpenAiApiClient.isConfigured(context)) add(TerrainAiProvider.OPENAI)
             if (GeminiApiClient.isConfigured(context)) add(TerrainAiProvider.GEMINI)
+            if (OnDeviceGemma.isConfigured(context)) add(TerrainAiProvider.ON_DEVICE)
         }
 
         fun isConfigured(context: Context, provider: TerrainAiProvider): Boolean = provider in configuredProviders(context)
@@ -134,12 +151,13 @@ internal class TerrainAiGateway(context: Context) {
             TerrainAiProvider.GROK -> GrokApiClient.configuredModel()
             TerrainAiProvider.OPENAI -> OpenAiApiClient.configuredModel()
             TerrainAiProvider.GEMINI -> GeminiApiClient.configuredModel()
+            TerrainAiProvider.ON_DEVICE -> OnDeviceModelStore.activeModelLabel ?: "Gemma 4"
         }
 
         /** "Grok grok-4.7 (medium) primary · OpenAI gpt-5.5 fallback" style status line. */
         fun activeSummary(context: Context): String {
             val order = fallbackOrder(configuredProviders(context))
-            if (order.isEmpty()) return "Add a Grok, OpenAI or Gemini key"
+            if (order.isEmpty()) return "Add a Grok, OpenAI or Gemini key, or download offline AI"
             return order.mapIndexed { i, p ->
                 val model = modelFor(p) + if (p == TerrainAiProvider.GROK) " (${GrokApiClient.configuredReasoningEffort()})" else ""
                 "${p.label} $model ${if (i == 0) "primary" else "fallback"}"
@@ -150,6 +168,7 @@ internal class TerrainAiGateway(context: Context) {
             TerrainAiProvider.GROK -> "xai"
             TerrainAiProvider.OPENAI -> "openai"
             TerrainAiProvider.GEMINI -> "gemini"
+            TerrainAiProvider.ON_DEVICE -> "litert-lm"
         }
 
         fun providerStatus(context: Context): String = TerrainAiProvider.entries.joinToString(" · ") { p ->

@@ -172,6 +172,8 @@ androidComponents {
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)
+  // On-device Gemma 4 (offline AI)
+  implementation(libs.litertlm.android)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
@@ -218,6 +220,8 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   add("kapt", libs.androidx.room.compiler)
+  // Room 2.7's processor reads Kotlin metadata; give it a reader that understands Kotlin 2.4.
+  add("kapt", libs.kotlin.metadata.jvm)
   // Studio LeakCanary registers LeakLauncherActivity as a second LAUNCHER entry, so the system
   // resolver (and some home screens) open that instead of MainActivity. Omit it from device builds.
 }

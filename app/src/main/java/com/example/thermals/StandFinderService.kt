@@ -10,6 +10,9 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.async
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -25,7 +28,7 @@ data class StandSearchResult(
 )
 
 /**
- * Network side of the stand finder: a ½-mile elevation grid (Open-Meteo, key-less), a satellite
+ * Network side of the stand finder: a 750-yard-radius elevation grid (Open-Meteo, key-less), a satellite
  * picture of the same square (Mapbox Static Images) and the cloud AI that turns terrain + thermals
  * + imagery into ranked stand and hunting-area picks.
  */
@@ -42,16 +45,23 @@ class StandFinderService(
 
     suspend fun fetchGrid(lat: Double, lon: Double): ElevationGrid = withContext(Dispatchers.IO) {
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
-        val meters = points.chunked(100).flatMap { chunk ->
-            val url = String.format(
-                Locale.US,
-                "%s?latitude=%s&longitude=%s",
-                ThermalWeatherClient.ELEVATION_ENDPOINT,
-                chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
-                chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
-            )
-            val array = JSONObject(getText(url)).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
-            (0 until array.length()).map { array.getDouble(it) }
+        // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, run 3 at a time.
+        val meters = points.chunked(100).chunked(3).flatMap { batch ->
+            coroutineScope {
+                batch.map { chunk ->
+                    async {
+                        val url = String.format(
+                            Locale.US,
+                            "%s?latitude=%s&longitude=%s",
+                            ThermalWeatherClient.ELEVATION_ENDPOINT,
+                            chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
+                            chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
+                        )
+                        val array = JSONObject(getText(url)).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
+                        (0 until array.length()).map { array.getDouble(it) }
+                    }
+                }.awaitAll().flatten()
+            }
         }
         if (meters.size != points.size) throw IOException("Elevation service returned ${meters.size} of ${points.size} points")
         ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray())
@@ -122,7 +132,7 @@ class StandFinderService(
         val answer = gateway.generate(
             conversation = listOf(GeminiConversationTurn(role = "user", text = prompt.second)),
             systemContext = prompt.first,
-            image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view of the half-mile search square, north up, search center in the middle") },
+            image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view of the search area (750 yards each way from the center), north up, search center in the middle") },
             onProviderStage = onStage,
             featureName = "stand_finder",
             // Low reasoning effort + streaming: picks in seconds instead of minutes, and the
@@ -239,7 +249,7 @@ class StandFinderService(
                     appendLine("FORECAST: not loaded — reason from terrain and generic thermals.")
                 }
                 appendLine()
-                appendLine("SEARCH AREA: half a mile across around the center.")
+                appendLine("SEARCH AREA: everything within 750 yards of the center.")
                 appendLine("CANDIDATES (id | feature | image x%,y% | elev ft | slope° | uphill | AM score, scent→ | PM score, scent→ | road ft | house ft):")
                 candidates.forEach { c ->
                     val pos = image?.let {

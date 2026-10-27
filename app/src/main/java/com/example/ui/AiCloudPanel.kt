@@ -1052,7 +1052,7 @@ fun AiCloudPanel(
     }
     if (showKeys) {
         IosSheet(title = "AI settings", onDismiss = { showKeys = false }) {
-            IosSection(header = "Provider", footer = "Auto tries Grok first, then OpenAI, then Gemini.") {
+            IosSection(header = "Provider", footer = "Auto tries Grok first, then OpenAI, then Gemini, then offline Gemma.") {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1088,8 +1088,16 @@ fun AiCloudPanel(
                             label = { Text("Gemini", style = MaterialTheme.typography.labelSmall) },
                             modifier = Modifier.height(CompactButtonHeight),
                         )
+                        FilterChip(
+                            selected = state.providerPreference == TerrainAiProvider.ON_DEVICE,
+                            onClick = { assistantViewModel.selectCloudProvider(TerrainAiProvider.ON_DEVICE) },
+                            enabled = state.offlineConfigured && !state.isSending,
+                            label = { Text("Offline", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.height(CompactButtonHeight).testTag("ai_provider_offline"),
+                        )
                     }
             }
+            OfflineAiSection(onChanged = assistantViewModel::refreshProviders)
             IosSection(header = "API keys", footer = "Keys are stored encrypted on this phone.") {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(

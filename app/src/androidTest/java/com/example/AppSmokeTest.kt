@@ -84,6 +84,18 @@ class AppSmokeTest {
             settle(1_000)
         }
 
+        // Home → Offline AI opens the Gemma download page (DownloadManager-backed state).
+        rule.onNodeWithTag("nav_home").performClick()
+        settle(1_500)
+        rule.onNodeWithTag("home_hub").performScrollToNode(hasTestTag("home_offline_ai"))
+        rule.onNodeWithTag("home_offline_ai").performClick()
+        settle(2_000)
+        rule.onNodeWithTag("offline_model_gemma4_e2b").assertExists()
+        rule.onNodeWithTag("offline_model_gemma4_e4b").assertExists()
+        rule.onNodeWithTag("sheet_done").performClick()
+        settle(1_000)
+        assertAppAlive()
+
         // Back to Stands once more after everything else, as a user switching tabs would.
         rule.onNodeWithTag("nav_stands").performClick()
         settle()
