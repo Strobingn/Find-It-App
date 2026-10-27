@@ -334,7 +334,7 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
 
             val date = (if (useForecast) parseIsoDate(day!!.date) else null) ?: today
             val offsetMinutes = day?.utcOffsetMinutes ?: (deviceOffsetMillis(date) / 60_000)
-            val dayOfYear = DaylightPlanner.dayOfYear(
+            val dayOfYear = DaylightPlanner.solarDayOfYear(
                 date.get(Calendar.YEAR),
                 date.get(Calendar.MONTH) + 1,
                 date.get(Calendar.DAY_OF_MONTH),

@@ -30,6 +30,8 @@ data class DaylightWindow(
 object DaylightPlanner {
 
     fun compute(latitudeDegrees: Double, longitudeDegrees: Double, dayOfYear: Int): DaylightWindow {
+        // [dayOfYear] is the non-leap solar index (1 = Jan 1 … 60 = Mar 1 … 365 = Dec 31).
+        // Leap-year calendar ordinals are one day high after Feb 28; pass [solarDayOfYear].
         val gamma = 2.0 * PI / 365.0 * (dayOfYear.coerceIn(1, 365) - 1)
         val equationOfTimeMinutes = 229.18 * (
             0.000075 + 0.001868 * cos(gamma) - 0.032077 * sin(gamma) -
@@ -68,14 +70,27 @@ object DaylightPlanner {
         )
     }
 
-    /** Day of year (1..365/366, leap-safe via a non-leap clamp) for a civil date. */
+    /** Calendar day of year (1..366). Leap years count Feb 29, so Mar 1 is 61. */
     fun dayOfYear(year: Int, month: Int, dayOfMonth: Int): Int {
-        val leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        val leap = isLeapYear(year)
         val daysBefore = intArrayOf(0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
         var total = daysBefore[(month - 1).coerceIn(0, 11)] + dayOfMonth.coerceIn(1, 31)
         if (leap && month > 2) total++
         return total.coerceIn(1, 366)
     }
+
+    /**
+     * Day index for the non-leap solar formulas in [compute] and [com.example.geospatial.SolarPosition].
+     * Mar 1 is day 60 in both leap and non-leap years. Feb 29 maps to day 59 (beside Feb 28).
+     */
+    fun solarDayOfYear(year: Int, month: Int, dayOfMonth: Int): Int {
+        val ordinal = dayOfYear(year, month, dayOfMonth)
+        val solar = if (isLeapYear(year) && ordinal >= 60) ordinal - 1 else ordinal
+        return solar.coerceIn(1, 365)
+    }
+
+    private fun isLeapYear(year: Int): Boolean =
+        year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 
     /** Formats UTC minutes-of-day as a local "h:mm AM" clock string with [utcOffsetMinutes]. */
     fun formatLocal(utcMinutes: Float, utcOffsetMinutes: Int): String {

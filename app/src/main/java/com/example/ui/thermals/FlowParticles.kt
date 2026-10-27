@@ -53,6 +53,8 @@ internal class GroundCell(
     val eastX: Float,
     val eastY: Float,
     val terrain: SiteTerrain,
+    val latitude: Double = Double.NaN,
+    val longitude: Double = Double.NaN,
 )
 
 internal class GroundGrid(val cols: Int, val rows: Int, val width: Float, val height: Float, val cells: Array<GroundCell?>) {
@@ -97,6 +99,49 @@ internal class GroundGrid(val cols: Int, val rows: Int, val width: Float, val he
         out[0] = sx / wSum
         out[1] = sy / wSum
         return true
+    }
+
+    /**
+     * Terrain of the sample under [lat]/[lon], or null when the pin is off this screen's samples.
+     * The wind-map cone and HUD use this so they match the particle cell under the pin.
+     * A nearest cell on the far edge of a panned map is not the stand.
+     */
+    fun terrainNearest(lat: Double, lon: Double): SiteTerrain? {
+        var best: GroundCell? = null
+        var bestD = Double.POSITIVE_INFINITY
+        val cosLat = kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.2)
+        for (cell in cells) {
+            if (cell == null || cell.latitude.isNaN() || cell.longitude.isNaN()) continue
+            val d = hypot((cell.latitude - lat) * 111_320.0, (cell.longitude - lon) * 111_320.0 * cosLat)
+            if (d < bestD) {
+                bestD = d
+                best = cell
+            }
+        }
+        val spacing = sampleSpacingMeters()
+        if (best == null || !spacing.isFinite() || bestD > spacing * 0.8) return null
+        return best.terrain
+    }
+
+    /** Meters between two neighboring samples, so an off-screen pin can be rejected. */
+    private fun sampleSpacingMeters(): Double {
+        for (r in 0 until rows) {
+            var prev: GroundCell? = null
+            for (c in 0 until cols) {
+                val cell = cells[r * cols + c] ?: continue
+                if (cell.latitude.isNaN() || cell.longitude.isNaN()) continue
+                val earlier = prev
+                if (earlier != null) {
+                    val cosLat = kotlin.math.cos(Math.toRadians(cell.latitude)).coerceAtLeast(0.2)
+                    return hypot(
+                        (cell.latitude - earlier.latitude) * 111_320.0,
+                        (cell.longitude - earlier.longitude) * 111_320.0 * cosLat,
+                    )
+                }
+                prev = cell
+            }
+        }
+        return Double.NaN
     }
 }
 

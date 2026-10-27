@@ -18,6 +18,9 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Where the stand-search elevations came from. */
+data class ElevationFetch(val grid: ElevationGrid, val sourceLabel: String)
+
 /** Result of a stand search: the analysed candidates and the picks to pin on the map. */
 data class StandSearchResult(
     val candidates: List<StandCandidate>,
@@ -43,7 +46,20 @@ class StandFinderService(
     private val appContext = context.applicationContext
     private val gateway = TerrainAiGateway(appContext)
 
-    suspend fun fetchGrid(lat: Double, lon: Double): ElevationGrid = withContext(Dispatchers.IO) {
+    /**
+     * Elevation for the stand search. Uses [siteDem] when the search center falls inside a
+     * loaded LiDAR / site grid and enough of the square is covered; otherwise Open-Meteo.
+     */
+    suspend fun fetchGrid(lat: Double, lon: Double, siteDem: SiteDem? = null): ElevationFetch = withContext(Dispatchers.IO) {
+        siteDem?.let { dem ->
+            SiteDemGrids.fromSamples(lat, lon, dem)?.let { grid ->
+                return@withContext ElevationFetch(grid, "LiDAR on this phone")
+            }
+        }
+        ElevationFetch(fetchOpenMeteoGrid(lat, lon), "Elevation model")
+    }
+
+    private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
         // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, run 3 at a time.
         val meters = points.chunked(100).chunked(3).flatMap { batch ->
@@ -64,7 +80,7 @@ class StandFinderService(
             }
         }
         if (meters.size != points.size) throw IOException("Elevation service returned ${meters.size} of ${points.size} points")
-        ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray())
+        return ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray())
     }
 
     /**
@@ -226,6 +242,7 @@ class StandFinderService(
                 appendLine("Use the terrain candidates (computed from elevation), the thermal/wind forecast, and the satellite image if attached")
                 appendLine("(look for field edges, inside corners, thick cover, oak flats, creek crossings, pinch points).")
                 appendLine("A stand works when scent drifts AWAY from where deer come from during that sit. Morning: deer move from feeding up to bedding. Evening: bedding back down to feed.")
+                appendLine("Candidate lines say \"away from deer\", \"marginal\", or \"POOR\". Only \"away from deer\" is a confident setup. Do not describe a POOR or marginal sit as scent blowing away from deer. If every candidate is POOR, say the wind is wrong instead of inventing a stand.")
                 appendLine("Never place picks on or near roads, buildings, driveways, water or yards (stay 150+ ft from roads, 200+ ft from houses). Remind nothing about permission; the app already does.")
                 appendLine("The user is in the US: use feet, yards and miles, never meters.")
                 appendLine()
@@ -250,14 +267,14 @@ class StandFinderService(
                 }
                 appendLine()
                 appendLine("SEARCH AREA: everything within 750 yards of the center.")
-                appendLine("CANDIDATES (id | feature | image x%,y% | elev ft | slope° | uphill | AM score, scent→ | PM score, scent→ | road ft | house ft):")
+                appendLine("CANDIDATES (id | feature | image x%,y% | elev ft | slope° | uphill | AM score, honesty, scent→ | PM score, honesty, scent→ | road ft | house ft):")
                 candidates.forEach { c ->
                     val pos = image?.let {
                         val (x, y) = StandFinder.latLonToImagePercent(c.latitude, c.longitude, it.centerLat, it.centerLon, it.zoom, it.widthPx, it.heightPx)
                         "%.0f,%.0f".format(x, y)
                     } ?: "-"
                     appendLine(
-                        "%d | %s | %s | %.0f | %.0f | %s | %d%% → %s | %d%% → %s".format(
+                        "%d | %s | %s | %.0f | %.0f | %s | %d%% %s → %s | %d%% %s → %s".format(
                             c.id,
                             c.feature.label,
                             pos,
@@ -265,9 +282,11 @@ class StandFinderService(
                             c.slopeDegrees,
                             c.uphillBearing?.let { ThermalWindEngine.compass(it) } ?: "flat",
                             (c.morningScore * 100).toInt(),
-                            ThermalWindEngine.compass(c.morningScentToward),
+                            StandFinder.sitHonesty(c.morningAlign),
+                            c.morningScentToward?.let { ThermalWindEngine.compass(it) } ?: "calm",
                             (c.eveningScore * 100).toInt(),
-                            ThermalWindEngine.compass(c.eveningScentToward),
+                            StandFinder.sitHonesty(c.eveningAlign),
+                            c.eveningScentToward?.let { ThermalWindEngine.compass(it) } ?: "calm",
                         ) + " | " + (obstacles.nearestRoadFeet(c.latitude, c.longitude)?.let { "%.0f".format(it) } ?: "?") +
                             " | " + (obstacles.nearestBuildingFeet(c.latitude, c.longitude)?.let { "%.0f".format(it) } ?: "?"),
                     )

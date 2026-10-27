@@ -113,6 +113,14 @@ private const val MAP_LAST_HOUR = 21f
 /** Camera moves prefetch this many zoom levels of lower-detail tiles (SDK default 4). */
 private const val PREFETCH_ZOOM_DELTA: Byte = 1
 
+/**
+ * 3D terrain exaggeration passed to Mapbox. [MapboxMap.getElevation] returns meters already
+ * multiplied by this, so thermal slope divides it back out. Cone, HUD, and the particle cell
+ * under the pin all use that corrected sample — one terrain, not the stand's Open-Meteo slope
+ * beside a steeper Mapbox slope.
+ */
+private const val TERRAIN_EXAGGERATION = 1.4
+
 private object WindMapIds {
     const val DEM = "thermal-dem"
     const val CONE_SOURCE = "thermal-cone"
@@ -185,10 +193,7 @@ fun ThermalWindMapScreen(
     val field = remember(inputs) { inputs?.let(ThermalWindEngine::flowField) }
     val lat = state.latitude
     val lon = state.longitude
-
-    // Stand reading at the scrubbed time (quantized so the map isn't rebuilt every frame).
     val hourKey = (hour * 10).roundToInt()
-    val standFlow: ThermalHour? = remember(field, hourKey) { field?.at(hourKey / 10.0) }
 
     val mapViewportState = rememberMapViewportState {
         setCameraOptions {
@@ -230,12 +235,24 @@ fun ThermalWindMapScreen(
     var lastMoveMs by remember { mutableLongStateOf(0L) }
     var grid by remember { mutableStateOf<GroundGrid?>(null) }
 
+    // Stand reading at the scrubbed time. Prefer the sampled cell under the pin so the cone,
+    // HUD, and particles share one slope (Mapbox elevations already divided by exaggeration).
+    val pinTerrain = if (lat != null && lon != null) grid?.terrainNearest(lat, lon) else null
+    val standFlow: ThermalHour? = remember(field, hourKey, pinTerrain) {
+        when {
+            field == null -> null
+            pinTerrain != null -> field.at(hourKey / 10.0, pinTerrain)
+            else -> field.at(hourKey / 10.0)
+        }
+    }
+
     // Re-sample the ground under the screen whenever the camera settles or the stand terrain changes.
-    LaunchedEffect(idleTick, mapViewRef, inputs?.terrain) {
+    LaunchedEffect(idleTick, mapViewRef, inputs?.terrain, terrain3d) {
         val map = mapViewRef?.mapboxMap ?: return@LaunchedEffect
         val view = mapViewRef ?: return@LaunchedEffect
         if (view.width <= 0 || view.height <= 0) return@LaunchedEffect
-        grid = sampleGround(map, view.width.toFloat(), view.height.toFloat(), fallback = inputs?.terrain)
+        val exaggeration = if (terrain3d) TERRAIN_EXAGGERATION else 1.0
+        grid = sampleGround(map, view.width.toFloat(), view.height.toFloat(), fallback = inputs?.terrain, exaggeration = exaggeration)
     }
 
     // Motion per cell for the current time, recomputed when the time or field changes.
@@ -278,7 +295,10 @@ fun ThermalWindMapScreen(
     }
 
     val coneColor = standFlow?.let { phaseColor(it.phase) } ?: ScentColor
-    val coneFeatures = remember(standFlow, lat, lon) { buildCone(lat, lon, standFlow) }
+    val coneFeatures = remember(standFlow, lat, lon) {
+        val flow = standFlow?.takeIf { it.scentSpeedMph >= ThermalWindEngine.CALM_SCENT_MPH }
+        buildCone(lat, lon, flow)
+    }
     val standFeatures = remember(lat, lon) { buildStand(lat, lon) }
 
     Box(modifier.fillMaxSize().padding(padding).testTag("wind_map_screen")) {
@@ -323,7 +343,7 @@ fun ThermalWindMapScreen(
             }
             MapEffect(terrain3d) { mapView ->
                 mapView.mapboxMap.getStyle { style ->
-                    if (terrain3d) style.setTerrain(terrain(demSourceId) { exaggeration(1.4) }) else style.removeTerrain()
+                    if (terrain3d) style.setTerrain(terrain(demSourceId) { exaggeration(TERRAIN_EXAGGERATION) }) else style.removeTerrain()
                 }
             }
             MapEffect(coneFeatures, coneColor, showCone) { mapView ->
@@ -469,9 +489,11 @@ private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode, mapBeari
                         style = MaterialTheme.typography.titleMedium,
                     )
                 }
-                Text(flow.phase.label, color = phaseColor(flow.phase), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text(ThermalWindEngine.phaseText(flow), color = phaseColor(flow.phase), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (mode == ParticleMode.SCENT) {
+                    if (flow.scentSpeedMph < ThermalWindEngine.CALM_SCENT_MPH && mode == ParticleMode.SCENT) {
+                        "Scent nearly still"
+                    } else if (mode == ParticleMode.SCENT) {
                         "Scent → ${ThermalWindEngine.compass(flow.scentTowardDegrees)} %.1f mph".format(flow.scentSpeedMph)
                     } else {
                         flow.thermalTowardDegrees?.let { "Thermal → ${ThermalWindEngine.compass(it)} %.1f mph".format(flow.thermalSpeedMph) }
@@ -508,7 +530,9 @@ internal fun ScentDial(flow: ThermalHour, modifier: Modifier, mapBearing: Double
         // A ground bearing appears on screen turned by the map's own bearing.
         drawDirectionArrow(c, flow.windTowardDegrees - mapBearing, r * 0.5f, WindColor.copy(alpha = 0.7f), 2.dp.toPx())
         flow.thermalTowardDegrees?.let { drawDirectionArrow(c, it - mapBearing, r * 0.45f, phaseColor(flow.phase), 2.5.dp.toPx()) }
-        drawDirectionArrow(c, flow.scentTowardDegrees - mapBearing, r * 0.85f, ScentColor, 3.dp.toPx())
+        if (flow.scentSpeedMph >= ThermalWindEngine.CALM_SCENT_MPH) {
+            drawDirectionArrow(c, flow.scentTowardDegrees - mapBearing, r * 0.85f, ScentColor, 3.dp.toPx())
+        }
         // North tick so the dial still reads as a compass when the map is turned.
         val nRad = Math.toRadians(-mapBearing)
         val nx = c.x + (r - 1.dp.toPx()) * kotlin.math.sin(nRad).toFloat()
@@ -569,7 +593,13 @@ private const val SLOPE_SPACING_M = 60.0
  * Cells that land in the sky (high pitch) are left empty. If elevation isn't available yet the
  * stand's own terrain is used everywhere.
  */
-private fun sampleGround(map: MapboxMap, width: Float, height: Float, fallback: SiteTerrain?): GroundGrid {
+private fun sampleGround(
+    map: MapboxMap,
+    width: Float,
+    height: Float,
+    fallback: SiteTerrain?,
+    exaggeration: Double,
+): GroundGrid {
     val cells = arrayOfNulls<GroundCell>(FLOW_GRID_COLS * FLOW_GRID_ROWS)
     for (r in 0 until FLOW_GRID_ROWS) {
         for (c in 0 until FLOW_GRID_COLS) {
@@ -587,13 +617,15 @@ private fun sampleGround(map: MapboxMap, width: Float, height: Float, fallback: 
             val pN = map.pixelForCoordinate(Point.fromLngLat(nLon, nLat))
             val pE = map.pixelForCoordinate(Point.fromLngLat(eLon, eLat))
             val terrain = run {
-                val zN = map.getElevation(Point.fromLngLat(nLon, nLat))
-                val zS = map.getElevation(Point.fromLngLat(sLon, sLat))
-                val zE = map.getElevation(Point.fromLngLat(eLon, eLat))
-                val zW = map.getElevation(Point.fromLngLat(wLon, wLat))
-                if (zN != null && zS != null && zE != null && zW != null) {
-                    val (uphill, slope) = ThermalMapGeometry.slopeFromSamples(zN, zS, zE, zW, SLOPE_SPACING_M)
-                    ThermalMapGeometry.cellTerrain(uphill, slope)
+                val scale = exaggeration.coerceAtLeast(1.0)
+                fun meters(raw: Double?) = raw?.takeIf { it.isFinite() }?.div(scale)
+                val zC = meters(map.getElevation(point))
+                val zN = meters(map.getElevation(Point.fromLngLat(nLon, nLat)))
+                val zS = meters(map.getElevation(Point.fromLngLat(sLon, sLat)))
+                val zE = meters(map.getElevation(Point.fromLngLat(eLon, eLat)))
+                val zW = meters(map.getElevation(Point.fromLngLat(wLon, wLat)))
+                if (zC != null && zN != null && zS != null && zE != null && zW != null) {
+                    ThermalMapGeometry.terrainFromNeighborhood(zC, zN, zS, zE, zW, SLOPE_SPACING_M)
                 } else {
                     fallback ?: ThermalMapGeometry.cellTerrain(null, 0.0)
                 }
@@ -606,6 +638,8 @@ private fun sampleGround(map: MapboxMap, width: Float, height: Float, fallback: 
                 eastX = ((pE.x - px) / SLOPE_SPACING_M).toFloat(),
                 eastY = ((pE.y - py) / SLOPE_SPACING_M).toFloat(),
                 terrain = terrain,
+                latitude = lat,
+                longitude = lon,
             )
         }
     }
@@ -657,7 +691,7 @@ private fun Style.installWindLayers(
         }
         WindMapIds.DEM
     }
-    if (terrain3d) setTerrain(terrain(demId) { exaggeration(1.4) })
+    if (terrain3d) setTerrain(terrain(demId) { exaggeration(TERRAIN_EXAGGERATION) })
     addSource(geoJsonSource(WindMapIds.CONE_SOURCE) { featureCollection(cone) })
     addSource(geoJsonSource(WindMapIds.STAND_SOURCE) { featureCollection(stand) })
     val vis = if (showCone) Visibility.VISIBLE else Visibility.NONE

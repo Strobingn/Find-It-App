@@ -1,9 +1,11 @@
 package com.example.thermals
 
+import com.example.geospatial.GeoSpatialLibrary
 import kotlin.math.abs
 import kotlin.math.cos
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -75,13 +77,16 @@ class StandFinderTest {
 
     @Test
     fun localPicksExplainThemselves() {
-        val grid = ridgeWithSaddle()
-        val picks = StandFinder.localPicks(StandFinder.findCandidates(grid, ThermalWindEngine.flowField(forecastInputs()), 315.0))
+        // West wind blows scent east: a crosswind on the north-south saddle, which is a full-credit sit.
+        val base = forecastInputs()
+        val inputs = base.copy(hourly = base.hourly.map { it.copy(windSpeedMph = 12.0, windFromDegrees = 270.0) })
+        val picks = StandFinder.localPicks(StandFinder.findCandidates(ridgeWithSaddle(), ThermalWindEngine.flowField(inputs), 270.0))
         assertTrue(picks.isNotEmpty())
         val first = picks.first()
         assertEquals(1, first.rank)
         assertTrue(first.why.isNotBlank() && first.entry.isNotBlank() && first.wind.isNotBlank())
         assertNotNull(first.scentToward)
+        assertTrue(first.wind, first.wind.contains("away from deer"))
     }
 
     @Test
@@ -116,7 +121,9 @@ class StandFinderTest {
         assertEquals(listOf(1, 2, 3), picks.map { it.rank })
         assertEquals("Saddle", picks[0].title)
         assertEquals(candidates.first().latitude, picks[0].latitude, 1e-9)
-        assertEquals(candidates.first().morningScentToward, picks[0].scentToward!!, 1e-9)
+        val morningScent = candidates.first().morningScentToward
+        assertNotNull(morningScent)
+        assertEquals(morningScent!!, picks[0].scentToward!!, 1e-9)
         assertEquals(StandPick.Kind.AREA, picks[2].kind)
         assertEquals(null, picks[2].scentToward)
     }
@@ -248,4 +255,200 @@ class StandFinderTest {
         assertTrue(msg.contains("api.x.ai") && msg.contains("generativelanguage.googleapis.com"))
         assertEquals("HTTP 500", StandFinderService.explainNetworkFailure("HTTP 500"))
     }
+
+    @Test
+    fun cornerCellsBeyond750YardsAreNotCandidates() {
+        val n = size
+        val meters = DoubleArray(n * n) { 200.0 }
+        val r = 2
+        val c = 2
+        fun set(row: Int, col: Int, z: Double) {
+            meters[row * n + col] = z
+        }
+        // Shoulder of a corner hill: steep enough to classify, but outside the 750-yard circle.
+        set(r, c, 250.0)
+        set(r - 1, c, 240.0)
+        set(r + 1, c, 220.0)
+        set(r, c + 1, 230.0)
+        set(r, c - 1, 230.0)
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters)
+        assertNotNull(StandFinder.classify(grid, r, c, null))
+        val (lat, lon) = grid.latLon(r, c)
+        val dist = StandFinder.distanceMeters(grid.centerLat, grid.centerLon, lat, lon)
+        assertTrue("corner cell should sit outside 750 yards, was $dist m", dist > StandFinder.MAX_PICK_DISTANCE_M)
+        val found = StandFinder.findCandidates(grid, null, null)
+        assertTrue(found.none { StandFinder.distanceMeters(it.latitude, it.longitude, lat, lon) < 1.0 })
+        found.forEach {
+            val d = StandFinder.distanceMeters(grid.centerLat, grid.centerLon, it.latitude, it.longitude)
+            assertTrue("candidate at $d m past 750 yards", d <= StandFinder.MAX_PICK_DISTANCE_M + 1e-6)
+        }
+    }
+
+    @Test
+    fun crosswindSaddleOutranksAPerfectBench() {
+        // One approach: away (~135°+) scores 1, into the deer scores 0.
+        assertEquals(1.0, StandFinder.approachAlignment(0.0, listOf(180.0)), 1e-9)
+        assertEquals(0.0, StandFinder.approachAlignment(180.0, listOf(180.0)), 1e-9)
+        // Saddle: scent down the trail is 0; a crosswind (~90° to the axis) is a full-credit sit.
+        assertEquals(0.0, StandFinder.approachAlignment(0.0, listOf(0.0, 180.0)), 1e-9)
+        assertEquals(1.0, StandFinder.approachAlignment(90.0, listOf(0.0, 180.0)), 1e-9)
+        val saddle = StandFinder.sitScore(StandFeature.SADDLE, 1.0)
+        val bench = StandFinder.sitScore(StandFeature.BENCH, 1.0)
+        assertTrue("crosswind saddle $saddle should beat a perfect bench $bench", saddle > bench)
+    }
+
+    @Test
+    fun localPicksOnlyCallScentAwayWhenTheSitIsStrong() {
+        val away = stand(StandFeature.BENCH, align = 1.0, scent = 0.0, deerFrom = 180.0)
+        val awayPicks = StandFinder.localPicks(listOf(away))
+        assertEquals(1, awayPicks.size)
+        assertTrue(awayPicks[0].wind.contains("away from deer"))
+        assertTrue(awayPicks[0].entry.contains("Walk in from the N"))
+
+        val marginal = stand(StandFeature.BENCH, align = 0.7, scent = 90.0, deerFrom = 180.0)
+        val marginalPicks = StandFinder.localPicks(listOf(marginal))
+        assertEquals(1, marginalPicks.size)
+        assertTrue(marginalPicks[0].wind.contains("Marginal"))
+        assertTrue(!marginalPicks[0].wind.contains("away from deer"))
+        assertTrue(marginalPicks[0].entry.contains("not cleanly away"))
+
+        val poor = stand(StandFeature.BENCH, align = 0.2, scent = 180.0, deerFrom = 180.0)
+        assertTrue(StandFinder.localPicks(listOf(poor)).none { it.kind == StandPick.Kind.STAND })
+        assertTrue(StandFinder.windCopy(poor).contains("Poor sit"))
+        assertTrue(!StandFinder.windCopy(poor).contains("away from deer"))
+    }
+
+    @Test
+    fun promptMarksPoorSitsInsteadOfCallingThemAway() {
+        val poor = stand(StandFeature.BENCH, align = 0.1, scent = 180.0, deerFrom = 180.0)
+        val (_, user) = StandFinderService.buildPrompt(listOf(poor), null, null, 42.0, -75.0, "Site", "Day")
+        assertTrue(user.contains("POOR"))
+        assertTrue(!user.contains("away from deer"))
+        assertEquals("away from deer", StandFinder.sitHonesty(1.0))
+        assertEquals("marginal, not cleanly away", StandFinder.sitHonesty(0.7))
+    }
+
+    @Test
+    fun uncoveredDemCellsAreNotInterpolatedAsSeaLevel() {
+        val n = size
+        val meters = DoubleArray(n * n) { 100.0 }
+        val covered = BooleanArray(n * n) { true }
+        for (r in 0 until n) covered[r * n] = false
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters, covered)
+        val (edgeLat, edgeLon) = grid.latLon(1, 0)
+        assertNull(grid.elevationAt(edgeLat, edgeLon))
+        val (lat, lon) = grid.latLon(14, 14)
+        assertEquals(100.0, grid.elevationAt(lat, lon)!!, 0.05)
+    }
+
+    @Test
+    fun levelShelfWithSteepSidesIsStillABench() {
+        val n = size
+        val r0 = 14
+        val meters = DoubleArray(n * n)
+        for (r in 0 until n) {
+            val z = when {
+                r <= 11 -> 240.0 - (11 - r) * 15.0
+                r >= 17 -> 160.0 - (r - 17) * 15.0
+                r == 12 -> 205.0
+                r == 16 -> 195.0
+                else -> 200.0
+            }
+            for (c in 0 until n) meters[r * n + c] = z
+        }
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters)
+        assertEquals(StandFeature.BENCH, StandFinder.classify(grid, r0, r0, null))
+    }
+
+    @Test
+    fun benchRequiresSteepGroundOnBothSidesOfTheShelf() {
+        val both = slopeShelf(dropDownhill = true)
+        assertEquals(StandFeature.BENCH, StandFinder.classify(both, 14, 14, null))
+        val oneCliff = slopeShelf(dropDownhill = false)
+        assertTrue(StandFinder.classify(oneCliff, 14, 14, null) != StandFeature.BENCH)
+    }
+
+    @Test
+    fun drawHeadKeepsRisingUphillAndFallingDownhill() {
+        val n = size
+        val meters = DoubleArray(n * n)
+        val r0 = 14
+        for (r in 0 until n) {
+            for (c in 0 until n) {
+                var z = 200.0 + (r0 - r) * 7.0
+                if (r == r0 && c == r0) z -= 8.0
+                meters[r * n + c] = z
+            }
+        }
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters)
+        assertEquals(StandFeature.DRAW_HEAD, StandFinder.classify(grid, r0, r0, null))
+    }
+
+    @Test
+    fun siteDemIsUsedWhenTheCenterIsCoveredAndSkippedWhenItIsASpeck() {
+        val lat = 42.75
+        val lon = -75.5
+        val wide = SiteDem { la, lo ->
+            if (StandFinder.distanceMeters(lat, lon, la, lo) <= 400.0) 250.0 else null
+        }
+        val grid = SiteDemGrids.fromSamples(lat, lon, wide)
+        assertNotNull(grid)
+        val half = StandFinder.GRID_SIZE / 2
+        assertTrue(grid!!.isCovered(half, half))
+        assertTrue(!grid.isCovered(2, 2))
+        assertTrue(grid.covered.count { it } >= SiteDemGrids.MIN_HITS)
+        val speck = SiteDem { la, lo ->
+            if (StandFinder.distanceMeters(lat, lon, la, lo) <= 30.0) 250.0 else null
+        }
+        assertNull(SiteDemGrids.fromSamples(lat, lon, speck))
+    }
+
+    @Test
+    fun lidarSampleIsNorthUpAndBilinear() {
+        val meta = GeoSpatialLibrary.GeoSpatialMetadata(
+            siteName = "test",
+            bounds = GeoSpatialLibrary.GeographicBounds(42.0, 43.0, -76.0, -75.0),
+            columns = 5,
+            rows = 5,
+        )
+        val center = LidarStandDem.sample(42.5, -75.5, meta, 5, 5) { col, _ -> col * 10.0 }
+        assertEquals(20.0, center!!, 1e-6)
+        val northEdge = LidarStandDem.sample(43.0, -75.5, meta, 5, 5) { col, row -> (row * 100 + col).toDouble() }
+        assertEquals(2.0, northEdge!!, 1e-6)
+        assertNull(LidarStandDem.sample(50.0, -75.5, meta, 5, 5) { _, _ -> 1.0 })
+    }
+
+    /** Gentle north-facing plane with a steep step above the shelf, and optionally below it. */
+    private fun slopeShelf(dropDownhill: Boolean): ElevationGrid {
+        val n = size
+        val r0 = 14
+        val meters = DoubleArray(n * n)
+        for (r in 0 until n) {
+            for (c in 0 until n) {
+                var z = 200.0 + (r0 - r) * 2.62
+                if (r <= r0 - 3) z += 25.0
+                if (dropDownhill && r >= r0 + 3) z -= 25.0
+                meters[r * n + c] = z
+            }
+        }
+        return ElevationGrid(42.75, -75.5, n, spacing, meters)
+    }
+
+    private fun stand(feature: StandFeature, align: Double, scent: Double, deerFrom: Double) = StandCandidate(
+        id = 1,
+        latitude = 42.0,
+        longitude = -75.0,
+        feature = feature,
+        elevationFeet = 1000.0,
+        slopeDegrees = 8.0,
+        uphillBearing = 0.0,
+        morningScore = StandFinder.sitScore(feature, align),
+        eveningScore = StandFinder.sitScore(feature, align * 0.5),
+        morningScentToward = scent,
+        eveningScentToward = scent,
+        morningDeerFrom = deerFrom,
+        eveningDeerFrom = deerFrom,
+        morningAlign = align,
+        eveningAlign = align * 0.5,
+    )
 }

@@ -2,6 +2,7 @@ package com.example.thermals
 
 import kotlin.math.abs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -34,33 +35,9 @@ class ThermalWindEngineTest {
     private fun angleDiff(a: Double, b: Double): Double = abs(((a - b + 540.0) % 360.0) - 180.0)
 
     @Test
-    fun flatGroundCreditsTheWindWithAllOfTheDrift() {
-        // A vertical thermal moves no scent sideways, so none of the drift is the thermal's and
-        // the wind sets the bearing on its own. thermalShare used to count the thermal's speed
-        // here even though it contributed nothing to the scent vector.
-        val wind = day(windMph = 6.0, windFrom = 315.0)
-        val flat = SiteTerrain(TerrainSetting.FLAT, uphillBearingDegrees = null, slopeDegrees = 0.0)
-        val noon = run(flat, wind).hour(12)!!
-
-        assertEquals("no horizontal thermal, no thermal share", 0.0, noon.thermalShare, 1e-9)
-        assertNull(noon.thermalTowardDegrees)
-        assertEquals("scent follows the wind alone", noon.windTowardDegrees, noon.scentTowardDegrees, 1e-9)
-        assertEquals(noon.groundWindMph, noon.scentSpeedMph, 1e-9)
-    }
-
-    @Test
-    fun ridgeTopAlsoLeavesTheDriftToTheWind() {
-        val wind = day(windMph = 6.0, windFrom = 315.0)
-        val ridge = SiteTerrain(TerrainSetting.RIDGE, uphillBearingDegrees = 0.0, slopeDegrees = 12.0)
-        val noon = run(ridge, wind).hour(12)!!
-
-        assertEquals(0.0, noon.thermalShare, 1e-9)
-        assertEquals(noon.windTowardDegrees, noon.scentTowardDegrees, 1e-9)
-    }
-
-    @Test
     fun aHillsideStillSplitsTheDriftBetweenThermalAndWind() {
-        // The counterpart of the two above: where the thermal does push sideways it keeps its share.
+        // The positive counterpart to flatAndRidgeDoNotCountVerticalThermalsAsScentShare: where
+        // the thermal does push air sideways it keeps its share of the drift.
         val wind = day(windMph = 4.0, windFrom = 315.0)
         val noon = run(slope(uphill = 0.0), wind).hour(12)!!
 
@@ -214,6 +191,33 @@ class ThermalWindEngineTest {
         assertEquals(0.0, series.windFrom(1.0), 0.001)
         assertEquals(42.0, series.temperature(1.0), 0.001)
         assertEquals(2.0, series.warmingRate(1.0), 0.001)
+    }
+
+    @Test
+    fun flatAndRidgeDoNotCountVerticalThermalsAsScentShare() {
+        val flat = SiteTerrain(TerrainSetting.FLAT, uphillBearingDegrees = null, slopeDegrees = 0.0)
+        val ridge = SiteTerrain(TerrainSetting.RIDGE, uphillBearingDegrees = 0.0, slopeDegrees = 8.0)
+        val noon = run(flat, day(windMph = 6.0, windFrom = 0.0)).hour(12)!!
+        assertNull(noon.thermalTowardDegrees)
+        assertEquals(0.0, noon.thermalShare, 0.001)
+        assertTrue(angleDiff(noon.scentTowardDegrees, 180.0) < 1.0)
+        assertEquals("Rising", ThermalWindEngine.phaseText(noon))
+        val ridgeNoon = run(ridge, day(windMph = 0.0)).hour(12)!!
+        assertNull(ridgeNoon.thermalTowardDegrees)
+        assertEquals(0.0, ridgeNoon.thermalShare, 0.001)
+        assertFalse(ThermalWindEngine.phaseText(ridgeNoon).contains("uphill"))
+        assertFalse(ThermalWindEngine.phaseText(ridgeNoon).contains("downhill"))
+    }
+
+    @Test
+    fun calmAirDoesNotInventANorthBearing() {
+        assertNull(ThermalWindEngine.bearingOrNull(0.0, 0.0))
+        assertEquals(0.0, ThermalWindEngine.bearingOrNull(0.0, 1.0)!!, 0.001)
+        val flat = SiteTerrain(TerrainSetting.FLAT, null, 0.0)
+        val still = run(flat, day(windMph = 0.0)).hour(3)!!
+        assertTrue(still.scentSpeedMph < ThermalWindEngine.CALM_SCENT_MPH)
+        assertTrue(ThermalWindEngine.adviceFor(still).contains("nearly still"))
+        assertFalse(ThermalWindEngine.adviceFor(still).contains("toward the N"))
     }
 
     @Test

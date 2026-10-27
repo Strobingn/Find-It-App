@@ -1252,9 +1252,11 @@ private fun WindMapTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
 @Composable
 private fun StandsTab(viewModel: HillshadeViewModel, padding: PaddingValues) {
     val metadata by viewModel.activeGeoMetadata.collectAsStateWithLifecycle()
+    val grid by viewModel.elevationGrid.collectAsStateWithLifecycle()
     StandFinderScreen(
         padding = padding,
         siteMetadata = metadata.takeIf { it.isGeoreferenced },
+        siteRaster = grid,
     )
 }
 

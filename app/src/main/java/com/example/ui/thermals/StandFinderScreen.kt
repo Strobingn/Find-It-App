@@ -9,8 +9,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.core.content.ContextCompat
+import com.example.thermals.LidarStandDem
+import com.example.thermals.SiteDem
 import com.example.thermals.StandFinder
 import com.example.thermals.ElevationGrid
+import com.example.data.ElevationGrid as TerrainRaster
 import com.example.thermals.SiteTerrain
 import com.example.thermals.ThermalHour
 import androidx.compose.foundation.background
@@ -114,6 +117,8 @@ private val AreaPinColor = Color(0xFF30D158)
 fun StandFinderScreen(
     padding: PaddingValues,
     siteMetadata: GeoSpatialLibrary.GeoSpatialMetadata?,
+    /** Loaded LiDAR / site raster. Used when the search center falls inside it. */
+    siteRaster: TerrainRaster? = null,
     modifier: Modifier = Modifier,
     thermalViewModel: ThermalWindViewModel = viewModel(),
     finderViewModel: StandFinderViewModel = viewModel(),
@@ -135,20 +140,31 @@ fun StandFinderScreen(
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
     var locationGranted by remember { mutableStateOf(hasLocationPermission()) }
+    // Set only by the my-location button, so granting permission then follows that tap.
+    // Automatic startup still leaves an existing site or typed pin alone.
+    var pendingMyLocation by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         locationGranted = grants.values.any { it }
-        if (locationGranted) thermalViewModel.useDeviceLocation()
+        val followThisTap = pendingMyLocation
+        pendingMyLocation = false
+        if (locationGranted && (followThisTap || !thermalViewModel.state.value.hasLocation)) {
+            thermalViewModel.useDeviceLocation()
+        }
     }
-    // First time Stands opens this session: search where the user is standing.
+    // First time Stands opens this session: GPS only when Thermals doesn't already have a location.
     var openedOnGps by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         if (openedOnGps) return@LaunchedEffect
         openedOnGps = true
+        if (thermalViewModel.state.value.hasLocation) return@LaunchedEffect
         if (locationGranted) {
             thermalViewModel.useDeviceLocation()
         } else {
             permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
         }
+    }
+    val siteDem: SiteDem? = remember(siteRaster, siteMetadata) {
+        if (siteRaster == null || siteMetadata == null) null else LidarStandDem.from(siteRaster, siteMetadata)
     }
 
     val lat = thermal.latitude
@@ -185,6 +201,7 @@ fun StandFinderScreen(
             forecast = thermal.forecast,
             locationLabel = thermal.locationLabel,
             dateLabel = ThermalWindViewModel.dateLabel(thermal),
+            siteDem = siteDem,
         )
     }
 
@@ -350,19 +367,23 @@ fun StandFinderScreen(
                                     Box(Modifier.size(8.dp).clip(CircleShape).background(phaseColor(flowHere.phase)))
                                     Spacer(Modifier.width(6.dp))
                                     Text(
-                                        "${ThermalWindEngine.formatHour(hourKey / 4.0)} · ${flowHere.phase.label}",
+                                        "${ThermalWindEngine.formatHour(hourKey / 4.0)} · ${ThermalWindEngine.phaseText(flowHere)}",
                                         style = MaterialTheme.typography.titleSmall,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
                                 Text(
-                                    "Scent → %s %.1f mph · wind from %s %.0f mph".format(
-                                        ThermalWindEngine.compass(flowHere.scentTowardDegrees),
-                                        flowHere.scentSpeedMph,
-                                        ThermalWindEngine.compass(ThermalWindEngine.normalize(flowHere.windTowardDegrees + 180.0)),
-                                        flowHere.groundWindMph,
-                                    ),
+                                    if (flowHere.scentSpeedMph < ThermalWindEngine.CALM_SCENT_MPH) {
+                                        "Scent nearly still · wind in cover %.0f mph".format(flowHere.groundWindMph)
+                                    } else {
+                                        "Scent → %s %.1f mph · wind in cover from %s %.0f mph".format(
+                                            ThermalWindEngine.compass(flowHere.scentTowardDegrees),
+                                            flowHere.scentSpeedMph,
+                                            ThermalWindEngine.compass(ThermalWindEngine.normalize(flowHere.windTowardDegrees + 180.0)),
+                                            flowHere.groundWindMph,
+                                        )
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -391,6 +412,7 @@ fun StandFinderScreen(
                                 if (locationGranted) {
                                     thermalViewModel.useDeviceLocation()
                                 } else {
+                                    pendingMyLocation = true
                                     permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
                                 }
                             },
