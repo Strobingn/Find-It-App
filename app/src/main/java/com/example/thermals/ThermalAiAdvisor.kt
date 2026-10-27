@@ -72,10 +72,10 @@ class ThermalAiAdvisor(context: Context) {
             forecast.eveningSwitchHour?.let { appendLine("EVENING THERMAL SWITCH (rise→fall): ${ThermalWindEngine.formatHour(it)}") }
             appendLine("DAILY TEMP RANGE: %.0f°F".format(forecast.dailyRangeF))
             appendLine()
-            appendLine("HOURLY (local): time | temp°F | sky% | thermal phase | thermal mph→dir | ground wind mph→dir | NET SCENT mph→dir | thermal share | confidence")
+            appendLine("HOURLY (local): time | temp°F | sky% | thermal phase | thermal mph→dir | ground wind mph→dir | NET SCENT mph→dir | thermal share | confidence | gusts (open ground)")
             forecast.hours.filter { it.hour in 5..20 }.forEach { h ->
                 appendLine(
-                    "%s | %.0f | %.0f | %s | %s | %.1f→%s | %.1f→%s | %.0f%% | %.0f%%".format(
+                    "%s | %.0f | %.0f | %s | %s | %.1f→%s | %.1f→%s | %.0f%% | %.0f%% | %s".format(
                         ThermalWindEngine.formatHour(h.hour.toDouble()),
                         h.temperatureF,
                         h.cloudCoverPercent,
@@ -88,6 +88,7 @@ class ThermalAiAdvisor(context: Context) {
                         ThermalWindEngine.compass(h.scentTowardDegrees),
                         h.thermalShare * 100,
                         h.confidence * 100,
+                        h.gustMph?.let { "%.0f".format(it) } ?: "?",
                     ),
                 )
             }
