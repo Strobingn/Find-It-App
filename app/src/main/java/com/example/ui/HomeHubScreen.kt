@@ -400,7 +400,11 @@ private fun OfflineAiHomeRow() {
         when {
             downloading != null -> {
                 val d = downloading.value as com.example.ai.ModelDownloadState.Downloading
-                if (d.waitingForWifi) "${downloading.key.label}: waiting for Wi-Fi" else "${downloading.key.label}: downloading ${(d.fraction * 100).toInt()}%"
+                when {
+                    d.waitingForWifi -> "${downloading.key.label}: waiting for Wi-Fi"
+                    d.waitingForNetwork -> "${downloading.key.label}: waiting for a network"
+                    else -> "${downloading.key.label}: downloading ${(d.fraction * 100).toInt()}%"
+                }
             }
             active != null -> "${active.label} ready — works with no signal"
             else -> "Download Gemma 4 to use AI with no signal"

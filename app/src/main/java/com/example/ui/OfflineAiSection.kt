@@ -178,10 +178,13 @@ private fun ModelRow(
             is ModelDownloadState.Downloading -> Column(Modifier.padding(start = 48.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 LinearProgressIndicator(progress = { state.fraction }, modifier = Modifier.fillMaxWidth())
                 Text(
-                    if (state.waitingForWifi) {
-                        "Waiting for Wi-Fi · ${OnDeviceModelStore.formatBytes(state.bytes)} of ${OnDeviceModelStore.formatBytes(state.total)}"
-                    } else {
-                        "${(state.fraction * 100).toInt()}% · ${OnDeviceModelStore.formatBytes(state.bytes)} of ${OnDeviceModelStore.formatBytes(state.total)}"
+                    when {
+                        state.waitingForWifi ->
+                            "Waiting for Wi-Fi · ${OnDeviceModelStore.formatBytes(state.bytes)} of ${OnDeviceModelStore.formatBytes(state.total)}"
+                        state.waitingForNetwork ->
+                            "Waiting for a network · ${OnDeviceModelStore.formatBytes(state.bytes)} of ${OnDeviceModelStore.formatBytes(state.total)}"
+                        else ->
+                            "${(state.fraction * 100).toInt()}% · ${OnDeviceModelStore.formatBytes(state.bytes)} of ${OnDeviceModelStore.formatBytes(state.total)}"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

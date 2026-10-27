@@ -37,7 +37,12 @@ enum class OnDeviceModel(
 /** Where a model download stands. */
 sealed interface ModelDownloadState {
     data object NotDownloaded : ModelDownloadState
-    data class Downloading(val bytes: Long, val total: Long, val waitingForWifi: Boolean) : ModelDownloadState {
+    data class Downloading(
+        val bytes: Long,
+        val total: Long,
+        val waitingForWifi: Boolean,
+        val waitingForNetwork: Boolean,
+    ) : ModelDownloadState {
         val fraction: Float get() = if (total > 0) (bytes.toFloat() / total).coerceIn(0f, 1f) else 0f
     }
     data object Ready : ModelDownloadState
@@ -85,21 +90,57 @@ class OnDeviceModelStore(context: Context) {
         get() = prefs.getBoolean(KEY_WIFI_ONLY, false)
         set(value) = prefs.edit().putBoolean(KEY_WIFI_ONLY, value).apply()
 
+    init {
+        // The switch defaults to off, including for installs that already queued Wi-Fi-only requests
+        // before this setting existed. DownloadManager can't edit those, so re-enqueue them now.
+        if (!wifiOnly) reenqueueBlockedDownloads()
+    }
+
     /**
-     * Saves a new [wifiOnly] choice. A download sitting there waiting for Wi-Fi is restarted so it can use cell data
-     * now (DownloadManager can't change a queued request's networks). A download already running keeps going.
+     * Saves a new [wifiOnly] choice. Turning it off re-enqueues in-flight downloads that are still
+     * Wi-Fi-only — running, pending, or paused — because DownloadManager can't change a queued
+     * request's networks. Turning it on leaves a download already on cell running.
      */
     fun changeWifiOnly(value: Boolean) {
         if (value == wifiOnly) return
         wifiOnly = value
-        if (value) return
-        OnDeviceModel.entries.forEach { m ->
-            val st = state(m)
-            if (st is ModelDownloadState.Downloading && st.waitingForWifi) {
-                cancelDownload(m)
-                startDownload(m)
+        if (!value) reenqueueBlockedDownloads()
+    }
+
+    /**
+     * Re-enqueues downloads whose request still blocks cell data. A request we didn't record was
+     * queued by the previous Wi-Fi-only build (or while the switch was on).
+     */
+    private fun reenqueueBlockedDownloads() {
+        OnDeviceModel.entries.forEach { model ->
+            if (enqueuedAllowsCell(model)) return@forEach
+            // Requests started after the switch existed are recorded. Older rows aren't: read the
+            // request itself so a download that already allows cell isn't thrown away.
+            if (queuedAllowsCell(model) == true) {
+                prefs.edit().putBoolean(keyAllowsCell(model), true).apply()
+                return@forEach
             }
+            if (state(model) !is ModelDownloadState.Downloading) return@forEach
+            cancelDownload(model)
+            startDownload(model)
         }
+    }
+
+    /** True when the queued request was started with mobile data allowed. Missing means Wi-Fi only. */
+    private fun enqueuedAllowsCell(model: OnDeviceModel): Boolean = prefs.getBoolean(keyAllowsCell(model), false)
+
+    /** Mobile bit on the queued request, or null when this row doesn't say. */
+    private fun queuedAllowsCell(model: OnDeviceModel): Boolean? {
+        val id = prefs.getLong(keyDownload(model), -1L)
+        if (id < 0) return null
+        return runCatching {
+            val cursor = downloads.query(DownloadManager.Query().setFilterById(id)) ?: return@runCatching null
+            cursor.use { c ->
+                if (!c.moveToFirst()) return@use null
+                val idx = c.getColumnIndex("allowed_network_types")
+                if (idx < 0) null else (c.getInt(idx) and DownloadManager.Request.NETWORK_MOBILE) != 0
+            }
+        }.getOrNull()
     }
 
     /** Starts (or keeps) a download. Returns an error message instead when it can't start. */
@@ -127,14 +168,14 @@ class OnDeviceModelStore(context: Context) {
             .setAllowedOverRoaming(false)
             .setDestinationInExternalFilesDir(appContext, null, "$MODELS_DIR/${partFileName(model)}")
         val id = runCatching { downloads.enqueue(request) }.getOrElse { return "Couldn't start the download: ${it.localizedMessage}" }
-        prefs.edit().putLong(keyDownload(model), id).apply()
+        prefs.edit().putLong(keyDownload(model), id).putBoolean(keyAllowsCell(model), !wifiOnly).apply()
         return null
     }
 
     fun cancelDownload(model: OnDeviceModel) {
         val id = prefs.getLong(keyDownload(model), -1L)
         if (id >= 0) runCatching { downloads.remove(id) }
-        prefs.edit().remove(keyDownload(model)).apply()
+        prefs.edit().remove(keyDownload(model)).remove(keyAllowsCell(model)).apply()
         File(dir, partFileName(model)).delete()
     }
 
@@ -153,7 +194,7 @@ class OnDeviceModelStore(context: Context) {
             ?: return ModelDownloadState.NotDownloaded
         cursor.use { c ->
             if (!c.moveToFirst()) {
-                prefs.edit().remove(keyDownload(model)).apply()
+                prefs.edit().remove(keyDownload(model)).remove(keyAllowsCell(model)).apply()
                 return ModelDownloadState.NotDownloaded
             }
             val status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
@@ -163,15 +204,15 @@ class OnDeviceModelStore(context: Context) {
             return when (status) {
                 DownloadManager.STATUS_SUCCESSFUL -> finalize(model)
                 DownloadManager.STATUS_FAILED -> {
-                    prefs.edit().remove(keyDownload(model)).apply()
+                    prefs.edit().remove(keyDownload(model)).remove(keyAllowsCell(model)).apply()
                     runCatching { downloads.remove(id) }
                     ModelDownloadState.Failed(failureReason(reason))
                 }
                 else -> ModelDownloadState.Downloading(
                     bytes = bytes,
                     total = total,
-                    waitingForWifi = status == DownloadManager.STATUS_PAUSED &&
-                        (reason == DownloadManager.PAUSED_QUEUED_FOR_WIFI || reason == DownloadManager.PAUSED_WAITING_FOR_NETWORK),
+                    waitingForWifi = status == DownloadManager.STATUS_PAUSED && reason == DownloadManager.PAUSED_QUEUED_FOR_WIFI,
+                    waitingForNetwork = status == DownloadManager.STATUS_PAUSED && reason == DownloadManager.PAUSED_WAITING_FOR_NETWORK,
                 )
             }
         }
@@ -179,7 +220,7 @@ class OnDeviceModelStore(context: Context) {
 
     private fun finalize(model: OnDeviceModel): ModelDownloadState {
         val part = File(dir, partFileName(model))
-        prefs.edit().remove(keyDownload(model)).apply()
+        prefs.edit().remove(keyDownload(model)).remove(keyAllowsCell(model)).apply()
         if (!part.isFile || part.length() != model.sizeBytes) {
             part.delete()
             return ModelDownloadState.Failed("The download was incomplete — tap Download to try again.")
@@ -192,6 +233,7 @@ class OnDeviceModelStore(context: Context) {
     }
 
     private fun keyDownload(model: OnDeviceModel) = "download_${model.name}"
+    private fun keyAllowsCell(model: OnDeviceModel) = "download_cell_${model.name}"
 
     companion object {
         /** Label of the last-seen active model, for status lines that have no Context. */
