@@ -46,6 +46,10 @@ object IosDark {
     val GroupedBackground = Color(0xFF000000)
     val Cell = Color(0xFF1C1C1E)
     val RaisedCell = Color(0xFF2C2C2E)
+    // Fill for chips, bubbles and image backdrops. Must stay distinct from Cell: Material's
+    // contentColorFor() matches surfaceVariant before surfaceContainer, so sharing a value makes
+    // every surfaceContainer card inherit onSurfaceVariant (grey) for its text instead of Label.
+    val Fill = Color(0xFF242426)
     val Separator = Color(0xFF38383A)
     val Label = Color(0xFFFFFFFF)
     val SecondaryLabel = Color(0xFF98989F)
@@ -64,6 +68,8 @@ object IosLight {
     val GroupedBackground = Color(0xFFF2F2F7)
     val Cell = Color(0xFFFFFFFF)
     val RaisedCell = Color(0xFFF2F2F7)
+    // See IosDark.Fill: kept distinct from Cell so cards keep Label, not SecondaryLabel, text.
+    val Fill = Color(0xFFEBEBF0)
     val Separator = Color(0xFFC6C6C8)
     val Label = Color(0xFF000000)
     val SecondaryLabel = Color(0xFF8A8A8E)
