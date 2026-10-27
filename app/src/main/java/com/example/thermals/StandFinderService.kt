@@ -64,7 +64,13 @@ class StandFinderService(
                 MapboxDem.SOURCE_LABEL,
             )
         }
-        ElevationFetch(fetchOpenMeteoGrid(lat, lon), "Elevation model (90 m)")
+        val grid = try {
+            fetchOpenMeteoGrid(lat, lon)
+        } catch (e: IOException) {
+            val why = MapboxDem.lastError ?: throw e
+            throw IOException("${e.message} (Mapbox terrain failed: $why)", e)
+        }
+        ElevationFetch(grid, "Elevation model (90 m)")
     }
 
     private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {

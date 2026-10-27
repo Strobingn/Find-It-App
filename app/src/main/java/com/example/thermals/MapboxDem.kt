@@ -20,7 +20,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 
 /**
- * Elevation from Mapbox's terrain-DEM tiles (USGS 3DEP-based in the US, ~10 m; tiles at z14 @2x are ~3–4 m a pixel),
+ * Elevation from Mapbox's terrain-DEM tiles (USGS 3DEP-based in the US, ~10 m; z14 tiles are ~9 m a pixel),
  * decoded on the phone. A 750-yard stand search needs about four tiles instead of nine Open-Meteo calls, it doesn't
  * count against Open-Meteo's per-IP limit (which phones on 5G share with everyone behind the same carrier address),
  * and tiles are cached on disk so a repeat search of the same ground needs no network at all.
@@ -41,17 +41,23 @@ object MapboxDem {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, IntArray>?) = size > 12
     }
 
+    /** Why the last [elevations] call returned null (shown when the fallback fails too). */
+    @Volatile var lastError: String? = null
+        private set
+
     val isAvailable: Boolean get() = BuildConfig.MAPBOX_ACCESS_TOKEN.trim().startsWith("pk.")
 
     /** Elevations in meters for [points] (lat, lon), or null without a Mapbox token / when a tile can't be had. */
     suspend fun elevations(points: List<Pair<Double, Double>>, cacheDir: File? = null): List<Double>? {
-        if (!isAvailable || points.isEmpty()) return null
+        if (points.isEmpty()) return null
+        if (!isAvailable) { lastError = "no Mapbox token in this build"; return null }
+        lastError = null
         return runCatching {
             val pixels = points.map { (lat, lon) -> globalPixel(lat, lon) }
             val tiles = pixels.flatMap { (x, y) -> neighbourTiles(x, y) }.toSet()
             val loaded = loadTiles(tiles, cacheDir)
             pixels.map { (x, y) -> sample(x, y) { tx, ty -> loaded[key(tx, ty)] } ?: throw IOException("missing tile") }
-        }.getOrNull()
+        }.onFailure { lastError = it.message ?: it.javaClass.simpleName }.getOrNull()
     }
 
     private suspend fun loadTiles(tiles: Set<Pair<Int, Int>>, cacheDir: File?): Map<Long, IntArray> = withContext(Dispatchers.IO) {
@@ -78,7 +84,7 @@ object MapboxDem {
         val token = BuildConfig.MAPBOX_ACCESS_TOKEN.trim()
         val url = String.format(
             Locale.US,
-            "https://api.mapbox.com/v4/mapbox.mapbox-terrain-dem-v1/%d/%d/%d@2x.pngraw?access_token=%s",
+            "https://api.mapbox.com/v4/mapbox.mapbox-terrain-dem-v1/%d/%d/%d.pngraw?access_token=%s",
             ZOOM, tx, ty, token,
         )
         http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
@@ -96,9 +102,14 @@ object MapboxDem {
         }
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw IOException("bad terrain tile")
         try {
-            if (bmp.width != TILE_PX || bmp.height != TILE_PX) throw IOException("unexpected tile size ${bmp.width}×${bmp.height}")
+            // Mapbox terrain-dem-v1 tiles are 514 px: the 512 px tile plus a 1 px border from its neighbours.
+            val border = when {
+                bmp.width == TILE_PX + 2 && bmp.height == TILE_PX + 2 -> 1
+                bmp.width == TILE_PX && bmp.height == TILE_PX -> 0
+                else -> throw IOException("unexpected tile size ${bmp.width}×${bmp.height}")
+            }
             val px = IntArray(TILE_PX * TILE_PX)
-            bmp.getPixels(px, 0, TILE_PX, 0, 0, TILE_PX, TILE_PX)
+            bmp.getPixels(px, 0, TILE_PX, border, border, TILE_PX, TILE_PX)
             return px
         } finally {
             bmp.recycle()
