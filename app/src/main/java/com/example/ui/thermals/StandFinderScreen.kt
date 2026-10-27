@@ -297,6 +297,23 @@ fun StandFinderScreen(
                 thermalViewModel.useLocation(point.latitude(), point.longitude(), "Map pin")
                 true
             },
+            // Pin taps: query the pin layers at the tap point and select that stand.
+            onMapClickListener = { point ->
+                mapViewRef?.mapboxMap?.let { map ->
+                    map.queryRenderedFeatures(
+                        RenderedQueryGeometry.valueOf(map.pixelForCoordinate(point)),
+                        RenderedQueryOptions(listOf(StandMapIds.PIN_CIRCLE, StandMapIds.PIN_LABEL), null),
+                    ) { result ->
+                        result.value?.firstOrNull()
+                            ?.queriedFeature
+                            ?.feature
+                            ?.getStringProperty("rank")
+                            ?.toIntOrNull()
+                            ?.let { finderViewModel.select(it) }
+                    }
+                }
+                false
+            },
             style = {},
         ) {
             MapEffect(Unit) { mapView ->
@@ -317,32 +334,10 @@ fun StandFinderScreen(
                 subs += mapView.mapboxMap.subscribeCameraChangedCoalesced { event ->
                     event.cameraState.zoom.let { cameraZoom = it }
                 }
-                // Pin taps: query the pin layers at the tap point and select that stand.
-                val clickListener = com.mapbox.maps.plugin.gestures.OnMapClickListener { point ->
-                    val screen = mapView.mapboxMap.pixelForCoordinate(point)
-                    var handled = false
-                    mapView.mapboxMap.queryRenderedFeatures(
-                        RenderedQueryGeometry.valueOf(screen),
-                        RenderedQueryOptions(listOf(StandMapIds.PIN_CIRCLE, StandMapIds.PIN_LABEL), null),
-                    ) { result ->
-                        val rank = result.value?.firstOrNull()
-                            ?.queriedFeature
-                            ?.feature
-                            ?.getStringProperty("rank")
-                            ?.toIntOrNull()
-                        if (rank != null) {
-                            finderViewModel.select(rank)
-                            handled = true
-                        }
-                    }
-                    handled
-                }
-                mapView.mapboxMap.addOnMapClickListener(clickListener)
                 try {
                     awaitCancellation()
                 } finally {
                     subs.forEach { it.cancel() }
-                    mapView.mapboxMap.removeOnMapClickListener(clickListener)
                 }
             }
             MapEffect(base) { mapView ->
