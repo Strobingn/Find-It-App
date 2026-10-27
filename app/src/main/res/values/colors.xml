@@ -6,6 +6,7 @@
     <!-- Find It monochrome palette: no green, cyan, light blue, gold, bronze, or copper. -->
     <color name="splash_background">#FF111214</color>
     <color name="ic_launcher_background">#FF17191C</color>
+    <color name="ic_thermalclaude_background">#FF121214</color>
     <color name="brand_gold">#FFE6E8EA</color>
     <color name="brand_green">#FF9EA3A8</color>
     <color name="brand_surface">#FF24272B</color>

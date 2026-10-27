@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  APPLICATION_ID: com.aistudio.lidardetector.pkrxtz
+  APPLICATION_ID: com.strobingn.thermalclaude
 
 jobs:
   test:

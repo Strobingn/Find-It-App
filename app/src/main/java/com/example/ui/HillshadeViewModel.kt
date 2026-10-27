@@ -735,8 +735,9 @@ class HillshadeViewModel(application: Application) : AndroidViewModel(applicatio
         if (locationJob?.isActive == true) return
         preciseGps.start()
         locationJob = viewModelScope.launch {
+            // Provider errors and SecurityException are surfaced on PreciseGpsController.state;
+            // `fixes` is a SharedFlow that never completes or throws, so no catch is needed here.
             preciseGps.fixes
-                .catch { /* provider unavailable or a platform SecurityException — stop tracking */ }
                 .collect { incoming ->
                     val fix = if (incoming.source == com.example.gps.FixSource.AVERAGED) {
                         heldPreciseFix = incoming

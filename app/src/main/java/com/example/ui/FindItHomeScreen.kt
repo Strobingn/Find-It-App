@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -132,58 +131,34 @@ private fun FindItHomeScreen(
     val heightMeters = (grid.height - 1).coerceAtLeast(1) * grid.cellSizeMeters
 
     Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "FIND IT",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.5.sp,
-                        )
-                        Text(
-                            text = "LiDAR field intelligence",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-            )
-        },
+        containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
                 .padding(padding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
+            // Large title, iOS-style, instead of a centred toolbar.
+            item {
+                Column(Modifier.padding(top = 8.dp)) {
+                    Text("ThermalClaude", style = MaterialTheme.typography.headlineLarge)
+                    Text(
+                        text = "LiDAR field intelligence",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
             item {
                 HeroCard(
                     paletteName = paletteName,
                     isRendering = isRendering,
                     onOpenWorkspace = onOpenWorkspace,
                 )
-            }
-
-            item {
-                Card(
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("App updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text(
-                            updateController.status,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        AppUpdateButtons(controller = updateController)
-                    }
-                }
             }
 
             item {
@@ -205,11 +180,9 @@ private fun FindItHomeScreen(
             item {
                 Text(
                     text = "FIELD OVERVIEW",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
-                    modifier = Modifier.padding(top = 2.dp),
+                    modifier = Modifier.padding(start = 16.dp, top = 8.dp),
                 )
             }
 
@@ -266,11 +239,9 @@ private fun FindItHomeScreen(
             item {
                 Text(
                     text = "QUICK START",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
-                    modifier = Modifier.padding(top = 2.dp),
+                    modifier = Modifier.padding(start = 16.dp, top = 8.dp),
                 )
             }
 
@@ -320,7 +291,7 @@ private fun FindItHomeScreen(
 
             item {
                 Surface(
-                    shape = RoundedCornerShape(18.dp),
+                    shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.surfaceContainer,
                     tonalElevation = 2.dp,
                     modifier = Modifier.fillMaxWidth(),
@@ -352,7 +323,24 @@ private fun FindItHomeScreen(
                 }
             }
 
-            item { Spacer(Modifier.height(8.dp)) }
+            item {
+                Card(
+                    shape = MaterialTheme.shapes.medium,
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("App updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            updateController.status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        AppUpdateButtons(controller = updateController)
+                    }
+                }
+            }
+
         }
     }
 }
@@ -364,7 +352,7 @@ private fun HeroCard(
     onOpenWorkspace: () -> Unit,
 ) {
     Card(
-        shape = RoundedCornerShape(26.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -377,8 +365,8 @@ private fun HeroCard(
                         colors = listOf(HomeAccentDark, HomeAccentMid, HomeAccentLight),
                     ),
                 )
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -398,7 +386,7 @@ private fun HeroCard(
                         text = "Professional terrain analysis built for field decisions.",
                         color = Color.White,
                         style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Black,
+                        fontWeight = FontWeight.Bold,
                     )
                 }
                 Surface(
@@ -424,8 +412,7 @@ private fun HeroCard(
 
             Button(
                 onClick = onOpenWorkspace,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth().height(50.dp),
             ) {
                 Icon(Icons.Default.Landscape, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
@@ -445,7 +432,7 @@ private fun TerrainPreviewCard(
 ) {
     Card(
         onClick = onOpenWorkspace,
-        shape = RoundedCornerShape(22.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -455,7 +442,7 @@ private fun TerrainPreviewCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1.85f)
-                    .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                    .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                     .background(
                         Brush.linearGradient(
                             listOf(HomeAccentDark, HomeAccentMid, HomeAccentLight),
@@ -547,13 +534,13 @@ private fun MetricCard(
     modifier: Modifier = Modifier,
 ) {
     Card(
-        shape = RoundedCornerShape(18.dp),
+        shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         modifier = modifier,
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -573,7 +560,7 @@ private fun MetricCard(
             Text(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Black,
+                fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -598,13 +585,13 @@ private fun ActionCard(
 ) {
     Card(
         onClick = onClick,
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         modifier = modifier,
     ) {
         Column(
-            modifier = Modifier.padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Surface(
                 shape = RoundedCornerShape(10.dp),

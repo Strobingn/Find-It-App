@@ -15,17 +15,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,7 +37,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -50,8 +48,8 @@ import com.example.update.AppUpdateButtons
 import com.example.update.rememberAppUpdateController
 
 /**
- * Modern home hub: project status + one card per major workspace so nothing is buried
- * under an 8-item bottom bar.
+ * Home hub in an iOS grouped-list layout: a large title, the active project, then one inset
+ * group per topic (workspaces, session, app) so every tool is one tap away without a wall of cards.
  */
 @Composable
 fun HomeHubScreen(
@@ -109,31 +107,29 @@ fun HomeHubScreen(
             .fillMaxSize()
             .padding(padding)
             .testTag("home_hub"),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(28.dp),
     ) {
+        // Large title, iOS-style: the page names itself instead of a toolbar.
         item {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(top = 8.dp),
             ) {
-                Image(
-                    painter = painterResource(R.drawable.findit_emblem),
-                    contentDescription = null,
-                    modifier = Modifier.size(40.dp),
-                )
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        "Find It",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    Text("ThermalClaude", style = MaterialTheme.typography.headlineLarge)
                     Text(
                         "Historic terrain · field verification",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                Image(
+                    painter = painterResource(R.drawable.findit_emblem),
+                    contentDescription = null,
+                    modifier = Modifier.size(44.dp),
+                )
             }
         }
 
@@ -142,55 +138,34 @@ fun HomeHubScreen(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainer,
                 ),
-                modifier = Modifier.fillMaxWidth().testTag("home_updates_card"),
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Check for updates", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        updateController.status.ifBlank { "GitHub Releases · findit-v* builds" },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    AppUpdateButtons(controller = updateController)
-                }
-            }
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                ),
-                shape = RoundedCornerShape(20.dp),
+                shape = MaterialTheme.shapes.large,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("home_project_card"),
             ) {
                 Column(
-                    Modifier.padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        "Active project",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                        "ACTIVE PROJECT",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
                         metadata.siteName.ifBlank { "No terrain loaded" },
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.headlineSmall,
                     )
                     Text(
                         summary,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     terrainQuality?.let { quality ->
                         Text(
                             quality.bannerLine(),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.testTag("home_ground_quality"),
                         )
                     }
@@ -203,17 +178,18 @@ fun HomeHubScreen(
                             if (canRefine) append(if (isDetailed) " · refined detail" else " · source LAZ ready")
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
                             onClick = { onOpen(AppDestination.TERRAIN) },
-                            modifier = Modifier.testTag("home_open_terrain"),
+                            modifier = Modifier.weight(1f).testTag("home_open_terrain"),
                         ) { Text("Open terrain") }
-                        TextButton(
+                        FilledTonalButton(
                             onClick = { onOpen(AppDestination.LIBRARY) },
-                            modifier = Modifier.testTag("home_open_library"),
-                        ) { Text("Import / library") }
+                            modifier = Modifier.weight(1f).testTag("home_open_library"),
+                        ) { Text("Import") }
                     }
                 }
             }
@@ -222,258 +198,144 @@ fun HomeHubScreen(
         // Feature 20 — last-opened / recent LAZ projects strip
         if (recentLidar.isNotEmpty()) {
             item {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    ),
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("home_recent_projects"),
+                GroupedSection(
+                    header = "Recent LiDAR",
+                    footer = "Tap a file to decode and open on Terrain.",
+                    modifier = Modifier.testTag("home_recent_projects"),
                 ) {
-                    Column(
-                        Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text(
-                            "Recent LiDAR projects",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            "Tap a file to decode and open on Terrain.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            recentLidar.forEach { dataset ->
-                                Surface(
-                                    shape = RoundedCornerShape(20.dp),
-                                    color = MaterialTheme.colorScheme.secondaryContainer,
-                                    modifier = Modifier
-                                        .clickable {
-                                            viewModel.reopenSavedLidar(dataset.displayName)
-                                            onOpen(AppDestination.TERRAIN)
-                                        }
-                                        .testTag("home_recent_${dataset.file.nameWithoutExtension}"),
-                                ) {
-                                    Text(
-                                        dataset.displayName,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        style = MaterialTheme.typography.labelLarge,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    )
-                                }
+                        recentLidar.forEach { dataset ->
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                modifier = Modifier
+                                    .clickable {
+                                        viewModel.reopenSavedLidar(dataset.displayName)
+                                        onOpen(AppDestination.TERRAIN)
+                                    }
+                                    .testTag("home_recent_${dataset.file.nameWithoutExtension}"),
+                            ) {
+                                Text(
+                                    dataset.displayName,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         }
+                    }
+                    GroupedRow(
+                        title = "Open library",
+                        onClick = { onOpen(AppDestination.LIBRARY) },
+                        modifier = Modifier.testTag("home_recent_open_library"),
+                    )
+                }
+            }
+        }
+
+        item {
+            GroupedSection(header = "Workspaces") {
+                workspaceCards.forEachIndexed { index, dest ->
+                    GroupedRow(
+                        title = dest.label,
+                        subtitle = dest.subtitle,
+                        icon = dest.icon,
+                        showDivider = index > 0,
+                        onClick = { onOpen(dest) },
+                        modifier = Modifier.testTag("home_card_${dest.name.lowercase()}"),
+                    )
+                }
+            }
+        }
+
+        // Feature 4 — offline basemap status · Feature 5 — session end debrief + share
+        item {
+            GroupedSection(header = "Session") {
+                GroupedRow(
+                    title = "Offline basemap",
+                    subtitle = basemapStatusText,
+                    icon = Icons.Default.Map,
+                    showDivider = false,
+                    modifier = Modifier.testTag("home_basemap_status"),
+                    trailing = {
                         TextButton(
                             onClick = { onOpen(AppDestination.LIBRARY) },
-                            modifier = Modifier.testTag("home_recent_open_library"),
-                        ) { Text("Open library") }
-                    }
-                }
-            }
-        }
-
-        // Feature 4 — offline basemap status
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("home_basemap_status"),
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Icon(
-                        Icons.Default.Map,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Offline basemap",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            basemapStatusText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(
-                        onClick = { onOpen(AppDestination.LIBRARY) },
-                        modifier = Modifier.testTag("home_basemap_open_library"),
-                    ) { Text("Library") }
-                }
-            }
-        }
-
-        // Feature 5 — session end debrief + share
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("home_session_debrief"),
-            ) {
-                Column(
-                    Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        "End session debrief",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        buildString {
-                            if (sessionStats.totalFinds == 0 && sessionStats.distanceMeters < 1.0) {
-                                append("Nothing logged yet this session.")
-                            } else {
-                                append(sessionStats.totalFinds).append(" find(s)")
-                                sessionStats.confirmRate?.let {
-                                    append(" · ").append((it * 100).toInt()).append("% confirmed")
-                                }
-                                append(" · ")
-                                append(
-                                    if (sessionStats.distanceMeters >= 1000.0) {
-                                        String.format("%.2f km walked", sessionStats.distanceMeters / 1000.0)
-                                    } else {
-                                        String.format("%.0f m walked", sessionStats.distanceMeters)
-                                    },
-                                )
-                                sessionStats.findsPerHour?.let {
-                                    append(" · ").append(String.format("%.1f", it)).append(" finds/h")
-                                }
-                                sessionStats.topFindType?.let {
-                                    append(" · top: ").append(it)
-                                }
+                            modifier = Modifier.testTag("home_basemap_open_library"),
+                        ) { Text("Library") }
+                    },
+                )
+                GroupedRow(
+                    title = "End session debrief",
+                    subtitle = buildString {
+                        if (sessionStats.totalFinds == 0 && sessionStats.distanceMeters < 1.0) {
+                            append("Nothing logged yet this session.")
+                        } else {
+                            append(sessionStats.totalFinds).append(" find(s)")
+                            sessionStats.confirmRate?.let {
+                                append(" · ").append((it * 100).toInt()).append("% confirmed")
                             }
-                        },
+                            append(" · ")
+                            append(
+                                if (sessionStats.distanceMeters >= 1000.0) {
+                                    String.format("%.2f km walked", sessionStats.distanceMeters / 1000.0)
+                                } else {
+                                    String.format("%.0f m walked", sessionStats.distanceMeters)
+                                },
+                            )
+                            sessionStats.findsPerHour?.let {
+                                append(" · ").append(String.format("%.1f", it)).append(" finds/h")
+                            }
+                            sessionStats.topFindType?.let {
+                                append(" · top: ").append(it)
+                            }
+                        }
+                    },
+                    icon = Icons.Default.Share,
+                    modifier = Modifier.testTag("home_session_debrief"),
+                    trailing = {
+                        TextButton(
+                            onClick = {
+                                val text = sessionStats.toShareText(
+                                    siteName = metadata.siteName.takeIf { it.isNotBlank() },
+                                )
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "Find It field debrief")
+                                    putExtra(Intent.EXTRA_TEXT, text)
+                                }
+                                context.startActivity(Intent.createChooser(send, "Share session debrief"))
+                            },
+                            enabled = sessionStats.totalFinds > 0 || sessionStats.distanceMeters >= 1.0,
+                            modifier = Modifier.testTag("home_session_debrief_share"),
+                        ) { Text("Share") }
+                    },
+                )
+            }
+        }
+
+        item {
+            GroupedSection(
+                header = "App",
+                footer = "LiDAR ranks surface morphology and historic context — not buried metal, age, or dig depth.",
+                modifier = Modifier.testTag("home_updates_card"),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Updates & backup", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        updateController.status.ifBlank { "GitHub Releases · findit-v* builds" },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    TextButton(
-                        onClick = {
-                            val text = sessionStats.toShareText(
-                                siteName = metadata.siteName.takeIf { it.isNotBlank() },
-                            )
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_SUBJECT, "Find It field debrief")
-                                putExtra(Intent.EXTRA_TEXT, text)
-                            }
-                            context.startActivity(Intent.createChooser(send, "Share session debrief"))
-                        },
-                        enabled = sessionStats.totalFinds > 0 || sessionStats.distanceMeters >= 1.0,
-                        modifier = Modifier.testTag("home_session_debrief_share"),
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Text("Share text")
-                    }
+                    AppUpdateButtons(controller = updateController)
                 }
             }
-        }
-
-        item {
-            Text(
-                "Workspaces",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Text(
-                "Each tool lives on its own screen — pick a card.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        items(workspaceCards, key = { it.name }) { dest ->
-            DestinationCard(
-                destination = dest,
-                onClick = { onOpen(dest) },
-            )
-        }
-
-        item {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "LiDAR ranks surface morphology and historic context — not buried metal, age, or dig depth.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun DestinationCard(
-    destination: AppDestination,
-    onClick: () -> Unit,
-) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        ),
-        shape = RoundedCornerShape(18.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .testTag("home_card_${destination.name.lowercase()}"),
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.secondaryContainer,
-            ) {
-                Icon(
-                    destination.icon,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    destination.label,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    destination.subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

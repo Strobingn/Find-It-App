@@ -31,7 +31,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.CropFree
@@ -50,18 +49,14 @@ import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.ZoomInMap
 import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -131,7 +126,7 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-/** Kept for layout unit tests; primary nav always shows labels now (5 destinations). */
+/** Kept for layout unit tests; primary nav always shows labels now. */
 internal fun usesCompactBottomNavigation(smallestScreenWidthDp: Int): Boolean = smallestScreenWidthDp < 600
 
 /**
@@ -159,76 +154,22 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxSize().testTag("main_scaffold"),
         topBar = {
             if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME) {
-                CenterAlignedTopAppBar(
-                    title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                current.title,
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Text(
-                                current.subtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    },
-                    navigationIcon = {
-                        if (!isPrimary) {
-                            IconButton(
-                                onClick = { navigate(AppDestination.HOME) },
-                                modifier = Modifier.testTag("nav_back_home"),
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Home")
-                            }
-                        }
-                    },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    ),
+                AppNavigationBar(
+                    title = current.title,
+                    backLabel = if (isPrimary) null else AppDestination.HOME.label,
+                    onBack = { navigate(AppDestination.HOME) },
                 )
             }
         },
         bottomBar = {
             if (!hideChrome) {
-                Surface(
-                    shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-                    shadowElevation = 12.dp,
-                    tonalElevation = 3.dp,
+                AppTabBar(
+                    tabs = primaryNav,
+                    // Secondary screens (Map, Tools, …) highlight Home as the hub.
+                    isSelected = { tab -> current == tab || (!current.primary && tab == AppDestination.HOME) },
+                    onSelect = { navigate(it) },
                     modifier = Modifier.testTag("primary_nav_bar"),
-                ) {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                        tonalElevation = 0.dp,
-                    ) {
-                        primaryNav.forEach { tab ->
-                            // Secondary screens (Map, Tools, …) highlight Home as the hub.
-                            val selected = current == tab || (!current.primary && tab == AppDestination.HOME)
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = { navigate(tab) },
-                                icon = {
-                                    Icon(
-                                        tab.icon,
-                                        contentDescription = tab.label,
-                                        modifier = Modifier.width(26.dp).height(26.dp),
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        tab.label,
-                                        maxLines = 1,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                    )
-                                },
-                                alwaysShowLabel = true,
-                                modifier = Modifier.testTag("nav_${tab.name.lowercase()}"),
-                            )
-                        }
-                    }
-                }
+                )
             }
         },
     ) { padding ->
