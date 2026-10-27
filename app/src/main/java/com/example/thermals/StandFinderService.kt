@@ -48,7 +48,8 @@ class StandFinderService(
 
     /**
      * Elevation for the stand search. Uses [siteDem] when the search center falls inside a
-     * loaded LiDAR / site grid and enough of the square is covered; otherwise Open-Meteo.
+     * loaded LiDAR / site grid and enough of the square is covered; otherwise Mapbox terrain tiles
+     * (~10 m, ~4 tile downloads, cached on the phone); Open-Meteo only when those can't be had.
      */
     suspend fun fetchGrid(lat: Double, lon: Double, siteDem: SiteDem? = null): ElevationFetch = withContext(Dispatchers.IO) {
         siteDem?.let { dem ->
@@ -56,28 +57,37 @@ class StandFinderService(
                 return@withContext ElevationFetch(grid, "LiDAR on this phone")
             }
         }
-        ElevationFetch(fetchOpenMeteoGrid(lat, lon), "Elevation model")
+        val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
+        MapboxDem.elevations(points, appContext.cacheDir)?.let { meters ->
+            return@withContext ElevationFetch(
+                ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
+                MapboxDem.SOURCE_LABEL,
+            )
+        }
+        ElevationFetch(fetchOpenMeteoGrid(lat, lon), "Elevation model (90 m)")
     }
 
     private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
-        // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, run 3 at a time.
-        val meters = points.chunked(100).chunked(3).flatMap { batch ->
-            coroutineScope {
-                batch.map { chunk ->
-                    async {
-                        val url = String.format(
-                            Locale.US,
-                            "%s?latitude=%s&longitude=%s",
-                            ThermalWeatherClient.ELEVATION_ENDPOINT,
-                            chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
-                            chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
-                        )
-                        val array = JSONObject(getText(url)).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
-                        (0 until array.length()).map { array.getDouble(it) }
-                    }
-                }.awaitAll().flatten()
+        // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, one after another (bursts trip
+        // its per-minute limit), with one retry after a pause when it answers 429.
+        val meters = points.chunked(100).flatMap { chunk ->
+            val url = String.format(
+                Locale.US,
+                "%s?latitude=%s&longitude=%s",
+                ThermalWeatherClient.ELEVATION_ENDPOINT,
+                chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
+                chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
+            )
+            val body = try {
+                getText(url)
+            } catch (e: IOException) {
+                if (e.message?.contains("429") != true) throw e
+                kotlinx.coroutines.delay(RATE_LIMIT_RETRY_MS)
+                getText(url)
             }
+            val array = JSONObject(body).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
+            (0 until array.length()).map { array.getDouble(it) }
         }
         if (meters.size != points.size) throw IOException("Elevation service returned ${meters.size} of ${points.size} points")
         return ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray())
@@ -183,6 +193,7 @@ class StandFinderService(
         const val IMAGE_PX = 640
         const val OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter"
         const val OVERPASS_TIMEOUT_S = 8
+        private const val RATE_LIMIT_RETRY_MS = 3_000L
 
         /** Hosts the cloud AI providers are called on. */
         val AI_HOSTS = setOf("api.x.ai", "api.openai.com", "generativelanguage.googleapis.com")
@@ -217,7 +228,13 @@ class StandFinderService(
          */
         fun explainNetworkFailure(message: String): String {
             val hosts = UNRESOLVED_HOST.findAll(message).map { it.groupValues[1].trimEnd('.') }.distinct().toList()
-            if (hosts.isEmpty()) return message
+            if (hosts.isEmpty()) {
+                return if (Regex("""\b429\b""").containsMatchIn(message)) {
+                    "The free elevation service is rate-limiting your connection (HTTP 429). Wait a minute and tap Find again."
+                } else {
+                    message
+                }
+            }
             val aiHosts = hosts.filter { it in AI_HOSTS }
             return if (aiHosts.isNotEmpty() && aiHosts.size == hosts.size) {
                 "Your connection is blocking the AI servers (${aiHosts.joinToString()}). Try cell data, or turn off Private DNS / ad-blocker / VPN filtering, then tap Again."

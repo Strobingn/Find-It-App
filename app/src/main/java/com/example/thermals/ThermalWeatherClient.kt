@@ -63,6 +63,10 @@ class ThermalWeatherClient(
 
     suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
         val samples = terrainSamplePoints(latitude, longitude)
+        // Mapbox terrain first: ~10 m instead of 90 m, and not subject to Open-Meteo's per-IP limit.
+        MapboxDem.elevations(samples)?.let { meters ->
+            return@withContext terrainFromSamples(meters).copy(source = MapboxDem.SOURCE_LABEL)
+        }
         val url = String.format(
             Locale.US,
             "%s?latitude=%s&longitude=%s",
