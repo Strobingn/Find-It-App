@@ -8,7 +8,7 @@ lifecycleRuntimeKtx = "2.8.7"
 lifecycleViewmodelCompose = "2.8.7"
 lifecycleRuntimeCompose = "2.8.7"
 activityCompose = "1.10.1"
-kotlin = "2.2.10"
+kotlin = "2.4.21"
 composeBom = "2024.09.00"
 navigationCompose = "2.8.9"
 roomRuntime = "2.7.0"
@@ -46,8 +46,7 @@ laszip4j = "0.21"
 ngaTiff = "3.0.0"
 googleGenerativeAi = "0.9.0"
 mapsCompose = "6.12.0"
-# 0.16.x is the newest LiteRT-LM built with Kotlin 2.2 (0.17+ needs Kotlin 2.4); runs Gemma 4.
-litertlm = "0.16.1"
+litertlm = "0.18.1"
 mapbox = "11.33.0"
 profileInstaller = "1.4.1"
 
@@ -92,6 +91,7 @@ androidx-camera-view = { group = "androidx.camera", name = "camera-view", versio
 androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraCore" }
 logging-interceptor = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "loggingInterceptor" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+kotlin-metadata-jvm = { group = "org.jetbrains.kotlin", name = "kotlin-metadata-jvm", version.ref = "kotlin" }
 litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.ref = "moshiKotlin" }
 moshi-kotlin-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-codegen", version.ref = "moshiKotlinCodegen" }
@@ -116,3 +116,5 @@ androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstall
 android-application = { id = "com.android.application", version.ref = "agp" }
 legacy-kapt = { id = "com.android.legacy-kapt", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+# Not applied (AGP 9 has built-in Kotlin) — on the classpath so AGP compiles with this Kotlin version.
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
