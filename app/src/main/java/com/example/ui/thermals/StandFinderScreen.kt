@@ -140,10 +140,16 @@ fun StandFinderScreen(
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
     var locationGranted by remember { mutableStateOf(hasLocationPermission()) }
+    // Set only by the my-location button, so granting permission then follows that tap.
+    // Automatic startup still leaves an existing site or typed pin alone.
+    var pendingMyLocation by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         locationGranted = grants.values.any { it }
-        // Same rule as offerSiteLocation: a site or typed pin already on the thermal tab stays put.
-        if (locationGranted && !thermalViewModel.state.value.hasLocation) thermalViewModel.useDeviceLocation()
+        val followThisTap = pendingMyLocation
+        pendingMyLocation = false
+        if (locationGranted && (followThisTap || !thermalViewModel.state.value.hasLocation)) {
+            thermalViewModel.useDeviceLocation()
+        }
     }
     // First time Stands opens this session: GPS only when Thermals doesn't already have a location.
     var openedOnGps by rememberSaveable { mutableStateOf(false) }
@@ -406,6 +412,7 @@ fun StandFinderScreen(
                                 if (locationGranted) {
                                     thermalViewModel.useDeviceLocation()
                                 } else {
+                                    pendingMyLocation = true
                                     permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
                                 }
                             },

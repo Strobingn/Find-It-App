@@ -73,6 +73,10 @@ class ElevationGrid(
         if (r < 0 || c < 0 || r > size - 1 || c > size - 1) return null
         val r0 = r.toInt().coerceAtMost(size - 2)
         val c0 = c.toInt().coerceAtMost(size - 2)
+        // Uncovered LiDAR cells are stored as 0 m. Don't interpolate those into a fake cliff.
+        if (!isCovered(r0, c0) || !isCovered(r0, c0 + 1) || !isCovered(r0 + 1, c0) || !isCovered(r0 + 1, c0 + 1)) {
+            return null
+        }
         val fr = r - r0
         val fc = c - c0
         val top = at(r0, c0) * (1 - fc) + at(r0, c0 + 1) * fc
@@ -367,11 +371,15 @@ object StandFinder {
         val tpi = z - ring.average()
 
         // Bench: flat here, with the fall line steep both uphill and downhill — not one cliff nearby.
-        if (slope < 7.0 && uphill != null && tpi > -6.0 * k && tpi < 6.0 * k) {
-            val (dr, dc) = gridStep(uphill)
-            val upSlope = slopeAt(grid, r + 2 * dr, c + 2 * dc)
-            val downSlope = slopeAt(grid, r - 2 * dr, c - 2 * dc)
-            if (upSlope > 11.0 && downSlope > 11.0) return StandFeature.BENCH
+        // A level shelf has no local uphill, so the fall line comes from the ground two cells out.
+        if (slope < 7.0 && tpi > -6.0 * k && tpi < 6.0 * k) {
+            val fall = uphill ?: fallLineBearing(grid, r, c)
+            if (fall != null) {
+                val (dr, dc) = gridStep(fall)
+                val upSlope = slopeAt(grid, r + 2 * dr, c + 2 * dc)
+                val downSlope = slopeAt(grid, r - 2 * dr, c - 2 * dc)
+                if (upSlope > 11.0 && downSlope > 11.0) return StandFeature.BENCH
+            }
         }
         // Ridge point: sticks up above its surroundings.
         if (tpi > 8.0 * k && slope in 3.0..25.0) {
@@ -398,6 +406,22 @@ object StandFinder {
             }
         }
         return null
+    }
+
+    /**
+     * Uphill bearing from the ground two cells out, when the shelf itself is level.
+     * Null when that ring is flat too — there is no fall line to walk.
+     */
+    private fun fallLineBearing(grid: ElevationGrid, r: Int, c: Int): Double? {
+        if (r < 2 || c < 2 || r > grid.size - 3 || c > grid.size - 3) return null
+        val northSouth = grid.at(r - 2, c) - grid.at(r + 2, c)
+        val eastWest = grid.at(r, c + 2) - grid.at(r, c - 2)
+        if (maxOf(abs(northSouth), abs(eastWest)) < 2.0) return null
+        return if (abs(northSouth) >= abs(eastWest)) {
+            if (northSouth >= 0.0) 0.0 else 180.0
+        } else {
+            if (eastWest >= 0.0) 90.0 else 270.0
+        }
     }
 
     /** One grid step along [bearing] (row increases south, column increases east). */

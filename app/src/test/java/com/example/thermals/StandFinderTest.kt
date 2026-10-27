@@ -329,6 +329,38 @@ class StandFinderTest {
     }
 
     @Test
+    fun uncoveredDemCellsAreNotInterpolatedAsSeaLevel() {
+        val n = size
+        val meters = DoubleArray(n * n) { 100.0 }
+        val covered = BooleanArray(n * n) { true }
+        for (r in 0 until n) covered[r * n] = false
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters, covered)
+        val (edgeLat, edgeLon) = grid.latLon(1, 0)
+        assertNull(grid.elevationAt(edgeLat, edgeLon))
+        val (lat, lon) = grid.latLon(14, 14)
+        assertEquals(100.0, grid.elevationAt(lat, lon)!!, 0.05)
+    }
+
+    @Test
+    fun levelShelfWithSteepSidesIsStillABench() {
+        val n = size
+        val r0 = 14
+        val meters = DoubleArray(n * n)
+        for (r in 0 until n) {
+            val z = when {
+                r <= 11 -> 240.0 - (11 - r) * 15.0
+                r >= 17 -> 160.0 - (r - 17) * 15.0
+                r == 12 -> 205.0
+                r == 16 -> 195.0
+                else -> 200.0
+            }
+            for (c in 0 until n) meters[r * n + c] = z
+        }
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters)
+        assertEquals(StandFeature.BENCH, StandFinder.classify(grid, r0, r0, null))
+    }
+
+    @Test
     fun benchRequiresSteepGroundOnBothSidesOfTheShelf() {
         val both = slopeShelf(dropDownhill = true)
         assertEquals(StandFeature.BENCH, StandFinder.classify(both, 14, 14, null))

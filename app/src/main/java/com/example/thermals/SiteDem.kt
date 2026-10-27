@@ -40,6 +40,8 @@ object SiteDemGrids {
 /**
  * Samples a loaded LiDAR / site raster. Row 0 is north, matching the hillshade bitmap
  * (geographic y% 0 is the north edge). Bare earth only — canopy is not the ground the wind sees.
+ * Heights are the raster's stored values (same as hillshade). The grid has no vertical-unit
+ * field, so a foot-valued LAS is not rescaled here.
  */
 object LidarStandDem {
     fun from(raster: TerrainRaster, metadata: GeoSpatialLibrary.GeoSpatialMetadata): SiteDem? {
