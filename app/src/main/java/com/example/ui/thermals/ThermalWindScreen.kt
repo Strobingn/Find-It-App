@@ -699,6 +699,7 @@ private fun HourSection(hour: ThermalHour) {
                         ?: "%.1f mph, vertical".format(hour.thermalSpeedMph),
                 )
                 StatLine("Wind in cover", "%.1f mph → %s".format(hour.groundWindMph, ThermalWindEngine.compass(hour.windTowardDegrees)))
+                hour.gustMph?.let { StatLine("Gusts in cover", "%.1f mph".format(it)) }
                 StatLine("Scent", "%.1f mph → %s".format(hour.scentSpeedMph, ThermalWindEngine.compass(hour.scentTowardDegrees)), emphasize = true)
                 StatLine("Confidence", "%d%%".format((hour.confidence * 100).roundToInt()))
             }
@@ -915,4 +916,3 @@ private fun WindCompass(hour: ThermalHour, modifier: Modifier = Modifier) {
         drawCircle(ScentColor, radius = 3.dp.toPx(), center = c)
     }
 }
-
