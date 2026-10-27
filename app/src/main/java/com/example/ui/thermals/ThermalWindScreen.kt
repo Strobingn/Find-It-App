@@ -323,7 +323,7 @@ private fun LocationSheetContent(
             )
         }
     }
-    IosSection(footer = "Free Open-Meteo hourly forecast and a 90 m elevation model of the slope around you.") {
+    IosSection(footer = "Highest-resolution forecast available: NOAA NBM 2.5 km, then NOAA HRRR 3 km (via Open-Meteo), plus a 90 m elevation model of the slope around you.") {
         IosRow(
             title = "Get forecast + terrain",
             icon = Icons.Default.Refresh,
@@ -348,7 +348,10 @@ private fun WeatherSheetContent(state: ThermalUiState, viewModel: ThermalWindVie
                 IosRow(title = "No forecast loaded", titleColor = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            IosSection(header = "Day", footer = "Open-Meteo hourly forecast") {
+            IosSection(
+                header = "Day",
+                footer = state.selectedDay?.windSource?.takeIf { it.isNotBlank() }?.let { "Wind from $it, hourly · via Open-Meteo" } ?: "Open-Meteo hourly forecast",
+            ) {
                 state.forecastDays.forEachIndexed { i, day ->
                     if (i > 0) IosDivider(startInset = 16.dp)
                     val lo = day.hourly.minOf { it.temperatureF }
@@ -699,6 +702,7 @@ private fun HourSection(hour: ThermalHour) {
                         ?: "%.1f mph, vertical".format(hour.thermalSpeedMph),
                 )
                 StatLine("Wind in cover", "%.1f mph → %s".format(hour.groundWindMph, ThermalWindEngine.compass(hour.windTowardDegrees)))
+                hour.gustMph?.let { StatLine("Gusts (open ground)", "%.0f mph".format(it)) }
                 StatLine(
                     "Scent",
                     if (hour.scentSpeedMph < ThermalWindEngine.CALM_SCENT_MPH) {

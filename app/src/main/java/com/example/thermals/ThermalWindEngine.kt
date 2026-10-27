@@ -44,6 +44,8 @@ data class HourlyWeather(
     val windFromDegrees: Double,
     /** 0..100 % sky cover. */
     val cloudCoverPercent: Double,
+    /** 10 m gust speed, when the forecast has it. */
+    val windGustMph: Double? = null,
 )
 
 /**
@@ -104,6 +106,8 @@ data class ThermalHour(
     val cloudCoverPercent: Double,
     /** 0..1 how much to trust this hour's call. */
     val confidence: Double,
+    /** Forecast 10 m gust (open ground), when the forecast has gusts. */
+    val gustMph: Double? = null,
 )
 
 data class ThermalForecast(
@@ -249,6 +253,7 @@ object ThermalWindEngine {
             thermalShare = share,
             cloudCoverPercent = cloud,
             confidence = confidence,
+            gustMph = weather.gust(t),
         )
     }
 
@@ -506,6 +511,10 @@ internal class WeatherSeries(points: List<HourlyWeather>) {
     fun temperature(t: Double): Double = interp(t) { it.temperatureF }
     fun windSpeed(t: Double): Double = interp(t) { it.windSpeedMph }.coerceAtLeast(0.0)
     fun cloud(t: Double): Double = interp(t) { it.cloudCoverPercent }.coerceIn(0.0, 100.0)
+
+    /** Gust at [t], or null when the forecast has no gusts for these hours. */
+    fun gust(t: Double): Double? =
+        if (sorted.any { it.windGustMph == null }) null else interp(t) { it.windGustMph ?: 0.0 }.coerceAtLeast(0.0)
 
     /** Wind direction interpolated along the shortest arc (so 350° → 10° passes through 0°). */
     fun windFrom(t: Double): Double {

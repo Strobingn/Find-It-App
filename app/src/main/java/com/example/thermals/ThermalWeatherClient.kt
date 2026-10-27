@@ -18,11 +18,24 @@ data class ThermalWeatherDay(
     val date: String,
     val utcOffsetMinutes: Int,
     val hourly: List<HourlyWeather>,
+    /** Weather model that supplied most of this day's wind, e.g. "NOAA NBM 2.5 km". */
+    val windSource: String = "",
 )
+
+/** Forecast models, finest first. Each hour takes its values from the first model that has them. */
+enum class WindModel(val id: String, val label: String) {
+    /** NOAA National Blend of Models: 2.5 km, bias-corrected, hourly to 36 h then 3-hourly, 11 days. CONUS. */
+    NBM("ncep_nbm_conus", "NOAA NBM 2.5 km"),
+    /** NOAA High-Resolution Rapid Refresh: 3 km, updated hourly, 18–48 h. CONUS. */
+    HRRR("ncep_hrrr_conus", "NOAA HRRR 3 km"),
+    /** Open-Meteo's pick for anywhere else (GFS / ECMWF / regional). */
+    BEST_MATCH("best_match", "Open-Meteo best match"),
+}
 
 /**
  * Free, key-less weather and terrain for the thermal tab:
- *  - Open-Meteo forecast (hourly temperature °F, 10 m wind mph + direction, cloud cover).
+ *  - Open-Meteo forecast (hourly temperature °F, 10 m wind mph + direction + gusts, cloud cover), asking for
+ *    the highest-resolution models first: NOAA NBM 2.5 km, then NOAA HRRR 3 km, then best match ([WindModel]).
  *  - Open-Meteo elevation (Copernicus 90 m DEM) sampled around the stand to estimate slope,
  *    the uphill direction and whether the spot sits in a draw/valley or on a ridge.
  */
@@ -36,11 +49,13 @@ class ThermalWeatherClient(
         withContext(Dispatchers.IO) {
             val url = String.format(
                 Locale.US,
-                "%s?latitude=%.5f&longitude=%.5f&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover" +
+                "%s?latitude=%.5f&longitude=%.5f&hourly=%s&models=%s" +
                     "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=%d",
                 forecastEndpoint,
                 latitude,
                 longitude,
+                HOURLY_VARS.joinToString(","),
+                WindModel.entries.joinToString(",") { it.id },
                 days.coerceIn(1, 7),
             )
             parseForecast(get(url))
@@ -148,32 +163,63 @@ class ThermalWeatherClient(
             )
         }
 
+        val HOURLY_VARS = listOf("temperature_2m", "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", "cloud_cover")
+
+        /**
+         * Parses a single- or multi-model response. With several models Open-Meteo suffixes each series with the
+         * model id ("wind_speed_10m_ncep_nbm_conus"); every hour takes each value from the first model, in
+         * [WindModel] order, that has it. Speed and direction always come from the same model.
+         */
         fun parseForecast(body: String): List<ThermalWeatherDay> {
             val json = JSONObject(body)
             val offsetMinutes = json.optInt("utc_offset_seconds", 0) / 60
             val hourly = json.optJSONObject("hourly") ?: throw IOException("Forecast has no hourly data")
             val times = hourly.getJSONArray("time")
-            val temps = hourly.getJSONArray("temperature_2m")
-            val speeds = hourly.getJSONArray("wind_speed_10m")
-            val dirs = hourly.getJSONArray("wind_direction_10m")
-            val clouds = hourly.optJSONArray("cloud_cover")
+
+            fun series(name: String): List<Pair<WindModel?, org.json.JSONArray>> = buildList {
+                WindModel.entries.forEach { m -> hourly.optJSONArray("${name}_${m.id}")?.let { add(m to it) } }
+                hourly.optJSONArray(name)?.let { add(null to it) } // single-model response
+            }
+            fun first(list: List<Pair<WindModel?, org.json.JSONArray>>, i: Int): Pair<WindModel?, Double>? =
+                list.firstNotNullOfOrNull { (m, a) -> if (i < a.length() && !a.isNull(i)) m to a.getDouble(i) else null }
+
+            val temps = series("temperature_2m")
+            val speeds = series("wind_speed_10m")
+            val dirs = series("wind_direction_10m")
+            val gusts = series("wind_gusts_10m")
+            val clouds = series("cloud_cover")
+            if (temps.isEmpty() || speeds.isEmpty() || dirs.isEmpty()) throw IOException("Forecast is missing temperature or wind")
 
             val byDate = linkedMapOf<String, MutableList<HourlyWeather>>()
+            val modelsByDate = linkedMapOf<String, MutableList<WindModel?>>()
             for (i in 0 until times.length()) {
                 val stamp = times.getString(i) // "2026-10-26T06:00"
-                if (temps.isNull(i) || speeds.isNull(i) || dirs.isNull(i)) continue
+                val temp = first(temps, i) ?: continue
+                // Wind speed and direction from one model, so they always describe the same wind.
+                val wind = speeds.firstNotNullOfOrNull { (m, a) ->
+                    val d = dirs.firstOrNull { it.first == m }?.second
+                    if (d != null && i < a.length() && i < d.length() && !a.isNull(i) && !d.isNull(i)) Triple(m, a.getDouble(i), d.getDouble(i)) else null
+                } ?: continue
                 val date = stamp.substringBefore('T')
                 val hour = stamp.substringAfter('T').substringBefore(':').toIntOrNull() ?: continue
                 byDate.getOrPut(date) { mutableListOf() } += HourlyWeather(
                     hour = hour,
-                    temperatureF = temps.getDouble(i),
-                    windSpeedMph = speeds.getDouble(i),
-                    windFromDegrees = dirs.getDouble(i),
-                    cloudCoverPercent = if (clouds == null || clouds.isNull(i)) 0.0 else clouds.getDouble(i),
+                    temperatureF = temp.second,
+                    windSpeedMph = wind.second,
+                    windFromDegrees = wind.third,
+                    cloudCoverPercent = first(clouds, i)?.second ?: 0.0,
+                    windGustMph = first(gusts, i)?.second,
                 )
+                modelsByDate.getOrPut(date) { mutableListOf() } += wind.first
             }
             return byDate.filterValues { it.size >= 6 }.map { (date, hours) ->
-                ThermalWeatherDay(date = date, utcOffsetMinutes = offsetMinutes, hourly = hours)
+                val source = modelsByDate[date].orEmpty().groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+                ThermalWeatherDay(
+                    date = date,
+                    utcOffsetMinutes = offsetMinutes,
+                    hourly = hours,
+                    windSource = source?.label ?: "Open-Meteo",
+                )
             }
         }
 

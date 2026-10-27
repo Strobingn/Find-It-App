@@ -502,9 +502,10 @@ private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode, mapBeari
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    "Wind in cover %.1f mph → %s · confidence %d%%".format(
+                    "Wind in cover %.1f mph → %s%s · confidence %d%%".format(
                         flow.groundWindMph,
                         ThermalWindEngine.compass(flow.windTowardDegrees),
+                        flow.gustMph?.let { " · gusts %.0f".format(it) } ?: "",
                         (flow.confidence * 100).roundToInt(),
                     ),
                     style = MaterialTheme.typography.bodySmall,

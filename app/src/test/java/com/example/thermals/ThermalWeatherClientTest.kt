@@ -61,6 +61,50 @@ class ThermalWeatherClientTest {
     }
 
     @Test
+    fun highestResolutionModelWinsEachHourAndHrrrFillsNbmGaps() {
+        val times = JSONArray()
+        fun arr(n: Int, f: (Int) -> Any?) = JSONArray().apply { for (i in 0 until n) put(f(i) ?: JSONObject.NULL) }
+        for (h in 0..23) times.put("2026-10-27T%02d:00".format(h))
+        val n = 24
+        val hourly = JSONObject()
+            .put("time", times)
+            // NBM 2.5 km has no wind for 00–05 (pretend), HRRR 3 km does; best match has everything.
+            .put("temperature_2m_ncep_nbm_conus", arr(n) { 40.0 + it })
+            .put("wind_speed_10m_ncep_nbm_conus", arr(n) { if (it < 6) null else 7.0 })
+            .put("wind_direction_10m_ncep_nbm_conus", arr(n) { if (it < 6) null else 270.0 })
+            .put("wind_gusts_10m_ncep_nbm_conus", arr(n) { if (it < 6) null else 15.0 })
+            .put("cloud_cover_ncep_nbm_conus", arr(n) { 10.0 })
+            .put("temperature_2m_ncep_hrrr_conus", arr(n) { 99.0 })
+            .put("wind_speed_10m_ncep_hrrr_conus", arr(n) { 3.0 })
+            .put("wind_direction_10m_ncep_hrrr_conus", arr(n) { 180.0 })
+            .put("wind_gusts_10m_ncep_hrrr_conus", arr(n) { 8.0 })
+            .put("temperature_2m_best_match", arr(n) { 0.0 })
+            .put("wind_speed_10m_best_match", arr(n) { 1.0 })
+            .put("wind_direction_10m_best_match", arr(n) { 90.0 })
+            .put("cloud_cover_best_match", arr(n) { 90.0 })
+        val body = JSONObject().put("utc_offset_seconds", -14_400).put("hourly", hourly).toString()
+
+        val day = ThermalWeatherClient.parseForecast(body).single()
+        assertEquals(24, day.hourly.size)
+        val early = day.hourly.first { it.hour == 3 }
+        assertEquals("HRRR fills the NBM gap", 3.0, early.windSpeedMph, 0.0)
+        assertEquals("…with HRRR's own direction", 180.0, early.windFromDegrees, 0.0)
+        assertEquals(8.0, early.windGustMph!!, 0.0)
+        assertEquals("NBM temperature still wins", 43.0, early.temperatureF, 0.0)
+        val nine = day.hourly.first { it.hour == 9 }
+        assertEquals(7.0, nine.windSpeedMph, 0.0)
+        assertEquals(270.0, nine.windFromDegrees, 0.0)
+        assertEquals(15.0, nine.windGustMph!!, 0.0)
+        assertEquals("NOAA NBM 2.5 km", day.windSource)
+    }
+
+    @Test
+    fun forecastAsksForTheFinestModelsFirst() {
+        assertEquals(listOf("ncep_nbm_conus", "ncep_hrrr_conus", "best_match"), WindModel.entries.map { it.id })
+        assertTrue("wind_gusts_10m" in ThermalWeatherClient.HOURLY_VARS)
+    }
+
+    @Test
     fun samplePointsRingTheStand() {
         val points = ThermalWeatherClient.terrainSamplePoints(42.0, -75.0)
         assertEquals(17, points.size)
