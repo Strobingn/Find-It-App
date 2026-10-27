@@ -37,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -101,6 +102,9 @@ import kotlinx.coroutines.awaitCancellation
 private val StandPinColor = Color(0xFFFF9F0A)
 private val AreaPinColor = Color(0xFF30D158)
 
+/** LiDAR relief auto-shows at this zoom and closer (unless the user disabled it). */
+private const val LIDAR_AUTO_ZOOM = 12.0
+
 private object StandMapIds {
     const val DEM = "stands-dem"
     const val DEM_URL = "mapbox://mapbox.mapbox-terrain-dem-v1"
@@ -126,7 +130,8 @@ private enum class StandMapBase(val label: String, val uri: String) {
  * AI stand finder on a Mapbox map: numbered pins for the best stand sites, circles for the best
  * hunting areas, a red dashed line showing which way scent drifts from each stand during its best
  * sit. Tap a pin (or a card) for the recommendation; long-press the map to search somewhere else.
- * Base style, 3D terrain (on by default) and the 1 m USGS LiDAR relief overlay are user options.
+ * Base style and 3D terrain (on by default) are user options; the 1 m USGS LiDAR relief overlay
+ * draws itself automatically past zoom 12 and can be disabled in Map options.
  */
 @Composable
 fun StandFinderScreen(
@@ -170,13 +175,17 @@ fun StandFinderScreen(
     // Map options.
     var base by rememberSaveable { mutableStateOf(StandMapBase.SATELLITE) }
     var terrain3d by rememberSaveable { mutableStateOf(true) }
-    var reliefOn by rememberSaveable { mutableStateOf(false) }
+    var lidarEnabled by rememberSaveable { mutableStateOf(true) }
+    var lidarForcedOff by rememberSaveable { mutableStateOf(false) }
     var reliefOpacity by rememberSaveable { mutableStateOf(0.55f) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
 
     val reliefOverlay = remember(context) { LidarReliefOverlay(context, scope) }
     val reliefLoading by reliefOverlay.loading.collectAsState()
     val reliefResolution by reliefOverlay.resolutionMeters.collectAsState()
+    var cameraZoom by remember { mutableStateOf(3.5) }
+    // Auto at zoom 12+, but never on when the user explicitly disabled the overlay this session.
+    val reliefVisible = lidarEnabled && !lidarForcedOff && cameraZoom >= LIDAR_AUTO_ZOOM
 
     val lat = thermal.latitude
     val lon = thermal.longitude
@@ -304,6 +313,10 @@ fun StandFinderScreen(
                         }
                     }
                 }
+                // Track zoom so the LiDAR relief overlay auto-shows from level 12 in.
+                subs += mapView.mapboxMap.subscribeCameraChangedCoalesced { event ->
+                    event.cameraState.zoom.let { cameraZoom = it }
+                }
                 // Pin taps: query the pin layers at the tap point and select that stand.
                 val clickListener = com.mapbox.maps.plugin.gestures.OnMapClickListener { point ->
                     val screen = mapView.mapboxMap.pixelForCoordinate(point)
@@ -339,7 +352,7 @@ fun StandFinderScreen(
                         style,
                         belowLayerId = StandMapIds.AREA_FILL,
                         opacity = reliefOpacity.toDouble(),
-                        visible = reliefOn,
+                        visible = reliefVisible,
                     )
                 }
             }
@@ -368,8 +381,8 @@ fun StandFinderScreen(
                     style.getSourceAs<GeoJsonSource>(StandMapIds.CENTER_SOURCE)?.featureCollection(centerFeatures)
                 }
             }
-            MapEffect(reliefOn, reliefOpacity) { _ ->
-                reliefOverlay.setAppearance(reliefOpacity.toDouble(), reliefOn)
+            MapEffect(reliefVisible, reliefOpacity) { _ ->
+                reliefOverlay.setAppearance(reliefOpacity.toDouble(), reliefVisible)
             }
         }
 
@@ -413,7 +426,7 @@ fun StandFinderScreen(
                     mapLoadError?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
-                    if (reliefOn && reliefLoading > 0) {
+                    if (reliefVisible && reliefLoading > 0) {
                         Text(
                             "Loading 1 m LiDAR relief…",
                             style = MaterialTheme.typography.labelSmall,
@@ -467,15 +480,28 @@ fun StandFinderScreen(
             }
             IosSection(
                 header = "LiDAR relief",
-                footer = "USGS 3DEP ≈1 m bare-earth hillshade, drawn over the base map. Zoom in to level ${LidarReliefOverlay.MIN_ZOOM}+ to see it." +
+                footer = "USGS 3DEP ≈1 m bare-earth hillshade. Draws itself automatically at zoom 12+ while enabled." +
                     (reliefResolution?.let { " Now showing ≈%.1f m cells.".format(it) } ?: ""),
             ) {
                 IosRow(
                     title = "LiDAR relief overlay",
-                    trailing = { Switch(checked = reliefOn, onCheckedChange = { reliefOn = it }) },
+                    subtitle = if (reliefVisible) {
+                        if (cameraZoom >= LIDAR_AUTO_ZOOM) "On (auto at this zoom)" else "On — zoom in to level 12+ to see it"
+                    } else {
+                        "Off"
+                    },
+                    trailing = {
+                        Switch(
+                            checked = lidarEnabled && !lidarForcedOff,
+                            onCheckedChange = { on ->
+                                lidarEnabled = on
+                                lidarForcedOff = !on
+                            },
+                        )
+                    },
                     modifier = Modifier.testTag("stands_lidar_toggle"),
                 )
-                if (reliefOn) {
+                if (lidarEnabled && !lidarForcedOff) {
                     IosDivider(startInset = 16.dp)
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                         Text(
