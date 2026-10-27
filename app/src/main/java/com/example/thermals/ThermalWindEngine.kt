@@ -126,6 +126,9 @@ object ThermalWindEngine {
     /** Below this |tendency| the thermal is too weak to have a clear direction. */
     private const val SWITCH_BAND = 0.05
 
+    /** Scent slower than this has no trustworthy bearing. */
+    const val CALM_SCENT_MPH = 0.05
+
     /** Mph of upslope thermal per unit of tendency at a "typical" 25 °F daily range. */
     private const val RISING_GAIN = 6.0
     private const val DRAINING_GAIN = 5.0
@@ -185,6 +188,7 @@ object ThermalWindEngine {
         val thermalToward: Double? = inputs.terrain.uphillBearingDegrees
             ?.takeIf { hasHorizontalThermal(inputs.terrain) && abs(tendency) > SWITCH_BAND }
             ?.let { uphill -> if (tendency > 0) normalize(uphill) else normalize(uphill + 180.0) }
+        // Only the horizontal part is added to the scent vector. Ridge/flat thermals are vertical.
         val horizontalThermal = if (thermalToward != null) thermalSpeed else 0.0
 
         val windToward = normalize(weather.windFrom(t) + 180.0)
@@ -197,14 +201,19 @@ object ThermalWindEngine {
             north += horizontalThermal * cos(Math.toRadians(thermalToward))
         }
         val scentSpeed = hypot(east, north)
-        val scentToward = if (scentSpeed < 0.05) {
+        // Below this the direction is noise. Callers must not draw a confident arrow (atan2(0, 0) is north).
+        val scentToward = if (scentSpeed < CALM_SCENT_MPH) {
             thermalToward ?: windToward
         } else {
             normalize(Math.toDegrees(atan2(east, north)))
         }
-        val share = if (thermalSpeed + groundWind <= 0.0) 0.0 else thermalSpeed / (thermalSpeed + groundWind)
+        val share = if (horizontalThermal + groundWind <= 0.0) {
+            0.0
+        } else {
+            horizontalThermal / (horizontalThermal + groundWind)
+        }
 
-        val windDominated = groundWind >= 5.0 && groundWind >= 2.5 * thermalSpeed
+        val windDominated = groundWind >= 5.0 && groundWind >= 2.5 * horizontalThermal
         val phase = when {
             windDominated -> ThermalPhase.WIND_DOMINATED
             tendency > SWITCH_BAND -> ThermalPhase.RISING
@@ -357,6 +366,22 @@ object ThermalWindEngine {
 
     fun compass(degrees: Double): String = COMPASS_16[((normalize(degrees) / 22.5) + 0.5).toInt() % 16]
 
+    /**
+     * Phase wording for the UI. "Uphill" / "downhill" only when the thermal actually has a
+     * horizontal direction. Flat ground and ridge tops lift or pool in place.
+     */
+    fun phaseText(hour: ThermalHour): String = when (hour.phase) {
+        ThermalPhase.RISING -> if (hour.thermalTowardDegrees != null) hour.phase.label else "Rising"
+        ThermalPhase.DRAINING -> if (hour.thermalTowardDegrees != null) hour.phase.label else "Falling"
+        else -> hour.phase.label
+    }
+
+    /** Null when the vector is too small to name a direction (avoids atan2(0, 0) = north). */
+    fun bearingOrNull(east: Double, north: Double): Double? {
+        if (hypot(east, north) < CALM_SCENT_MPH) return null
+        return normalize(Math.toDegrees(atan2(east, north)))
+    }
+
     /** "8:20 AM" for a fractional local hour. */
     fun formatHour(hour: Double): String {
         val totalMinutes = ((hour * 60.0).roundToInt() % 1440 + 1440) % 1440
@@ -444,6 +469,9 @@ object ThermalWindEngine {
 
     /** Local hunt advice for one hour: which side of you scent goes, so you know where deer must not be. */
     fun adviceFor(hour: ThermalHour): String {
+        if (hour.scentSpeedMph < CALM_SCENT_MPH) {
+            return "Air is nearly still, so there isn't a reliable scent direction. Don't plan the sit around an arrow."
+        }
         val toward = compass(hour.scentTowardDegrees)
         val from = compass(hour.scentTowardDegrees + 180.0)
         val driver = when (hour.phase) {

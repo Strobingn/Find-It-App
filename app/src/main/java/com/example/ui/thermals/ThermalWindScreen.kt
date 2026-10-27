@@ -692,14 +692,22 @@ private fun HourSection(hour: ThermalHour) {
         ) {
             WindCompass(hour, Modifier.size(118.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(hour.phase.label, color = phaseColor(hour.phase), style = MaterialTheme.typography.titleMedium)
+                Text(ThermalWindEngine.phaseText(hour), color = phaseColor(hour.phase), style = MaterialTheme.typography.titleMedium)
                 StatLine(
                     "Thermal",
                     hour.thermalTowardDegrees?.let { "%.1f mph → %s".format(hour.thermalSpeedMph, ThermalWindEngine.compass(it)) }
                         ?: "%.1f mph, vertical".format(hour.thermalSpeedMph),
                 )
                 StatLine("Wind in cover", "%.1f mph → %s".format(hour.groundWindMph, ThermalWindEngine.compass(hour.windTowardDegrees)))
-                StatLine("Scent", "%.1f mph → %s".format(hour.scentSpeedMph, ThermalWindEngine.compass(hour.scentTowardDegrees)), emphasize = true)
+                StatLine(
+                    "Scent",
+                    if (hour.scentSpeedMph < ThermalWindEngine.CALM_SCENT_MPH) {
+                        "nearly still"
+                    } else {
+                        "%.1f mph → %s".format(hour.scentSpeedMph, ThermalWindEngine.compass(hour.scentTowardDegrees))
+                    },
+                    emphasize = true,
+                )
                 StatLine("Confidence", "%d%%".format((hour.confidence * 100).roundToInt()))
             }
         }
@@ -861,8 +869,10 @@ internal fun ThermalChart(
         // Scent-drift arrows across the top.
         hours.forEach { h ->
             val center = Offset(xFor(h.hour.toDouble()).toFloat(), arrowRowTop + arrowRowHeight / 2f)
-            val len = (arrowRowHeight * 0.42f) * (0.55f + (h.scentSpeedMph / 6.0).coerceIn(0.0, 1.0).toFloat() * 0.45f)
-            drawDirectionArrow(center, h.scentTowardDegrees, len, ScentColor.copy(alpha = 0.35f + 0.6f * h.confidence.toFloat()), 2.dp.toPx())
+            if (h.scentSpeedMph >= ThermalWindEngine.CALM_SCENT_MPH) {
+                val len = (arrowRowHeight * 0.42f) * (0.55f + (h.scentSpeedMph / 6.0).coerceIn(0.0, 1.0).toFloat() * 0.45f)
+                drawDirectionArrow(center, h.scentTowardDegrees, len, ScentColor.copy(alpha = 0.35f + 0.6f * h.confidence.toFloat()), 2.dp.toPx())
+            }
         }
 
         // Hour labels every 2 hours.
@@ -911,7 +921,9 @@ private fun WindCompass(hour: ThermalHour, modifier: Modifier = Modifier) {
         hour.thermalTowardDegrees?.let {
             drawDirectionArrow(c, it, r * 0.45f, phaseColor(hour.phase), 3.dp.toPx())
         }
-        drawDirectionArrow(c, hour.scentTowardDegrees, r * 0.85f, ScentColor, 4.dp.toPx())
+        if (hour.scentSpeedMph >= ThermalWindEngine.CALM_SCENT_MPH) {
+            drawDirectionArrow(c, hour.scentTowardDegrees, r * 0.85f, ScentColor, 4.dp.toPx())
+        }
         drawCircle(ScentColor, radius = 3.dp.toPx(), center = c)
     }
 }

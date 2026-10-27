@@ -3,7 +3,6 @@ package com.example.thermals
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan
-import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.hypot
@@ -36,9 +35,30 @@ class ElevationGrid(
     val spacingMeters: Double,
     /** Row-major meters, length size*size. */
     val meters: DoubleArray,
+    /**
+     * False where this cell has no elevation (outside a LiDAR footprint). Those cells are
+     * not scored. Defaults to fully covered, which is the Open-Meteo grid.
+     */
+    val covered: BooleanArray = BooleanArray(size * size) { true },
 ) {
     init {
         require(size >= 5 && meters.size == size * size) { "Grid must be size×size (≥5)" }
+        require(covered.size == size * size) { "Coverage mask must be size×size" }
+    }
+
+    fun isCovered(r: Int, c: Int): Boolean {
+        if (r !in 0 until size || c !in 0 until size) return false
+        return covered[r * size + c]
+    }
+
+    /** True when [r],[c] and the [radius] ring around it all have elevations. */
+    fun coversNeighborhood(r: Int, c: Int, radius: Int = 2): Boolean {
+        for (dr in -radius..radius) {
+            for (dc in -radius..radius) {
+                if (!isCovered(r + dr, c + dc)) return false
+            }
+        }
+        return true
     }
 
     fun at(r: Int, c: Int): Double = meters[r.coerceIn(0, size - 1) * size + c.coerceIn(0, size - 1)]
@@ -67,12 +87,12 @@ class ElevationGrid(
         val (sLat, sLon) = ThermalMapGeometry.destination(lat, lon, 180.0, step)
         val (eLat, eLon) = ThermalMapGeometry.destination(lat, lon, 90.0, step)
         val (wLat, wLon) = ThermalMapGeometry.destination(lat, lon, 270.0, step)
+        val zC = elevationAt(lat, lon) ?: return null
         val zN = elevationAt(nLat, nLon) ?: return null
         val zS = elevationAt(sLat, sLon) ?: return null
         val zE = elevationAt(eLat, eLon) ?: return null
         val zW = elevationAt(wLat, wLon) ?: return null
-        val (uphill, slope) = ThermalMapGeometry.slopeFromSamples(zN, zS, zE, zW, step)
-        return ThermalMapGeometry.cellTerrain(uphill, slope)
+        return ThermalMapGeometry.terrainFromNeighborhood(zC, zN, zS, zE, zW, step)
     }
 
     /** (lat, lon) of a grid node. */
@@ -106,15 +126,21 @@ data class StandCandidate(
     val morningScore: Double,
     val eveningScore: Double,
     /** Average scent drift (toward) during each sit. */
-    val morningScentToward: Double,
-    val eveningScentToward: Double,
+    /** Null when that sit is calm — no confident bearing. */
+    val morningScentToward: Double?,
+    val eveningScentToward: Double?,
     /** Where deer are expected to come from during each sit. */
     val morningDeerFrom: Double?,
     val eveningDeerFrom: Double?,
+    /** 0..1 scent-vs-approach alignment for each sit. 1 = strong (away, or a saddle crosswind). */
+    val morningAlign: Double,
+    val eveningAlign: Double,
 ) {
     val bestWindow: HuntWindow get() = if (morningScore >= eveningScore) HuntWindow.MORNING else HuntWindow.EVENING
     val bestScore: Double get() = max(morningScore, eveningScore)
-    val bestScentToward: Double get() = if (bestWindow == HuntWindow.MORNING) morningScentToward else eveningScentToward
+    val bestScentToward: Double? get() = if (bestWindow == HuntWindow.MORNING) morningScentToward else eveningScentToward
+    val bestAlign: Double get() = if (bestWindow == HuntWindow.MORNING) morningAlign else eveningAlign
+    val bestDeerFrom: Double? get() = if (bestWindow == HuntWindow.MORNING) morningDeerFrom else eveningDeerFrom
 }
 
 /** A finished pick shown on the map (from the AI, or from the local ranking when AI is unavailable). */
@@ -147,6 +173,12 @@ object StandFinder {
     /** Picks are kept at least this far apart (~400 ft). */
     const val MIN_PICK_SPACING_M = 120.0
 
+    /** Below this alignment the sit is a poor recommendation and is dropped on device. */
+    const val MIN_RECOMMEND_ALIGN = 0.5
+
+    /** One-way "away" (~135° from the approach) or a saddle crosswind. */
+    const val STRONG_AWAY_ALIGN = 0.999
+
     /** Anything farther than 750 yards from the search center is ignored. */
     const val MAX_PICK_DISTANCE_M = SEARCH_RADIUS_M
 
@@ -174,6 +206,10 @@ object StandFinder {
         val s = grid.spacingMeters
         for (r in 2 until n - 2) {
             for (c in 2 until n - 2) {
+                // Radius first, then features, so corners of the DEM square never reach the AI.
+                if (!grid.coversNeighborhood(r, c)) continue
+                val (lat, lon) = grid.latLon(r, c)
+                if (distanceMeters(grid.centerLat, grid.centerLon, lat, lon) > MAX_PICK_DISTANCE_M) continue
                 classify(grid, r, c, prevailingFromDeg)?.let { raw += Triple(r, c, it) }
             }
         }
@@ -185,7 +221,14 @@ object StandFinder {
                 west = grid.at(r, c - 1),
                 spacingMeters = s,
             )
-            val terrain = ThermalMapGeometry.cellTerrain(uphill, slope)
+            val terrain = ThermalMapGeometry.terrainFromNeighborhood(
+                center = grid.at(r, c),
+                north = grid.at(r - 1, c),
+                south = grid.at(r + 1, c),
+                east = grid.at(r, c + 1),
+                west = grid.at(r, c - 1),
+                spacingMeters = s,
+            )
             val (lat, lon) = grid.latLon(r, c)
             // Saddles: deer cross from both low sides at any time. Slopes: up from below in the
             // morning, down from above in the evening.
@@ -209,12 +252,14 @@ object StandFinder {
                 elevationFeet = grid.at(r, c) * 3.28084,
                 slopeDegrees = slope,
                 uphillBearing = uphill,
-                morningScore = feature.baseScore * (0.35 + 0.65 * am.first),
-                eveningScore = feature.baseScore * (0.35 + 0.65 * pm.first),
-                morningScentToward = am.second,
-                eveningScentToward = pm.second,
+                morningScore = sitScore(feature, am.align),
+                eveningScore = sitScore(feature, pm.align),
+                morningScentToward = am.bearing,
+                eveningScentToward = pm.bearing,
                 morningDeerFrom = morningFrom,
                 eveningDeerFrom = eveningFrom,
+                morningAlign = am.align,
+                eveningAlign = pm.align,
             )
         }.sortedByDescending { it.bestScore }
 
@@ -228,17 +273,20 @@ object StandFinder {
         return kept.mapIndexed { i, cand -> cand.copy(id = i + 1) }
     }
 
+    private data class WindowRead(val align: Double, val bearing: Double?)
+
     /**
-     * Fraction (0..1) of the sit where scent drifts away from the deer's approach, plus the
-     * average scent bearing. Without a forecast, neutral 0.5.
+     * Mean scent-vs-approach alignment over the sit, plus the speed-weighted scent bearing.
+     * Bearing is null when the averaged drift is calm so we don't report atan2(0, 0) as north.
+     * Without a forecast, alignment is a neutral 0.5 and there is no bearing.
      */
     private fun windowScore(
         field: ThermalWindEngine.FlowField?,
         terrain: SiteTerrain,
         window: HuntWindow,
         deerFrom: List<Double>,
-    ): Pair<Double, Double> {
-        if (field == null) return 0.5 to 0.0
+    ): WindowRead {
+        if (field == null) return WindowRead(0.5, null)
         var good = 0.0
         var total = 0.0
         var east = 0.0
@@ -246,24 +294,49 @@ object StandFinder {
         var t = window.startHour
         while (t <= window.endHour) {
             val h = field.at(t, terrain)
-            val rad = Math.toRadians(h.scentTowardDegrees)
-            east += sin(rad) * h.scentSpeedMph
-            north += cos(rad) * h.scentSpeedMph
-            val safe = if (deerFrom.isEmpty()) {
+            if (h.scentSpeedMph >= ThermalWindEngine.CALM_SCENT_MPH) {
+                val rad = Math.toRadians(h.scentTowardDegrees)
+                east += sin(rad) * h.scentSpeedMph
+                north += cos(rad) * h.scentSpeedMph
+            }
+            val safe = if (h.scentSpeedMph < ThermalWindEngine.CALM_SCENT_MPH) {
                 0.5
             } else {
-                // Angle between scent drift and each direction deer come from: 180° = perfect,
-                // 0° = busted. The worst approach decides.
-                val base = deerFrom.minOf { from -> ((angleDiff(h.scentTowardDegrees, from) - 45.0) / 90.0).coerceIn(0.0, 1.0) }
+                val base = approachAlignment(h.scentTowardDegrees, deerFrom)
                 if (h.phase == ThermalPhase.SWITCHING) base * 0.5 else base
             }
             good += safe
             total += 1.0
             t += 0.5
         }
-        val bearing = ThermalWindEngine.normalize(Math.toDegrees(atan2(east, north)))
-        return (if (total == 0.0) 0.5 else good / total) to bearing
+        val samples = total.coerceAtLeast(1.0)
+        val bearing = ThermalWindEngine.bearingOrNull(east / samples, north / samples)
+        return WindowRead(if (total == 0.0) 0.5 else good / total, bearing)
     }
+
+    /**
+     * How well scent stays off the deer, 0..1.
+     *
+     * One approach (slope, draw, bench): deer come from one direction. Alignment reaches 1
+     * once scent is ~135° or more from that approach ("away") and is 0 at 45° or less.
+     *
+     * Two opposite approaches (a saddle): deer use both ends of the low axis, so scent cannot
+     * be away from both. Straight down the trail scores 0. A crosswind (~90° to the axis) is
+     * the best possible sit and scores 1, so a well-set saddle is not capped under a bench.
+     */
+    internal fun approachAlignment(scentToward: Double, deerFrom: List<Double>): Double {
+        if (deerFrom.isEmpty()) return 0.5
+        if (deerFrom.size >= 2) {
+            val cross = deerFrom.minOf { angleDiff(scentToward, it) }
+            return (cross / 90.0).coerceIn(0.0, 1.0)
+        }
+        val diff = angleDiff(scentToward, deerFrom.first())
+        return ((diff - 45.0) / 90.0).coerceIn(0.0, 1.0)
+    }
+
+    /** Feature weight times alignment. A full-credit saddle (1.0) beats a full-credit bench (0.85). */
+    internal fun sitScore(feature: StandFeature, align: Double): Double =
+        feature.baseScore * (0.35 + 0.65 * align.coerceIn(0.0, 1.0))
 
     /** Feature at a grid node, or null if it's plain hillside / flat. */
     internal fun classify(grid: ElevationGrid, r: Int, c: Int, prevailingFromDeg: Double?): StandFeature? {
@@ -293,10 +366,12 @@ object StandFinder {
         for (dr in -2..2) for (dc in -2..2) if (abs(dr) == 2 || abs(dc) == 2) ring += grid.at(r + dr, c + dc)
         val tpi = z - ring.average()
 
-        // Bench: nearly flat here but steep just above and below along the fall line.
-        if (slope < 7.0) {
-            val (u2, upSlope) = steepnessAround(grid, r, c, spacing)
-            if (u2 != null && upSlope > 11.0 && tpi > -6.0 * k && tpi < 6.0 * k) return StandFeature.BENCH
+        // Bench: flat here, with the fall line steep both uphill and downhill — not one cliff nearby.
+        if (slope < 7.0 && uphill != null && tpi > -6.0 * k && tpi < 6.0 * k) {
+            val (dr, dc) = gridStep(uphill)
+            val upSlope = slopeAt(grid, r + 2 * dr, c + 2 * dc)
+            val downSlope = slopeAt(grid, r - 2 * dr, c - 2 * dc)
+            if (upSlope > 11.0 && downSlope > 11.0) return StandFeature.BENCH
         }
         // Ridge point: sticks up above its surroundings.
         if (tpi > 8.0 * k && slope in 3.0..25.0) {
@@ -307,9 +382,37 @@ object StandFinder {
             }
             return StandFeature.RIDGE_POINT
         }
-        // Draw head: a hollow (below surroundings) where the ground keeps rising beyond it.
-        if (tpi < -6.0 * k && slope in 4.0..30.0) return StandFeature.DRAW_HEAD
+        // Draw head: a hollow where the slope keeps rising uphill and falling downhill.
+        // A bowl bottom (no continued rise) is not a draw head.
+        if (tpi < -6.0 * k && slope in 4.0..30.0 && uphill != null) {
+            val (dr, dc) = gridStep(uphill)
+            val upR = r + 2 * dr
+            val upC = c + 2 * dc
+            val downR = r - 2 * dr
+            val downC = c - 2 * dc
+            if (upR in 0 until grid.size && upC in 0 until grid.size &&
+                downR in 0 until grid.size && downC in 0 until grid.size &&
+                grid.at(upR, upC) > z + 1.5 && grid.at(downR, downC) < z - 1.0
+            ) {
+                return StandFeature.DRAW_HEAD
+            }
+        }
         return null
+    }
+
+    /** One grid step along [bearing] (row increases south, column increases east). */
+    private fun gridStep(bearing: Double): Pair<Int, Int> {
+        val rad = Math.toRadians(bearing)
+        val dc = kotlin.math.round(sin(rad)).toInt().coerceIn(-1, 1)
+        val dr = kotlin.math.round(-cos(rad)).toInt().coerceIn(-1, 1)
+        return if (dr == 0 && dc == 0) -1 to 0 else dr to dc
+    }
+
+    private fun slopeAt(grid: ElevationGrid, r: Int, c: Int): Double {
+        if (r !in 1 until grid.size - 1 || c !in 1 until grid.size - 1) return 0.0
+        return ThermalMapGeometry.slopeFromSamples(
+            grid.at(r - 1, c), grid.at(r + 1, c), grid.at(r, c + 1), grid.at(r, c - 1), grid.spacingMeters,
+        ).second
     }
 
     /** Bearing of a saddle's low side (deer cross along this axis), from which neighbor pair is lower. */
@@ -325,36 +428,20 @@ object StandFinder {
         return if (lowest.second < z) lowest.first else null
     }
 
-    /** Max slope in the 5×5 neighborhood, and its uphill bearing. */
-    private fun steepnessAround(grid: ElevationGrid, r: Int, c: Int, spacing: Double): Pair<Double?, Double> {
-        var best = 0.0
-        var bestUp: Double? = null
-        for (dr in -2..2) {
-            for (dc in -2..2) {
-                if (dr == 0 && dc == 0) continue
-                val rr = r + dr
-                val cc = c + dc
-                val (u, sl) = ThermalMapGeometry.slopeFromSamples(
-                    grid.at(rr - 1, cc), grid.at(rr + 1, cc), grid.at(rr, cc + 1), grid.at(rr, cc - 1), spacing,
-                )
-                if (sl > best) {
-                    best = sl
-                    bestUp = u
-                }
-            }
-        }
-        return bestUp to best
-    }
-
     /** Offline picks when no AI is configured (or it fails): the top spots with plain-language notes. */
     fun localPicks(candidates: List<StandCandidate>, maxStands: Int = 4): List<StandPick> {
-        val stands = candidates.filter { it.feature != StandFeature.BEDDING }.take(maxStands)
+        // Poor sits (scent toward the deer, or no crosswind on a saddle) are not recommendations.
+        val stands = candidates
+            .filter { it.feature != StandFeature.BEDDING && it.bestAlign >= MIN_RECOMMEND_ALIGN }
+            .take(maxStands)
         val areas = candidates.filter { it.feature == StandFeature.BEDDING }.take(2)
         var rank = 0
         return stands.map { c ->
             rank++
             val window = c.bestWindow
-            val deerFrom = if (window == HuntWindow.MORNING) c.morningDeerFrom else c.eveningDeerFrom
+            val deerFrom = c.bestDeerFrom
+            val scent = c.bestScentToward
+            val strong = c.bestAlign >= STRONG_AWAY_ALIGN && scent != null && deerFrom != null
             StandPick(
                 rank = rank,
                 latitude = c.latitude,
@@ -362,12 +449,14 @@ object StandFinder {
                 kind = StandPick.Kind.STAND,
                 title = "${c.feature.label} stand",
                 bestTime = window.label,
-                wind = "Best with scent going ${ThermalWindEngine.compass(c.bestScentToward)}" +
-                    (deerFrom?.let { " — away from deer coming from the ${ThermalWindEngine.compass(it)}" } ?: ""),
+                wind = windCopy(c),
                 why = "A ${c.feature.blurb}. %,.0f ft elevation, %.0f° slope.".format(c.elevationFeet, c.slopeDegrees),
-                entry = deerFrom?.let { "Walk in from the ${ThermalWindEngine.compass(it + 180.0)} side so you never cross where deer come from." }
-                    ?: "Approach on the downwind side.",
-                scentToward = c.bestScentToward,
+                entry = if (strong && deerFrom != null) {
+                    "Walk in from the ${ThermalWindEngine.compass(deerFrom + 180.0)} side so you never cross where deer come from."
+                } else {
+                    "Scent is not cleanly away from the deer. Don't treat this as a setup until the wind changes."
+                },
+                scentToward = scent,
                 candidateId = c.id,
             )
         } + areas.map { c ->
@@ -386,6 +475,27 @@ object StandFinder {
                 candidateId = c.id,
             )
         }
+    }
+
+    /** Honest wind line. "Away from deer" only when [bestAlign] is actually strong. */
+    internal fun windCopy(c: StandCandidate): String {
+        val scent = c.bestScentToward
+        val deerFrom = c.bestDeerFrom
+        if (scent == null) return "Air is nearly still, so this sit has no reliable scent direction."
+        val toward = ThermalWindEngine.compass(scent)
+        if (c.bestAlign >= STRONG_AWAY_ALIGN && deerFrom != null) {
+            return "Scent goes $toward — away from deer coming from the ${ThermalWindEngine.compass(deerFrom)}."
+        }
+        if (c.bestAlign >= MIN_RECOMMEND_ALIGN) {
+            return "Marginal: scent goes $toward. Not cleanly away from the deer — not a confident setup."
+        }
+        return "Poor sit: scent goes $toward, toward the deer. Not a recommendation."
+    }
+
+    internal fun sitHonesty(align: Double): String = when {
+        align >= STRONG_AWAY_ALIGN -> "away from deer"
+        align >= MIN_RECOMMEND_ALIGN -> "marginal, not cleanly away"
+        else -> "POOR scent toward deer — do not recommend"
     }
 
     /** US-style distance: feet under a tenth of a mile, otherwise miles. */

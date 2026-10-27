@@ -75,9 +75,40 @@ object ThermalMapGeometry {
         return uphill to slope
     }
 
-    /** Terrain for one map cell, from its local slope (draws vs slopes vs flats). */
+    /** Coarse flat-or-slope label when a center elevation isn't available. */
     fun cellTerrain(uphill: Double?, slopeDeg: Double): SiteTerrain = when {
         uphill == null || slopeDeg < 1.5 -> SiteTerrain(TerrainSetting.FLAT, null, 0.0, source = "Map")
         else -> SiteTerrain(TerrainSetting.SLOPE, uphill, slopeDeg.coerceAtMost(45.0), source = "Map")
+    }
+
+    /**
+     * Landform from the center elevation and the four neighbors [spacingMeters] away.
+     * A crest (center above the ring) is a ridge: thermals lift in place. A hollow is a
+     * valley/draw and keeps the uphill bearing so drainage runs along the channel.
+     * A plane is a slope. This is what the wind map and stand cells use.
+     */
+    fun terrainFromNeighborhood(
+        center: Double,
+        north: Double,
+        south: Double,
+        east: Double,
+        west: Double,
+        spacingMeters: Double,
+        source: String = "Map",
+    ): SiteTerrain {
+        val (uphill, slope) = slopeFromSamples(north, south, east, west, spacingMeters)
+        val relief = center - (north + south + east + west) / 4.0
+        val bump = (6.0 * spacingMeters / 100.0).coerceAtLeast(2.0)
+        val limitedSlope = slope.coerceAtMost(45.0)
+        return when {
+            relief > bump && (uphill == null || slope < 12.0) ->
+                SiteTerrain(TerrainSetting.RIDGE, uphillBearingDegrees = null, slopeDegrees = limitedSlope, source = source)
+            relief < -bump ->
+                SiteTerrain(TerrainSetting.VALLEY, uphill, limitedSlope, source = source)
+            uphill == null || slope < 1.5 ->
+                SiteTerrain(TerrainSetting.FLAT, null, 0.0, source = source)
+            else ->
+                SiteTerrain(TerrainSetting.SLOPE, uphill, limitedSlope, source = source)
+        }
     }
 }

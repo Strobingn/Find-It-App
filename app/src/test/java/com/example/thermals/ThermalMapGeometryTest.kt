@@ -54,6 +54,20 @@ class ThermalMapGeometryTest {
     }
 
     @Test
+    fun neighborhoodClassifiesRidgeValleyAndSlope() {
+        val ridge = ThermalMapGeometry.terrainFromNeighborhood(120.0, 100.0, 100.0, 100.0, 100.0, 60.0)
+        assertEquals(TerrainSetting.RIDGE, ridge.setting)
+        assertNull(ridge.uphillBearingDegrees)
+        val valley = ThermalMapGeometry.terrainFromNeighborhood(100.0, 112.0, 100.0, 112.0, 112.0, 60.0)
+        assertEquals(TerrainSetting.VALLEY, valley.setting)
+        val slope = ThermalMapGeometry.terrainFromNeighborhood(100.0, 100.0, 100.0, 112.0, 88.0, 60.0)
+        assertEquals(TerrainSetting.SLOPE, slope.setting)
+        assertEquals(90.0, slope.uphillBearingDegrees!!, 1.0)
+        val flat = ThermalMapGeometry.terrainFromNeighborhood(100.0, 100.0, 100.0, 100.2, 99.8, 60.0)
+        assertEquals(TerrainSetting.FLAT, flat.setting)
+    }
+
+    @Test
     fun flowFieldTreatsEachSlopeOnItsOwn() {
         val curve = DiurnalTemperatureCurve.build(
             listOf(DiurnalTemperatureCurve.Reading(6.0, 32.0), DiurnalTemperatureCurve.Reading(12.0, 66.0)),

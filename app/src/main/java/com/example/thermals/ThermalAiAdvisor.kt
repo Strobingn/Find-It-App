@@ -79,7 +79,7 @@ class ThermalAiAdvisor(context: Context) {
                         ThermalWindEngine.formatHour(h.hour.toDouble()),
                         h.temperatureF,
                         h.cloudCoverPercent,
-                        h.phase.label,
+                        ThermalWindEngine.phaseText(h),
                         h.thermalTowardDegrees?.let { "%.1f→%s".format(h.thermalSpeedMph, ThermalWindEngine.compass(it)) }
                             ?: "%.1f vertical".format(h.thermalSpeedMph),
                         h.groundWindMph,

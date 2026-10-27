@@ -53,6 +53,8 @@ internal class GroundCell(
     val eastX: Float,
     val eastY: Float,
     val terrain: SiteTerrain,
+    val latitude: Double = Double.NaN,
+    val longitude: Double = Double.NaN,
 )
 
 internal class GroundGrid(val cols: Int, val rows: Int, val width: Float, val height: Float, val cells: Array<GroundCell?>) {
@@ -97,6 +99,25 @@ internal class GroundGrid(val cols: Int, val rows: Int, val width: Float, val he
         out[0] = sx / wSum
         out[1] = sy / wSum
         return true
+    }
+
+    /**
+     * Terrain of the sample nearest [lat]/[lon]. The wind-map cone and HUD use this so they
+     * match the particle cell under the pin (same slope source, same exaggeration correction).
+     */
+    fun terrainNearest(lat: Double, lon: Double): SiteTerrain? {
+        var best: GroundCell? = null
+        var bestD = Double.POSITIVE_INFINITY
+        val cosLat = kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.2)
+        for (cell in cells) {
+            if (cell == null || cell.latitude.isNaN() || cell.longitude.isNaN()) continue
+            val d = hypot(cell.latitude - lat, (cell.longitude - lon) * cosLat)
+            if (d < bestD) {
+                bestD = d
+                best = cell
+            }
+        }
+        return best?.terrain
     }
 }
 
