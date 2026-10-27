@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Landscape
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.ui.graphics.Color
@@ -314,6 +315,8 @@ fun HomeHubScreen(
                     modifier = Modifier.testTag("home_basemap_open_library"),
                 )
                 IosDivider(startInset = IosIconRowDividerInset)
+                OfflineAiHomeRow()
+                IosDivider(startInset = IosIconRowDividerInset)
                 // Feature 5 — session end debrief + share
                 IosRow(
                     title = "Session debrief",
@@ -379,6 +382,48 @@ fun HomeHubScreen(
                     AppUpdateButtons(controller = updateController)
                 }
             }
+        }
+    }
+}
+
+/** Home → Field status → "Offline AI": shows the download state and opens the download page. */
+@Composable
+private fun OfflineAiHomeRow() {
+    val context = LocalContext.current
+    val store = remember(context) { com.example.ai.OnDeviceModelStore(context) }
+    var open by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    var tick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val subtitle = remember(tick, open) {
+        val states = com.example.ai.OnDeviceModel.entries.associateWith { store.state(it) }
+        val downloading = states.entries.firstOrNull { it.value is com.example.ai.ModelDownloadState.Downloading }
+        val active = store.activeModel()
+        when {
+            downloading != null -> {
+                val d = downloading.value as com.example.ai.ModelDownloadState.Downloading
+                if (d.waitingForWifi) "${downloading.key.label}: waiting for Wi-Fi" else "${downloading.key.label}: downloading ${(d.fraction * 100).toInt()}%"
+            }
+            active != null -> "${active.label} ready — works with no signal"
+            else -> "Download Gemma 4 to use AI with no signal"
+        }
+    }
+    // Keep the percentage moving while a download runs.
+    androidx.compose.runtime.LaunchedEffect(subtitle) {
+        if (subtitle.contains("downloading") || subtitle.contains("waiting")) {
+            kotlinx.coroutines.delay(2_000)
+            tick++
+        }
+    }
+    IosRow(
+        title = "Offline AI",
+        subtitle = subtitle,
+        icon = Icons.Default.Memory,
+        showChevron = true,
+        onClick = { open = true },
+        modifier = Modifier.testTag("home_offline_ai"),
+    )
+    if (open) {
+        com.example.ui.ios.IosSheet(title = "Offline AI", onDismiss = { open = false; tick++ }) {
+            OfflineAiSection(onChanged = { tick++ })
         }
     }
 }
