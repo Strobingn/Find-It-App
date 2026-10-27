@@ -93,6 +93,8 @@ object TerrainViewshedAnalyzer {
 
         val visibility = BooleanArray(grid.width * grid.height)
         val cancelScan = AtomicBoolean(false)
+        val vegFactor = 1f - vegetationFilter.coerceIn(0f, 1f)
+        val maxRadiusCellsSq = if (maxRadiusCells.isFinite()) maxRadiusCells * maxRadiusCells else Float.POSITIVE_INFINITY
 
         // Cells are independent, so row ranges scan in parallel with identical results.
         // Cancellation is polled once per row for responsive aborts on any worker count.
@@ -103,15 +105,17 @@ object TerrainViewshedAnalyzer {
                     cancelScan.set(true)
                     break
                 }
+                val rowOffset = row * grid.width
+                val dy = row - observerY
+                val dySq = dy * dy
                 for (col in 0 until grid.width) {
-                    val distanceCells = hypot(
-                        (col - observerX).toDouble(),
-                        (row - observerY).toDouble(),
-                    ).toFloat()
-                    if (distanceCells > maxRadiusCells) continue
-                    val index = row * grid.width + col
+                    val dx = col - observerX
+                    val distSq = dx * dx + dySq
+                    if (distSq > maxRadiusCellsSq) continue
+                    val index = rowOffset + col
                     if (!grid.validData[index]) continue
                     counts[0]++
+                    val distanceCells = kotlin.math.sqrt(distSq.toDouble()).toFloat()
                     val isVisible = isLineOfSightClear(
                         grid = grid,
                         observerX = observerX,
@@ -120,8 +124,7 @@ object TerrainViewshedAnalyzer {
                         targetCol = col,
                         targetRow = row,
                         targetDistanceCells = distanceCells,
-                        cellSize = cellSize,
-                        vegetationFilter = vegetationFilter,
+                        vegFactor = vegFactor,
                     )
                     if (isVisible) {
                         visibility[index] = true
@@ -286,6 +289,10 @@ object TerrainViewshedAnalyzer {
      * True when the target cell is visible from the eye position. Intermediate cells block the
      * target when their elevation angle (rise over horizontal distance) meets or exceeds the
      * target's own angle. Invalid cells are transparent.
+     *
+     * Optimized to short-circuit as soon as any blocking cell is found along the ray, avoid
+     * expensive Math.hypot calls, use direct array lookups with pre-calculated vegetation factor,
+     * and skip duplicate cells during ray stepping.
      */
     private fun isLineOfSightClear(
         grid: ElevationGrid,
@@ -295,38 +302,60 @@ object TerrainViewshedAnalyzer {
         targetCol: Int,
         targetRow: Int,
         targetDistanceCells: Float,
-        cellSize: Float,
-        vegetationFilter: Float,
+        vegFactor: Float,
     ): Boolean {
         if (targetDistanceCells < 0.5f) return true
+        val deltaX = targetCol - observerX
+        val deltaY = targetRow - observerY
         val steps = ceil(
             maxOf(
-                abs(targetCol - observerX).toDouble(),
-                abs(targetRow - observerY).toDouble(),
+                abs(deltaX).toDouble(),
+                abs(deltaY).toDouble(),
             ),
         ).toInt().coerceAtLeast(1)
-        val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
-        val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
 
-        var maxBlockingAngle = Float.NEGATIVE_INFINITY
+        val targetIndex = targetRow * grid.width + targetCol
+        val targetElevation = grid.bareEarth[targetIndex] + grid.canopySpikes[targetIndex] * vegFactor
+        val targetSlope = (targetElevation - eyeElevation) / targetDistanceCells
+
+        val invSteps = 1f / steps
+        val gridWidth = grid.width
+        val maxCol = gridWidth - 1
+        val maxRow = grid.height - 1
+        val targetDistSq = targetDistanceCells * targetDistanceCells
+
+        val validData = grid.validData
+        val bareEarth = grid.bareEarth
+        val canopySpikes = grid.canopySpikes
+
+        var prevCol = -1
+        var prevRow = -1
+
         for (step in 1 until steps) {
-            val fraction = step.toFloat() / steps
-            val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
-                .coerceIn(0, grid.width - 1)
-            val row = (observerY + (targetRow - observerY) * fraction).roundToInt()
-                .coerceIn(0, grid.height - 1)
-            val index = row * grid.width + col
-            if (!grid.validData[index]) continue
+            val fraction = step * invSteps
+            val col = (observerX + deltaX * fraction).roundToInt().coerceIn(0, maxCol)
+            val row = (observerY + deltaY * fraction).roundToInt().coerceIn(0, maxRow)
+
+            if (col == prevCol && row == prevRow) continue
+            prevCol = col
+            prevRow = row
+
             if (col == targetCol && row == targetRow) continue
-            val distanceCells = hypot(
-                (col - observerX).toDouble(),
-                (row - observerY).toDouble(),
-            ).toFloat()
-            if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
-            val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
-                (distanceCells * cellSize)
-            if (angle > maxBlockingAngle) maxBlockingAngle = angle
+
+            val index = row * gridWidth + col
+            if (!validData[index]) continue
+
+            val dx = col - observerX
+            val dy = row - observerY
+            val distSq = dx * dx + dy * dy
+            if (distSq < 0.25f || distSq >= targetDistSq) continue
+
+            val distanceCells = kotlin.math.sqrt(distSq.toDouble()).toFloat()
+            val cellElevation = bareEarth[index] + canopySpikes[index] * vegFactor
+            val cellSlope = (cellElevation - eyeElevation) / distanceCells
+
+            if (cellSlope >= targetSlope) return false
         }
-        return targetAngle > maxBlockingAngle
+        return true
     }
 }

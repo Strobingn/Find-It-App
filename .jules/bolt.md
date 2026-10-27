@@ -1,3 +1,7 @@
 ## 2025-02-14 - HuntZoneClusterer group aggregation allocations
 **Learning:** Using functional Kotlin idioms (`members.map { ... }.average()`, `groupBy`, `maxWith`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`) for each cluster. Replacing these with single-pass primitive arrays (`DoubleArray`, `BooleanArray`) eliminates thousands of allocations in dense target sets.
 **Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations.
+
+## 2025-05-20 - Line-of-sight ray marching short-circuiting & square distance filtering
+**Learning:** Line-of-sight analysis (`isLineOfSightClear`) previously accumulated slope angles along the entire ray to find the maximum blocking angle before returning a boolean, and called `Math.hypot` on every step. Short-circuiting immediately when `cellSlope >= targetSlope`, tracking `prevCol`/`prevRow` to skip duplicate cell steps, and using precalculated `distSq` without `hypot` drastically reduces ray-marching time and redundant lookups on grid rasters.
+**Action:** In ray-marching line-of-sight algorithms, short-circuit on the first blocking collision, precalculate step inverses, filter using distance squared, and skip redundant cell lookups during discrete grid traversal.
