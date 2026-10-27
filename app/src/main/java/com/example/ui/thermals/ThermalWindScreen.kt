@@ -1,6 +1,8 @@
 package com.example.ui.thermals
 
 import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -57,6 +59,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -65,11 +68,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.thermals.GroundCover
 import com.example.thermals.ManualReading
+import com.example.thermals.QuarterWind
 import com.example.thermals.SiteTerrain
 import com.example.thermals.TerrainSetting
 import com.example.thermals.ThermalForecast
@@ -141,6 +146,19 @@ fun ThermalWindScreen(
         )
     }
 
+    // The NWS cross-check alert needs the runtime notification permission on Android 13+.
+    val context = LocalContext.current
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -186,7 +204,14 @@ fun ThermalWindScreen(
                 selectedHour = state.selectedHour,
                 onSelectHour = viewModel::selectHour,
             )
-            forecast.hour(state.selectedHour)?.let { HourSection(it) }
+            forecast.hour(state.selectedHour)?.let {
+                HourSection(
+                    hour = it,
+                    quarters = state.quarterHourly.filter { q ->
+                        q.date == state.selectedDay?.date && q.hour == state.selectedHour
+                    },
+                )
+            }
             SummarySection(forecast)
             AiSection(state = state, onPlan = { viewModel.askAi(null) }, onOpenChat = { openSheet = ThermalSheet.AI.name })
         }
@@ -680,7 +705,7 @@ private fun Legend() {
 }
 
 @Composable
-private fun HourSection(hour: ThermalHour) {
+private fun HourSection(hour: ThermalHour, quarters: List<QuarterWind> = emptyList()) {
     IosSection(
         header = "${ThermalWindEngine.formatHour(hour.hour.toDouble())} · %.0f°F".format(hour.temperatureF),
         footer = ThermalWindEngine.adviceFor(hour),
@@ -702,6 +727,15 @@ private fun HourSection(hour: ThermalHour) {
                 hour.gustMph?.let { StatLine("Gusts in cover", "%.1f mph".format(it)) }
                 StatLine("Scent", "%.1f mph → %s".format(hour.scentSpeedMph, ThermalWindEngine.compass(hour.scentTowardDegrees)), emphasize = true)
                 StatLine("Confidence", "%d%%".format((hour.confidence * 100).roundToInt()))
+                if (quarters.isNotEmpty()) {
+                    Text(
+                        "15-min HRRR: " + quarters.take(4).joinToString("  ") { q ->
+                            "%d:%02d %.0f→%s".format(q.hour, q.minute, q.windSpeedMph, ThermalWindEngine.compass(q.windFromDegrees + 180.0))
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
