@@ -43,7 +43,15 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
      * Reads the terrain around ([lat], [lon]), shows on-device picks right away, then replaces them
      * with the AI's picks when (and if) a cloud provider answers.
      */
-    fun find(lat: Double, lon: Double, inputs: ThermalInputs?, forecast: ThermalForecast?, locationLabel: String, dateLabel: String) {
+    fun find(
+        lat: Double,
+        lon: Double,
+        inputs: ThermalInputs?,
+        forecast: ThermalForecast?,
+        locationLabel: String,
+        dateLabel: String,
+        siteDem: SiteDem? = null,
+    ) {
         job?.cancel()
         job = viewModelScope.launch {
             _state.update {
@@ -53,8 +61,11 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
             val obstaclesJob = async { service.fetchObstacles(lat, lon) }
             val candidates: List<StandCandidate>
             val obstacles: MappedObstacles
+            val elevationSource: String
             try {
-                val grid = service.fetchGrid(lat, lon)
+                val fetched = service.fetchGrid(lat, lon, siteDem)
+                val grid = fetched.grid
+                elevationSource = fetched.sourceLabel
                 _state.update { it.copy(grid = grid) }
                 // Roads/houses are best-effort: don't let a slow Overpass hold up the picks.
                 obstacles = withTimeoutOrNull(OBSTACLE_WAIT_MS) { obstaclesJob.await() } ?: run {
@@ -82,10 +93,15 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                 it.copy(
                     candidates = candidates,
                     picks = local,
-                    source = "On-device",
+                    source = "On-device · $elevationSource",
                     stage = if (aiAvailable) "Asking AI to pick the best spots…" else null,
                     running = aiAvailable,
-                    error = if (candidates.isEmpty()) "No stand-worthy terrain found here — try a hillier spot." else null,
+                    error = when {
+                        candidates.isEmpty() -> "No stand-worthy terrain found here — try a hillier spot."
+                        local.none { it.kind == StandPick.Kind.STAND } ->
+                            "Terrain is here, but scent blows toward the deer. Not recommending a stand in this wind."
+                        else -> null
+                    },
                 )
             }
             if (!aiAvailable) {

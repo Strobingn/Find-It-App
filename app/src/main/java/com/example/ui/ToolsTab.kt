@@ -359,7 +359,15 @@ fun ToolsTab(
             val now = Calendar.getInstance()
             val offsetMinutes = TimeZone.getDefault().getOffset(now.timeInMillis) / 60_000
             Triple(
-                DaylightPlanner.compute(lat, lon, now.get(Calendar.DAY_OF_YEAR)),
+                DaylightPlanner.compute(
+                    lat,
+                    lon,
+                    DaylightPlanner.solarDayOfYear(
+                        now.get(Calendar.YEAR),
+                        now.get(Calendar.MONTH) + 1,
+                        now.get(Calendar.DAY_OF_MONTH),
+                    ),
+                ),
                 offsetMinutes,
                 metadata.bounds != null,
             )

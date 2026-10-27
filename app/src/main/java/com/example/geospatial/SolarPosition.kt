@@ -23,6 +23,7 @@ data class SunPosition(
 object SolarPosition {
 
     fun calculate(latitudeDegrees: Double, dayOfYear: Int, hourLocalSolar: Float): SunPosition {
+        // Non-leap solar index: day 60 is Mar 1. Do not pass a leap-year ordinal (Mar 1 = 61).
         val clampedDay = dayOfYear.coerceIn(1, 365)
         val declination = Math.toRadians(
             23.44 * sin(Math.toRadians(360.0 / 365.0 * (284 + clampedDay))),

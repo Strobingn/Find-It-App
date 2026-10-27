@@ -60,8 +60,20 @@ class DaylightPlannerTest {
 
     @Test
     fun `dayOfYear handles leap years`() {
-        assertEquals(60, DaylightPlanner.dayOfYear(2026, 3, 1) - 1 + 1) // non-leap: Feb 28
+        assertEquals(60, DaylightPlanner.dayOfYear(2026, 3, 1)) // non-leap Mar 1
         assertEquals(60, DaylightPlanner.dayOfYear(2024, 2, 29))
+        assertEquals(61, DaylightPlanner.dayOfYear(2024, 3, 1))
         assertEquals(172, DaylightPlanner.dayOfYear(2026, 6, 21))
+    }
+
+    @Test
+    fun `solar day maps leap March 1 onto the non-leap formula`() {
+        assertEquals(60, DaylightPlanner.solarDayOfYear(2024, 3, 1))
+        assertEquals(DaylightPlanner.solarDayOfYear(2023, 3, 1), DaylightPlanner.solarDayOfYear(2024, 3, 1))
+        assertEquals(59, DaylightPlanner.solarDayOfYear(2024, 2, 29))
+        assertEquals(365, DaylightPlanner.solarDayOfYear(2024, 12, 31))
+        val leap = DaylightPlanner.compute(siteLat, siteLon, DaylightPlanner.solarDayOfYear(2024, 3, 1))
+        val common = DaylightPlanner.compute(siteLat, siteLon, DaylightPlanner.solarDayOfYear(2023, 3, 1))
+        assertEquals(common.solarNoonUtcMinutes, leap.solarNoonUtcMinutes, 0.05f)
     }
 }

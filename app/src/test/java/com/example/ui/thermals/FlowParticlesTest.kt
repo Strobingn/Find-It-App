@@ -78,4 +78,15 @@ class FlowParticlesTest {
         assertEquals(90.0, terrain.uphillBearingDegrees!!, 3.0)
         assertNull(g.elevationAt(43.0, -75.5)) // well outside the square
     }
+
+    @Test
+    fun terrainNearestStaysOnThePinAndIgnoresAPannedMap() {
+        val ridge = SiteTerrain(TerrainSetting.RIDGE, null, 8.0)
+        val cells = arrayOfNulls<GroundCell>(2)
+        cells[0] = GroundCell(0f, 0f, 0f, -1f, 1f, 0f, flat, 42.0, -75.0)
+        cells[1] = GroundCell(10f, 0f, 0f, -1f, 1f, 0f, ridge, 42.0, -75.0 + 100.0 / 111_320.0)
+        val g = GroundGrid(2, 1, 20f, 10f, cells)
+        assertEquals(TerrainSetting.FLAT, g.terrainNearest(42.0, -75.0)!!.setting)
+        assertNull(g.terrainNearest(42.05, -75.0))
+    }
 }
