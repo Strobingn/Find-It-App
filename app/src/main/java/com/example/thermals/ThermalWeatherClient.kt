@@ -22,7 +22,10 @@ data class ThermalWeatherDay(
 
 /**
  * Free, key-less weather and terrain for the thermal tab:
- *  - Open-Meteo forecast (hourly temperature °F, 10 m wind mph + direction, cloud cover).
+ *  - Open-Meteo forecast. The first ~48 h come from NOAA's HRRR CONUS model — 3 km grid,
+ *    refreshed every hour, the highest-resolution operational forecast over the continental US —
+ *    laid over the multi-model best-match blend that covers the full range. Hourly temperature
+ *    °F, 10 m wind mph + direction and cloud cover.
  *  - Open-Meteo elevation (Copernicus 90 m DEM) sampled around the stand to estimate slope,
  *    the uphill direction and whether the spot sits in a draw/valley or on a ridge.
  */
@@ -34,17 +37,26 @@ class ThermalWeatherClient(
 
     suspend fun fetchForecast(latitude: Double, longitude: Double, days: Int = 3): List<ThermalWeatherDay> =
         withContext(Dispatchers.IO) {
-            val url = String.format(
-                Locale.US,
-                "%s?latitude=%.5f&longitude=%.5f&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover" +
-                    "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=%d",
-                forecastEndpoint,
-                latitude,
-                longitude,
-                days.coerceIn(1, 7),
-            )
-            parseForecast(get(url))
+            // NOAA's HRRR (3 km grid, refreshed every hour) only reaches ~48 h out. Fetch it for
+            // the near window and lay it over the multi-model blend, which covers the full range —
+            // so hour-by-hour detail is the highest available at every lead time.
+            val daysWanted = days.coerceIn(1, 7)
+            val blend = parseForecast(get(url(latitude, longitude, daysWanted, model = null)))
+            val hrrr = runCatching { parseForecast(get(url(latitude, longitude, 2, model = HRRR_MODEL))) }.getOrNull()
+            mergeHrrr(blend, hrrr)
         }
+
+    private fun url(latitude: Double, longitude: Double, days: Int, model: String?): String = String.format(
+        Locale.US,
+        "%s?latitude=%.5f&longitude=%.5f" +
+            "&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover" +
+            (model?.let { "&models=$it" } ?: "") +
+            "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=%d",
+        forecastEndpoint,
+        latitude,
+        longitude,
+        days,
+    )
 
     suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
         val samples = terrainSamplePoints(latitude, longitude)
@@ -77,6 +89,22 @@ class ThermalWeatherClient(
     companion object {
         const val FORECAST_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
         const val ELEVATION_ENDPOINT = "https://api.open-meteo.com/v1/elevation"
+
+        /** NOAA High-Resolution Rapid Refresh, continental US, as exposed by Open-Meteo. */
+        private const val HRRR_MODEL = "ncep_hrrr_conus"
+
+        /** Overwrites blend hours with HRRR hours for the same local date/hour; keeps blend-only days. */
+        private fun mergeHrrr(blend: List<ThermalWeatherDay>, hrrr: List<ThermalWeatherDay>?): List<ThermalWeatherDay> {
+            if (hrrr == null) return blend
+            val hrrrHours = mutableMapOf<Pair<String, Int>, HourlyWeather>()
+            hrrr.forEach { day -> day.hourly.forEach { hrrrHours[day.date to it.hour] = it } }
+            if (hrrrHours.isEmpty()) return blend
+            return blend.map { day ->
+                day.copy(
+                    hourly = day.hourly.map { hour -> hrrrHours[day.date to hour.hour] ?: hour },
+                )
+            }
+        }
 
         /** Inner ring (slope) and outer ring (valley vs ridge) radii in meters. */
         const val INNER_RING_METERS = 150.0
