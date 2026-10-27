@@ -139,10 +139,10 @@ private fun AnalysisContent(
         }
         if (isComplete && text.isNotBlank()) {
             IconButton(onClick = { onPinFinding(text) }) {
-                Icon(Icons.Default.PushPin, contentDescription = "Pin finding")
+                Icon(Icons.Default.PushPin, contentDescription = "Pin finding to target list")
             }
             IconButton(onClick = { clipboard.setText(AnnotatedString(text)) }) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "Copy")
+                Icon(Icons.Default.ContentCopy, contentDescription = "Copy analysis text")
             }
         }
     }
