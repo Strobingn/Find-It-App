@@ -13,6 +13,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,7 +37,7 @@ import com.example.ui.ios.IosSection
 import kotlinx.coroutines.delay
 
 /**
- * "Offline AI" in AI settings: pick Gemma 4 E2B or E4B, download it over Wi-Fi, see progress,
+ * "Offline AI" in AI settings: pick Gemma 4 E2B or E4B, download it (Wi-Fi or cell), see progress,
  * cancel or delete. Once downloaded it is the last fallback after the cloud providers, so AI
  * answers keep coming with no signal. [onChanged] fires when availability changes.
  */
@@ -47,6 +48,7 @@ fun OfflineAiSection(onChanged: () -> Unit) {
     var tick by remember { mutableIntStateOf(0) }
     var chosen by remember { mutableStateOf(store.chosenModel()) }
     var message by remember { mutableStateOf<String?>(null) }
+    var wifiOnly by remember { mutableStateOf(store.wifiOnly) }
     val states = remember(tick) { OnDeviceModel.entries.associateWith { store.state(it) } }
     val active = remember(tick) { store.activeModel() }
 
@@ -70,7 +72,8 @@ fun OfflineAiSection(onChanged: () -> Unit) {
         header = "Offline AI (on this phone)",
         footer = buildString {
             append("Runs Gemma 4 on your phone with no signal. Used automatically when Grok, OpenAI and Gemini can't be reached. ")
-            append("Downloads on Wi-Fi only (${OnDeviceModelStore.formatBytes(store.freeBytes())} free).")
+            append(if (wifiOnly) "Downloads on Wi-Fi only" else "Downloads on Wi-Fi or cell data — it uses ${OnDeviceModel.GEMMA4_E2B.sizeLabel}–${OnDeviceModel.GEMMA4_E4B.sizeLabel} of data")
+            append(" (${OnDeviceModelStore.formatBytes(store.freeBytes())} free).")
             OnDeviceGemma.loadedBackend?.let { append(" Loaded on $it.") }
         },
     ) {
@@ -100,6 +103,25 @@ fun OfflineAiSection(onChanged: () -> Unit) {
                     store.delete(model)
                     tick++
                 },
+            )
+        }
+        IosDivider(startInset = 16.dp)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Wi-Fi only", style = MaterialTheme.typography.bodyLarge)
+                Text("Off: download over 5G / cell data too", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(
+                checked = wifiOnly,
+                onCheckedChange = {
+                    wifiOnly = it
+                    store.changeWifiOnly(it)
+                    tick++
+                },
+                modifier = Modifier.testTag("offline_wifi_only"),
             )
         }
         message?.let {

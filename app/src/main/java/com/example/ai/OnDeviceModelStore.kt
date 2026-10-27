@@ -46,7 +46,7 @@ sealed interface ModelDownloadState {
 
 /**
  * Downloads, tracks and deletes the offline Gemma models. Downloads go through Android's
- * DownloadManager: Wi-Fi only, resumes after drops and app restarts, shows a system notification.
+ * DownloadManager: Wi-Fi or cell (your choice), resumes after drops and app restarts, shows a system notification.
  * Files live in the app's own external files folder (no storage permission, removed on uninstall).
  */
 class OnDeviceModelStore(context: Context) {
@@ -80,7 +80,29 @@ class OnDeviceModelStore(context: Context) {
     /** Free space where the models are stored. */
     fun freeBytes(): Long = runCatching { StatFs(dir.path).availableBytes }.getOrDefault(Long.MAX_VALUE)
 
-    /** Starts (or keeps) a Wi-Fi-only download. Returns an error message instead when it can't start. */
+    /** Download only on Wi-Fi (off by default: 5G downloads are fine). */
+    var wifiOnly: Boolean
+        get() = prefs.getBoolean(KEY_WIFI_ONLY, false)
+        set(value) = prefs.edit().putBoolean(KEY_WIFI_ONLY, value).apply()
+
+    /**
+     * Saves a new [wifiOnly] choice. A download sitting there waiting for Wi-Fi is restarted so it can use cell data
+     * now (DownloadManager can't change a queued request's networks). A download already running keeps going.
+     */
+    fun changeWifiOnly(value: Boolean) {
+        if (value == wifiOnly) return
+        wifiOnly = value
+        if (value) return
+        OnDeviceModel.entries.forEach { m ->
+            val st = state(m)
+            if (st is ModelDownloadState.Downloading && st.waitingForWifi) {
+                cancelDownload(m)
+                startDownload(m)
+            }
+        }
+    }
+
+    /** Starts (or keeps) a download. Returns an error message instead when it can't start. */
     fun startDownload(model: OnDeviceModel): String? {
         if (isDownloaded(model)) return null
         if (state(model) is ModelDownloadState.Downloading) return null
@@ -93,8 +115,15 @@ class OnDeviceModelStore(context: Context) {
             .setTitle("Find It offline AI")
             .setDescription("${model.label} · ${model.sizeLabel}")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI)
-            .setAllowedOverMetered(false)
+            .apply {
+                if (wifiOnly) {
+                    setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI)
+                    setAllowedOverMetered(false)
+                } else {
+                    setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI or DownloadManager.Request.NETWORK_MOBILE)
+                    setAllowedOverMetered(true)
+                }
+            }
             .setAllowedOverRoaming(false)
             .setDestinationInExternalFilesDir(appContext, null, "$MODELS_DIR/${partFileName(model)}")
         val id = runCatching { downloads.enqueue(request) }.getOrElse { return "Couldn't start the download: ${it.localizedMessage}" }
@@ -172,6 +201,7 @@ class OnDeviceModelStore(context: Context) {
 
         private const val PREFS = "offline_ai"
         private const val KEY_ACTIVE = "active_model"
+        private const val KEY_WIFI_ONLY = "wifi_only"
         private const val MODELS_DIR = "models"
         private const val SPACE_MARGIN_BYTES = 300L * 1024 * 1024
 
