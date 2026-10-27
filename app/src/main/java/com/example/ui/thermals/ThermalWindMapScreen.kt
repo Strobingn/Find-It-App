@@ -60,6 +60,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.BuildConfig
 import com.example.geospatial.GeoSpatialLibrary
 import com.example.thermals.SiteTerrain
+import com.example.thermals.QuarterWind
 import com.example.thermals.ThermalHour
 import com.example.thermals.ThermalMapGeometry
 import com.example.thermals.ThermalPhase
@@ -404,15 +405,15 @@ fun ThermalWindMapScreen(
                     )
                 }
             } else {
-                standFlow?.let { HudCard(it, hour, mode) }
-            }
-            if (reliefVisible && reliefLoading > 0) {
-                GlassCard {
-                    Text(
-                        "Loading 1 m LiDAR relief…",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                standFlow?.let {
+                    HudCard(
+                        flow = it,
+                        hour = hour,
+                        mode = mode,
+                        quarters = state.quarterHourly.filter { q ->
+                            q.date == state.selectedDay?.date && q.hour == (hour.toInt().coerceIn(0, 23))
+                        },
+                        nwsBadge = state.nwsBadge,
                     )
                 }
             }
@@ -560,7 +561,7 @@ private fun RoundGlassButton(onClick: () -> Unit, testTag: String, content: @Com
 }
 
 @Composable
-private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode) {
+private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode, quarters: List<QuarterWind>, nwsBadge: String?) {
     GlassCard(Modifier.testTag("wind_map_hud")) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -591,6 +592,30 @@ private fun HudCard(flow: ThermalHour, hour: Float, mode: ParticleMode) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                flow.gustMph?.let {
+                    Text(
+                        "Gusts %.1f mph in cover".format(it),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (quarters.isNotEmpty()) {
+                    Text(
+                        "15-min HRRR: " + quarters.take(4).joinToString("  ") { q ->
+                            "%d:%02d %.0f→%s".format(q.hour, q.minute, q.windSpeedMph, ThermalWindEngine.compass(q.windFromDegrees + 180.0))
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                nwsBadge?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
             ScentDial(flow, Modifier.size(56.dp))
         }
