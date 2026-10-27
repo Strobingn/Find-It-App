@@ -1,5 +1,6 @@
 package com.example.analysis
 
+import com.example.geospatial.MeasurementFormat
 import kotlin.math.roundToInt
 
 /**
@@ -20,7 +21,13 @@ data class DigDepthEstimate(
     val maxCm: Int,
     val basis: String,
 ) {
-    val label: String get() = "$minCm–$maxCm cm"
+    /**
+     * Read out in inches like every other length the app shows. The band itself stays in
+     * centimetres because that is the unit its thresholds were tuned in; only the display
+     * converts, as [MeasurementFormat] asks.
+     */
+    val label: String get() =
+        "${MeasurementFormat.inchesValue(minCm / 100.0)}–${MeasurementFormat.inches(maxCm / 100.0)}"
 }
 
 object DigDepthEstimator {
@@ -41,12 +48,12 @@ object DigDepthEstimator {
             MetalDetectingTargetType.CELLAR_HOLE -> DigDepthEstimate(
                 minCm = (bowlCm / 3).coerceAtLeast(5),
                 maxCm = (bowlCm + 45).coerceAtLeast(40),
-                basis = "measured bowl ${bowlCm} cm + collapsed-fill allowance",
+                basis = "measured bowl ${MeasurementFormat.inches(bowlCm / 100.0)} + collapsed-fill allowance",
             )
             MetalDetectingTargetType.TRASH_PIT -> DigDepthEstimate(
                 minCm = (bowlCm / 2).coerceAtLeast(5),
                 maxCm = (bowlCm + 30).coerceAtLeast(35),
-                basis = "compaction around the measured ${bowlCm} cm pit",
+                basis = "compaction around the measured ${MeasurementFormat.inches(bowlCm / 100.0)} pit",
             )
             MetalDetectingTargetType.FOUNDATION, MetalDetectingTargetType.OLD_HOMESITE ->
                 DigDepthEstimate(

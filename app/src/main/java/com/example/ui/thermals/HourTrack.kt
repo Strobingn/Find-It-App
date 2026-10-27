@@ -68,7 +68,7 @@ internal fun HourTrack(
                 fun toHour(x: Float): Float {
                     val usable = (size.width - 2 * insetPx).coerceAtLeast(1f)
                     val f = ((x - insetPx) / usable).coerceIn(0f, 1f)
-                    return first + f * (last - first)
+                    return first + f * (last - first).coerceAtLeast(0f)
                 }
                 awaitEachGesture {
                     val down = awaitFirstDown()
@@ -88,7 +88,9 @@ internal fun HourTrack(
         val usable = size.width - 2 * insetPx
         val trackH = 6.dp.toPx()
         val trackY = 12.dp.toPx()
-        fun xOf(h: Float) = insetPx + (h - first) / (last - first) * usable
+        // A collapsed span would divide by zero and hand NaN to every draw call below.
+        val span = (last - first).takeIf { it > 0f } ?: 1f
+        fun xOf(h: Float) = insetPx + (h - first) / span * usable
 
         // Background, then phase tint hour by hour.
         drawRoundRect(emptyTrack, Offset(insetPx, trackY - trackH / 2), Size(usable, trackH), CornerRadius(trackH / 2))
@@ -114,7 +116,7 @@ internal fun HourTrack(
         drawCircle(thumbRing, radius = 10.dp.toPx(), center = Offset(tx, trackY))
         drawCircle(Color.White, radius = 8.dp.toPx(), center = Offset(tx, trackY))
         // Labels centred under their hours.
-        labels.forEach { (h, text) ->
+        labels.filter { (h, _) -> h in first..last }.forEach { (h, text) ->
             val layout = measurer.measure(text, labelStyle)
             val lx = (xOf(h) - layout.size.width / 2f).coerceIn(0f, size.width - layout.size.width)
             drawText(layout, topLeft = Offset(lx, trackY + 10.dp.toPx()))

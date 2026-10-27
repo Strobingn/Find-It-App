@@ -40,7 +40,8 @@ data class BasemapPlan(
     val cachedTiles: Int,
     val cachedBytes: Long,
 ) {
-    val tileCount: Int get() = range.tileCount
+    // A plan is always bounded by maxTiles, so the clamp is belt-and-braces for the Long count.
+    val tileCount: Int get() = range.tileCount.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     val missingTiles: Int get() = (tileCount - cachedTiles).coerceAtLeast(0)
     val estimatedDownloadBytes: Long get() = missingTiles * ESTIMATED_TILE_BYTES
 }
@@ -134,7 +135,7 @@ class BasemapTileRepository(context: Context) {
             bitmap = croppedBitmap,
             blockedByServer = anyBlocked && !anyTileLoaded,
             loadedTiles = loadedTiles,
-            expectedTiles = range.tileCount,
+            expectedTiles = range.tileCount.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
         )
     }
 

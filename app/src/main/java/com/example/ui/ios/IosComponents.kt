@@ -136,7 +136,12 @@ fun IosTabBar(
                         lineHeight = 12.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1,
-                        overflow = TextOverflow.Clip,
+                        // Ellipsis, not Clip: a label that outgrows its slot should read as
+                        // shortened rather than cut through a glyph. Keep the bar within
+                        // AppDestination.TAB_BAR_LIMIT and it never comes up.
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 2.dp),
                     )
                 }
             }

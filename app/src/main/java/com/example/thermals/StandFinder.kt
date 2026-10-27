@@ -218,7 +218,7 @@ object StandFinder {
             )
         }.sortedByDescending { it.bestScore }
 
-        // Keep spots at least ~250 m apart so the picks spread over the property.
+        // Keep spots MIN_PICK_SPACING_M apart so the picks spread over the property.
         val kept = mutableListOf<StandCandidate>()
         for (cand in scored) {
             if (kept.size >= maxCandidates) break

@@ -11,7 +11,12 @@ object SlippyTileMath {
     private const val MAX_LATITUDE = 85.05112878
 
     data class TileRange(val zoom: Int, val minX: Int, val maxX: Int, val minY: Int, val maxY: Int) {
-        val tileCount: Int get() = (maxX - minX + 1) * (maxY - minY + 1)
+        /**
+         * Long on purpose: a wide bounding box at zoom 19 spans ~5·10⁵ tiles per axis, and the
+         * Int product wrapped — which let [chooseZoomForBounds] read a world-sized area as "few
+         * enough tiles" and pick the highest zoom instead of the lowest.
+         */
+        val tileCount: Long get() = (maxX - minX + 1).toLong() * (maxY - minY + 1).toLong()
     }
 
     /** Continuous (non-floored) tile-space X — needed to crop a stitched tile image to exact bounds. */

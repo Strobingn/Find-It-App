@@ -125,18 +125,22 @@ class ThermalWeatherClient(
             val slopeDeg = Math.toDegrees(kotlin.math.atan(rise))
             val uphill = if (rise < 1e-4) null else ThermalWindEngine.normalize(Math.toDegrees(atan2(gEast, gNorth)))
 
+            // Mean height of the ring minus the centre. The ring is symmetric, so the slope's own
+            // tilt cancels out of the mean and what is left is pure curvature: positive when the
+            // ground rises all around you (a valley or draw), negative when it falls away (a
+            // ridge or knob), ~0 on a plain hillside however steep.
+            //
+            // An earlier version subtracted the fitted plane from each outer sample first and
+            // averaged that instead. Over eight evenly spaced bearings Σsin b = Σcos b = 0, so
+            // that subtraction always averaged to zero and the result was identical to -relief;
+            // the extra step only hid what the test was.
             val outerMean = outer.average()
             val relief = center - outerMean
-            // Remove the planar component from the outer ring before judging concave vs convex.
-            val planarResidual = outer.mapIndexed { i, z ->
-                val b = Math.toRadians(i * 45.0)
-                z - (center + OUTER_RING_METERS * (gEast * kotlin.math.sin(b) + gNorth * cos(b)))
-            }.average()
 
             val setting = when {
                 slopeDeg < 2.0 && kotlin.math.abs(relief) < 4.0 -> TerrainSetting.FLAT
-                planarResidual > 6.0 -> TerrainSetting.VALLEY // ground rises around you faster than the slope alone
-                planarResidual < -6.0 && relief > 3.0 -> TerrainSetting.RIDGE
+                relief < -6.0 -> TerrainSetting.VALLEY // ground rises around you faster than the slope alone
+                relief > 6.0 -> TerrainSetting.RIDGE
                 else -> TerrainSetting.SLOPE
             }
             return SiteTerrain(

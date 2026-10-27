@@ -46,6 +46,13 @@ object IosDark {
     val GroupedBackground = Color(0xFF000000)
     val Cell = Color(0xFF1C1C1E)
     val RaisedCell = Color(0xFF2C2C2E)
+    /**
+     * A filled area *inside* a cell (chat bubble, unselected option tile, image backdrop). One
+     * step off [Cell] on purpose: Material's contentColorFor() matches a background by colour
+     * value and tests surfaceVariant before surfaceContainer, so sharing [Cell] between the two
+     * slots made every surfaceContainer card inherit onSurfaceVariant and render grey titles.
+     */
+    val Fill = Color(0xFF242426)
     val Separator = Color(0xFF38383A)
     val Label = Color(0xFFFFFFFF)
     val SecondaryLabel = Color(0xFF98989F)
@@ -64,6 +71,8 @@ object IosLight {
     val GroupedBackground = Color(0xFFF2F2F7)
     val Cell = Color(0xFFFFFFFF)
     val RaisedCell = Color(0xFFF2F2F7)
+    /** Light-mode counterpart of [IosDark.Fill]; see that token for why it can't equal [Cell]. */
+    val Fill = Color(0xFFEBEBF0)
     val Separator = Color(0xFFC6C6C8)
     val Label = Color(0xFF000000)
     val SecondaryLabel = Color(0xFF8A8A8E)

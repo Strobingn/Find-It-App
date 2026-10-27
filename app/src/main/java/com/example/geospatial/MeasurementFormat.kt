@@ -65,6 +65,20 @@ object MeasurementFormat {
     fun feetValue(meters: Float, decimals: Int = 0): String =
         String.format(Locale.US, "%.${decimals}f", metersToFeet(meters))
 
+    /**
+     * Always inches, whatever the magnitude. For a span where both ends must share one unit —
+     * a dig-depth band, say — so the reader isn't comparing inches at one end with feet at the
+     * other the way [length] would.
+     */
+    fun inches(meters: Double, decimals: Int = 0): String {
+        if (!meters.isFinite()) return "—"
+        return format(metersToFeet(meters) * INCHES_PER_FOOT, decimals, "in")
+    }
+
+    /** Bare inches value with no unit suffix, for a range that prints the unit once. */
+    fun inchesValue(meters: Double, decimals: Int = 0): String =
+        String.format(Locale.US, "%.${decimals}f", metersToFeet(meters) * INCHES_PER_FOOT)
+
     /** Converts a per-meter rate (such as curvature) into a per-foot rate. */
     fun perFoot(perMeter: Double, decimals: Int = 4): String {
         if (!perMeter.isFinite()) return "—"

@@ -147,9 +147,6 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-/** Kept for layout unit tests; the iOS-style tab bar always shows small labels. */
-internal fun usesCompactBottomNavigation(smallestScreenWidthDp: Int): Boolean = smallestScreenWidthDp < 600
-
 /**
  * iOS-style shell: slim tab bar of primary destinations + secondary screens opened from Home rows.
  * Each major workflow has its own tab or card surface.
@@ -174,7 +171,7 @@ fun MainScreen(viewModel: HillshadeViewModel, modifier: Modifier = Modifier) {
     Scaffold(
         modifier = modifier.fillMaxSize().testTag("main_scaffold"),
         topBar = {
-            if (!hideChrome && current != AppDestination.TERRAIN && current != AppDestination.HOME && current != AppDestination.WIND_MAP && current != AppDestination.STANDS) {
+            if (!hideChrome && !current.hidesNavBar) {
                 IosNavBar(
                     title = current.title,
                     backLabel = if (isPrimary) null else AppDestination.HOME.label,

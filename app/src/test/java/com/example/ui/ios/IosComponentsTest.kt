@@ -36,7 +36,11 @@ class IosComponentsTest {
 
     @Test
     fun tabBarIsSlimAndFitsEveryPrimaryTabOnASmallPhone() {
-        val tabs = AppDestination.primaryDestinations.map { IosTabItem(it.name.lowercase(), it.label, it.icon) }
+        val destinations = AppDestination.primaryDestinations
+        val tabs = destinations.map { IosTabItem(it.name.lowercase(), it.label, it.icon) }
+        // A real second tab rather than a hardcoded name, so moving a destination out of the
+        // bar can't leave this test clicking a tag that no longer exists.
+        val other = tabs[1].key
         rule.setContent {
             MyApplicationTheme(darkTheme = true) {
                 var selected by remember { mutableStateOf("home") }
@@ -46,9 +50,22 @@ class IosComponentsTest {
         // 49dp bar + hairline; the old Material bar was 80dp.
         val height = rule.onNodeWithTag("nav_home").getUnclippedBoundsInRoot().height
         assertTrue("tab height $height should be ≤ 50dp", height <= 50.dp)
+
+        // The half this test only claimed to cover: each tab needs room for a 10sp word. The bar
+        // had grown to eight tabs, which leaves 45dp per slot on this 360dp phone — the longest
+        // labels ("Thermals", "Terrain") ran the full width of their slot with no gap to the
+        // next one, and overflow was Clip, so a longer label would have been cut mid-glyph.
+        val tabBounds = rule.onNodeWithTag("nav_home").getUnclippedBoundsInRoot()
+        val tabWidth = tabBounds.right - tabBounds.left
+        assertTrue(
+            "${destinations.size} tabs leave $tabWidth each on a 360dp phone; " +
+                "under $MIN_TAB_WIDTH the labels clip",
+            tabWidth >= MIN_TAB_WIDTH,
+        )
+
         rule.onNodeWithTag("nav_home").assertIsSelected()
-        rule.onNodeWithTag("nav_thermals").performClick()
-        rule.onNodeWithTag("nav_thermals").assertIsSelected()
+        rule.onNodeWithTag("nav_$other").performClick()
+        rule.onNodeWithTag("nav_$other").assertIsSelected()
         rule.onNodeWithTag("nav_home").assertIsNotSelected()
         tabs.forEach { rule.onNodeWithText(it.label).assertExists() }
     }
@@ -97,5 +114,10 @@ class IosComponentsTest {
         }
         rule.onNodeWithText("SETUP").assertExists()
         rule.onNodeWithText("Not set").assertExists()
+    }
+
+    private companion object {
+        /** Narrowest slot that still fits the longest tab label at 10sp without clipping. */
+        val MIN_TAB_WIDTH = 64.dp
     }
 }

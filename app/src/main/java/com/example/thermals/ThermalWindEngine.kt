@@ -202,9 +202,16 @@ object ThermalWindEngine {
         } else {
             normalize(Math.toDegrees(atan2(east, north)))
         }
-        val share = if (thermalSpeed + groundWind <= 0.0) 0.0 else thermalSpeed / (thermalSpeed + groundWind)
+        // Both of these describe the scent vector above, so they count the thermal only where it
+        // actually pushes air sideways. On flat ground and ridge tops the thermal is vertical, it
+        // contributes nothing to the drift, and the prevailing wind sets the direction by itself.
+        val share = if (horizontalThermal + groundWind <= 0.0) {
+            0.0
+        } else {
+            horizontalThermal / (horizontalThermal + groundWind)
+        }
 
-        val windDominated = groundWind >= 5.0 && groundWind >= 2.5 * thermalSpeed
+        val windDominated = groundWind >= 5.0 && groundWind >= 2.5 * horizontalThermal
         val phase = when {
             windDominated -> ThermalPhase.WIND_DOMINATED
             tendency > SWITCH_BAND -> ThermalPhase.RISING

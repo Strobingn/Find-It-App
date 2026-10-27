@@ -103,20 +103,9 @@ fun HomeHubScreen(
     val updateController = rememberAppUpdateController(checkOnLaunch = false)
     var crashReport by remember { mutableStateOf(CrashLog.read(context)) }
 
-    val workspaceCards = listOf(
-        AppDestination.TERRAIN,
-        AppDestination.FIELD,
-        AppDestination.THERMALS,
-        AppDestination.WIND_MAP,
-        AppDestination.STANDS,
-        AppDestination.AI,
-        AppDestination.LIBRARY,
-        AppDestination.MAP,
-        AppDestination.MAPBOX,
-        AppDestination.LIDAR,
-        AppDestination.COMPARE,
-        AppDestination.TOOLS,
-    )
+    // Derived, not hand-listed: screens that aren't in the tab bar are reachable only from here,
+    // so a destination added to the enum must never be able to go missing from this list.
+    val workspaceCards = AppDestination.workspaceDestinations
 
     LazyColumn(
         modifier = Modifier

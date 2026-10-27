@@ -185,9 +185,13 @@ object GeoSpatialLibrary {
             if (degrees >= 0) "E" else "W"
         }
         val absolute = kotlin.math.abs(degrees)
-        val whole = absolute.toInt()
-        val minutes = ((absolute - whole) * 60.0).toInt()
-        val seconds = (absolute - whole - minutes / 60.0) * 3600.0
+        // Carry before formatting: rounding the remainder to one decimal can reach 60.0, which
+        // printed impossible coordinates like 43°11′60.0″N.
+        var totalTenths = Math.round(absolute * 36_000.0)
+        val seconds = (totalTenths % 600L) / 10.0
+        totalTenths /= 600L
+        val minutes = (totalTenths % 60L).toInt()
+        val whole = (totalTenths / 60L).toInt()
         return String.format(Locale.US, "%d°%02d′%04.1f″%s", whole, minutes, seconds, direction)
     }
 }

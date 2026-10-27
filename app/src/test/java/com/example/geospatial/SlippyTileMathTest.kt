@@ -31,6 +31,26 @@ class SlippyTileMathTest {
     }
 
     @Test
+    fun chooseZoomForBoundsStaysSaneForAWorldSizedBox() {
+        // The tile count per axis passes 500,000 around zoom 19, and the Int product of the two
+        // axes wrapped negative — so a world-sized box looked cheap and this picked maxZoom,
+        // which would have queued billions of tiles.
+        val world = GeoSpatialLibrary.GeographicBounds(minLat = -80.0, maxLat = 80.0, minLon = -179.0, maxLon = 179.0)
+        val zoom = SlippyTileMath.chooseZoomForBounds(world, maxTiles = 36, maxZoom = 19)
+
+        assertTrue("world bounds should fall back to a low zoom, got $zoom", zoom <= 3)
+        assertTrue(SlippyTileMath.boundsToTileRange(world, zoom).tileCount <= 36)
+    }
+
+    @Test
+    fun tileCountDoesNotOverflowAtHighZoom() {
+        val world = GeoSpatialLibrary.GeographicBounds(minLat = -80.0, maxLat = 80.0, minLon = -179.0, maxLon = 179.0)
+        val count = SlippyTileMath.boundsToTileRange(world, zoom = 19).tileCount
+
+        assertTrue("count should be a huge positive number, got $count", count > Int.MAX_VALUE.toLong())
+    }
+
+    @Test
     fun chooseZoomForBoundsRespectsTheTileBudget() {
         val bounds = GeoSpatialLibrary.GeographicBounds(minLat = 40.0, maxLat = 45.0, minLon = -125.0, maxLon = -120.0)
         val zoom = SlippyTileMath.chooseZoomForBounds(bounds, maxTiles = 36, maxZoom = 17)

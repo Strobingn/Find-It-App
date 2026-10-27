@@ -25,6 +25,17 @@ class DigDepthEstimatorTest {
     }
 
     @Test
+    fun `band reads out in inches, not centimetres`() {
+        // The app quotes every other length in US customary units; a 30 cm bowl plus the 45 cm
+        // fill allowance is a 10-75 cm band, which is 4-30 in.
+        val estimate = estimateAt(depressionMeters = 0.3f, type = MetalDetectingTargetType.CELLAR_HOLE)
+        assertEquals(10, estimate.minCm)
+        assertEquals(75, estimate.maxCm)
+        assertEquals("4–30 in", estimate.label)
+        assertTrue("basis should quote inches, got: ${estimate.basis}", estimate.basis.contains(" in"))
+    }
+
+    @Test
     fun `surface feature types return no estimate`() {
         assertNull(DigDepthEstimator.estimate(target(MetalDetectingTargetType.ROAD_TRAIL), layers(0.8f)))
         assertNull(DigDepthEstimator.estimate(target(MetalDetectingTargetType.STONE_WALL), layers(0.8f)))

@@ -52,4 +52,20 @@ class GeoSpatialLibraryTest {
         assertEquals(30f, grid.first, 0.01f)
         assertEquals(70f, grid.second, 0.01f)
     }
+
+    @Test
+    fun formatDmsNeverPrintsSixtySeconds() {
+        // 43.19999999° is 43°11'59.99996", which rounded to one decimal as "60.0" and printed
+        // 43°11'60.0"N. The carry has to happen before the number is formatted.
+        assertEquals("43\u00b012\u203200.0\u2033N", GeoSpatialLibrary.formatDms(43.19999999, isLatitude = true))
+        // Same carry, one level up: 59'59.98" rounds to a whole degree.
+        assertEquals("44\u00b000\u203200.0\u2033N", GeoSpatialLibrary.formatDms(43.99999999, isLatitude = true))
+    }
+
+    @Test
+    fun formatDmsSplitsDegreesMinutesSeconds() {
+        // 43° + 7'/60 + 30.0"/3600 = 43.125°
+        assertEquals("43\u00b007\u203230.0\u2033N", GeoSpatialLibrary.formatDms(43.125, isLatitude = true))
+        assertEquals("124\u00b024\u203231.2\u2033W", GeoSpatialLibrary.formatDms(-124.408667, isLatitude = false))
+    }
 }

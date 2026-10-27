@@ -34,6 +34,42 @@ class ThermalWindEngineTest {
     private fun angleDiff(a: Double, b: Double): Double = abs(((a - b + 540.0) % 360.0) - 180.0)
 
     @Test
+    fun flatGroundCreditsTheWindWithAllOfTheDrift() {
+        // A vertical thermal moves no scent sideways, so none of the drift is the thermal's and
+        // the wind sets the bearing on its own. thermalShare used to count the thermal's speed
+        // here even though it contributed nothing to the scent vector.
+        val wind = day(windMph = 6.0, windFrom = 315.0)
+        val flat = SiteTerrain(TerrainSetting.FLAT, uphillBearingDegrees = null, slopeDegrees = 0.0)
+        val noon = run(flat, wind).hour(12)!!
+
+        assertEquals("no horizontal thermal, no thermal share", 0.0, noon.thermalShare, 1e-9)
+        assertNull(noon.thermalTowardDegrees)
+        assertEquals("scent follows the wind alone", noon.windTowardDegrees, noon.scentTowardDegrees, 1e-9)
+        assertEquals(noon.groundWindMph, noon.scentSpeedMph, 1e-9)
+    }
+
+    @Test
+    fun ridgeTopAlsoLeavesTheDriftToTheWind() {
+        val wind = day(windMph = 6.0, windFrom = 315.0)
+        val ridge = SiteTerrain(TerrainSetting.RIDGE, uphillBearingDegrees = 0.0, slopeDegrees = 12.0)
+        val noon = run(ridge, wind).hour(12)!!
+
+        assertEquals(0.0, noon.thermalShare, 1e-9)
+        assertEquals(noon.windTowardDegrees, noon.scentTowardDegrees, 1e-9)
+    }
+
+    @Test
+    fun aHillsideStillSplitsTheDriftBetweenThermalAndWind() {
+        // The counterpart of the two above: where the thermal does push sideways it keeps its share.
+        val wind = day(windMph = 4.0, windFrom = 315.0)
+        val noon = run(slope(uphill = 0.0), wind).hour(12)!!
+
+        assertNotNull(noon.thermalTowardDegrees)
+        assertTrue("hillside thermal should own part of the drift", noon.thermalShare > 0.1)
+        assertTrue(noon.thermalShare < 1.0)
+    }
+
+    @Test
     fun coldDawnDrainsDownhillAndWarmNoonRisesUphill() {
         // Uphill is to the north → morning scent goes south (downhill), midday north (uphill).
         val forecast = run(slope(uphill = 0.0))
