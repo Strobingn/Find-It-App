@@ -1,6 +1,11 @@
 package com.example.thermals
 
 import android.app.Application
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.TerrainAiGateway
@@ -111,6 +116,8 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
 
     private var fetchJob: Job? = null
     private var aiJob: Job? = null
+    /** Last NWS-disagreement text already alerted for; null when NWS and HRRR agree. */
+    private var lastNwsBadge: String? = null
 
     init {
         recompute()
@@ -187,6 +194,9 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
             val quarters = if (days != null) client.fetchQuarterHourly(lat, lon) else null
             val nws = if (days != null) client.fetchNwsWind(lat, lon) else null
             val nwsBadge = if (days != null && !nws.isNullOrEmpty()) nwsDisagreement(days, nws) else null
+            // Alert once per new disagreement; resets to allow a fresh alert when models agree again.
+            if (nwsBadge != null && nwsBadge != lastNwsBadge) notifyNwsDisagreement(nwsBadge)
+            lastNwsBadge = nwsBadge
             _state.update { current ->
                 current.copy(
                     loading = false,
@@ -320,6 +330,37 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
 
     fun clearAi() = _state.update { it.copy(aiExchanges = emptyList(), aiError = null) }
 
+    /** Posts a one-shot heads-up that the NWS grid disagrees with the app forecast. */
+    private fun notifyNwsDisagreement(badge: String) {
+        val app = getApplication<Application>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            app.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val manager = app.getSystemService(NotificationManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            manager.getNotificationChannel(NWS_CHANNEL_ID) == null
+        ) {
+            manager.createNotificationChannel(
+                NotificationChannel(NWS_CHANNEL_ID, "Forecast cross-check", NotificationManager.IMPORTANCE_DEFAULT),
+            )
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(app, NWS_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(app)
+        }
+        val notification = builder
+            .setContentTitle("NWS disagrees with the app forecast")
+            .setContentText(badge)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setAutoCancel(true)
+            .build()
+        runCatching { manager.notify(NWS_NOTIFICATION_ID, notification) }
+    }
+
     private inline fun edit(crossinline change: ThermalUiState.() -> ThermalUiState) {
         _state.update { it.change() }
         recompute()
@@ -333,6 +374,8 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
 
     companion object {
         const val PLAN_TITLE = "Hunt plan"
+        private const val NWS_CHANNEL_ID = "forecast_cross_check"
+        private const val NWS_NOTIFICATION_ID = 4201
 
         /**
          * Flags hours where the NWS grid and the app forecast disagree materially:
