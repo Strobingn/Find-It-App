@@ -58,8 +58,45 @@ class ThermalWeatherClient(
                 WindModel.entries.joinToString(",") { it.id },
                 days.coerceIn(1, 7),
             )
-            parseForecast(get(url))
+            try {
+                parseForecast(getWithRetry(url))
+            } catch (e: IOException) {
+                // Open-Meteo's free tier is limited per IP address, and phones on cellular share one. NWS is key-less.
+                if (!isRateLimit(e)) throw e
+                runCatching { fetchNwsForecast(latitude, longitude) }.getOrElse { throw e }
+            }
         }
+
+    private fun isRateLimit(e: IOException): Boolean {
+        val m = e.message.orEmpty().lowercase(Locale.US)
+        return "limit" in m || "429" in m
+    }
+
+    /** One pause-and-retry when the per-minute limit is hit. */
+    private suspend fun getWithRetry(url: String): String = try {
+        get(url)
+    } catch (e: IOException) {
+        if (!isRateLimit(e)) throw e
+        kotlinx.coroutines.delay(4_000)
+        get(url)
+    }
+
+    /** US-only fallback: api.weather.gov gridpoint data (2.5 km NDFD), no key needed. */
+    private fun fetchNwsForecast(latitude: Double, longitude: Double): List<ThermalWeatherDay> {
+        val point = JSONObject(getNws(String.format(Locale.US, "https://api.weather.gov/points/%.4f,%.4f", latitude, longitude)))
+            .getJSONObject("properties")
+        val grid = getNws(point.getString("forecastGridData"))
+        return parseNwsGrid(grid, point.optString("timeZone", "UTC"))
+    }
+
+    private fun getNws(url: String): String {
+        val request = Request.Builder().url(url).header("Accept", "application/geo+json")
+            .header("User-Agent", "FindItApp (wildlife hunting app)").get().build()
+        httpClient.newCall(request).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("NWS HTTP ${r.code}")
+            return r.body?.string().orEmpty()
+        }
+    }
 
     suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
         val samples = terrainSamplePoints(latitude, longitude)
@@ -224,6 +261,52 @@ class ThermalWeatherClient(
                     hourly = hours,
                     windSource = source?.label ?: "Open-Meteo",
                 )
+            }
+        }
+
+        /** NWS gridpoint JSON -> hourly weather. Values are °C and km/h in ISO-interval series; expanded to hours. */
+        fun parseNwsGrid(body: String, timeZoneId: String): List<ThermalWeatherDay> {
+            val props = JSONObject(body).getJSONObject("properties")
+            val tz = java.util.TimeZone.getTimeZone(timeZoneId)
+            val parser = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
+            val durationRe = Regex("P(?:(\\d+)D)?(?:T(?:(\\d+)H)?)?")
+            fun series(name: String): Map<Long, Double> {
+                val out = HashMap<Long, Double>()
+                val values = props.optJSONObject(name)?.optJSONArray("values") ?: return out
+                for (i in 0 until values.length()) {
+                    val o = values.getJSONObject(i)
+                    if (o.isNull("value")) continue
+                    val (start, dur) = o.getString("validTime").split('/').let { it[0] to it.getOrElse(1) { "PT1H" } }
+                    val t0 = parser.parse(start)?.time ?: continue
+                    val m = durationRe.matchEntire(dur) ?: continue
+                    val hours = ((m.groupValues[1].toIntOrNull() ?: 0) * 24 + (m.groupValues[2].toIntOrNull() ?: 0)).coerceIn(1, 168)
+                    for (h in 0 until hours) out[t0 + h * 3_600_000L] = o.getDouble("value")
+                }
+                return out
+            }
+            val temp = series("temperature")
+            val speed = series("windSpeed")
+            val dir = series("windDirection")
+            val gust = series("windGust")
+            val sky = series("skyCover")
+            val dateFmt = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = tz }
+            val hourFmt = java.text.SimpleDateFormat("H", Locale.US).apply { timeZone = tz }
+            val byDate = linkedMapOf<String, MutableList<HourlyWeather>>()
+            for (t in temp.keys.sorted()) {
+                val sp = speed[t] ?: continue
+                val d = dir[t] ?: continue
+                val date = dateFmt.format(java.util.Date(t))
+                byDate.getOrPut(date) { mutableListOf() } += HourlyWeather(
+                    hour = hourFmt.format(java.util.Date(t)).toInt(),
+                    temperatureF = temp.getValue(t) * 9.0 / 5.0 + 32.0,
+                    windSpeedMph = sp * 0.621371,
+                    windFromDegrees = d,
+                    cloudCoverPercent = sky[t] ?: 0.0,
+                    windGustMph = gust[t]?.let { it * 0.621371 },
+                )
+            }
+            return byDate.filterValues { it.size >= 6 }.map { (date, hours) ->
+                ThermalWeatherDay(date, tz.getOffset(System.currentTimeMillis()) / 60_000, hours, "NWS 2.5 km (fallback)")
             }
         }
 
