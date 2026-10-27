@@ -136,16 +136,19 @@ data class StandPick(
 
 object StandFinder {
 
-    const val GRID_SIZE = 17
+    /** Search reach from the set location: 750 yards. */
+    const val SEARCH_RADIUS_M = 750 * 0.9144
 
-    /** 16 × 50 m = 800 m ≈ ½ mile across. */
+    /** 28 × 50 m = 1,400 m across — a square that just covers the 750-yard circle. */
+    const val GRID_SIZE = 29
+
     const val GRID_SPACING_M = 50.0
 
     /** Picks are kept at least this far apart (~400 ft). */
     const val MIN_PICK_SPACING_M = 120.0
 
-    /** Anything farther than this from the search center is ignored (~0.4 mi). */
-    const val MAX_PICK_DISTANCE_M = 650.0
+    /** Anything farther than 750 yards from the search center is ignored. */
+    const val MAX_PICK_DISTANCE_M = SEARCH_RADIUS_M
 
     /** Stay this far from mapped roads (~130 ft) and buildings (~200 ft). */
     const val ROAD_BUFFER_M = 40.0
@@ -162,7 +165,7 @@ object StandFinder {
         grid: ElevationGrid,
         field: ThermalWindEngine.FlowField?,
         prevailingFromDeg: Double?,
-        maxCandidates: Int = 12,
+        maxCandidates: Int = 18,
         /** Mapped roads and buildings to stay away from (empty when unavailable). */
         obstacles: MappedObstacles = MappedObstacles.NONE,
     ): List<StandCandidate> {

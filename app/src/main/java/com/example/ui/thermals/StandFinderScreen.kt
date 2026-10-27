@@ -158,14 +158,14 @@ fun StandFinderScreen(
     var mapLoaded by remember { mutableStateOf(false) }
     val cameraPositionState = rememberCameraPositionState {
         position = if (lat != null && lon != null) {
-            CameraPosition.fromLatLngZoom(LatLng(lat, lon), 15f)
+            CameraPosition.fromLatLngZoom(LatLng(lat, lon), SEARCH_ZOOM)
         } else {
             CameraPosition.fromLatLngZoom(LatLng(39.5, -98.35), 3.5f)
         }
     }
     LaunchedEffect(lat, lon, mapLoaded) {
         if (mapLoaded && lat != null && lon != null) {
-            runCatching { cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15f), 800) }
+            runCatching { cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), SEARCH_ZOOM), 800) }
         }
     }
     LaunchedEffect(finder.selectedRank, mapLoaded) {
@@ -262,8 +262,15 @@ fun StandFinderScreen(
             onMapLoaded = { mapLoaded = true },
             onMapLongClick = { latLng -> thermalViewModel.useLocation(latLng.latitude, latLng.longitude, "Map pin") },
         ) {
-            // Search center.
+            // Search center and the 750-yard reach of the search.
             if (lat != null && lon != null) {
+                Circle(
+                    center = LatLng(lat, lon),
+                    radius = StandFinder.SEARCH_RADIUS_M,
+                    fillColor = Color.Transparent,
+                    strokeColor = Color.White.copy(alpha = 0.55f),
+                    strokeWidth = 3f,
+                )
                 val centerIcon = remember { runCatching { dotIcon(Color.White, 22) }.getOrNull() }
                 Marker(
                     state = remember(lat, lon) { MarkerState(position = LatLng(lat, lon)) },
@@ -371,7 +378,7 @@ fun StandFinderScreen(
                                         "${finder.picks.size} on-device picks · ${(finder.stage ?: "AI refining…").removeSuffix("…")}${aiElapsed?.let { " ${it}s" } ?: "…"}"
                                     finder.running -> (finder.stage ?: "Working…") + (aiElapsed?.let { " ${it}s" } ?: "")
                                     finder.source != null -> "${finder.picks.size} picks · ${finder.source}"
-                                    else -> "Scans ½ mile of terrain, thermals and wind, then the AI picks spots."
+                                    else -> "Scans 750 yards around you — terrain, thermals and wind — then the AI picks spots."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -600,6 +607,8 @@ private fun dotIcon(color: Color, sizePx: Int): BitmapDescriptor {
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
+/** Fits the 750-yard search circle on a phone screen. */
+private const val SEARCH_ZOOM = 14.6f
 private const val STAND_FIRST_HOUR = 4f
 private const val STAND_LAST_HOUR = 21f
 private const val STAND_PARTICLES = 260

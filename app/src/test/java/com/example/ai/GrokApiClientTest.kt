@@ -134,10 +134,16 @@ class GrokApiClientTest {
     }
 
     @Test
-    fun providerOrderIsGrokThenOpenAiThenGemini() {
+    fun providerOrderIsGrokThenOpenAiThenGeminiThenOffline() {
         val all = TerrainAiProvider.entries.toSet()
-        assertEquals(listOf(TerrainAiProvider.GROK, TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI), TerrainAiGateway.fallbackOrder(all))
-        assertEquals(listOf(TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI), TerrainAiGateway.fallbackOrder(all - TerrainAiProvider.GROK))
+        assertEquals(
+            listOf(TerrainAiProvider.GROK, TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI, TerrainAiProvider.ON_DEVICE),
+            TerrainAiGateway.fallbackOrder(all),
+        )
+        assertEquals(
+            listOf(TerrainAiProvider.OPENAI, TerrainAiProvider.GEMINI, TerrainAiProvider.ON_DEVICE),
+            TerrainAiGateway.fallbackOrder(all - TerrainAiProvider.GROK),
+        )
         assertEquals(emptyList<TerrainAiProvider>(), TerrainAiGateway.fallbackOrder(emptySet()))
     }
 

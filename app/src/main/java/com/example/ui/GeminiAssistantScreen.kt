@@ -68,6 +68,7 @@ import com.example.ai.AiTargetClassifier
 import com.example.ai.OpenAiApiClient
 import com.example.ai.TerrainAiGateway
 import com.example.ai.GrokApiClient
+import com.example.ai.OnDeviceGemma
 import com.example.ai.TerrainAiProvider
 import com.example.ai.TerrainVisionSession
 import com.example.ai.TerrainVisionSnapshot
@@ -180,6 +181,8 @@ data class AiTerrainState(
     val grokConfigured: Boolean = false,
     val openAiConfigured: Boolean = false,
     val geminiConfigured: Boolean = false,
+    /** Gemma 4 downloaded and usable offline. */
+    val offlineConfigured: Boolean = false,
     val hasDeviceGrokKey: Boolean = false,
     val hasDeviceOpenAiKey: Boolean = false,
     val hasDeviceGeminiKey: Boolean = false,
@@ -634,6 +637,11 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
                 ).withProviderStatus()
             }
         }
+    }
+
+    /** Re-reads which providers are usable (e.g. after the offline model finishes downloading). */
+    fun refreshProviders() {
+        _state.value = _state.value.withProviderStatus()
     }
 
     fun selectCloudProvider(provider: TerrainAiProvider?) {
@@ -1235,6 +1243,7 @@ class AiTerrainViewModel(application: Application) : AndroidViewModel(applicatio
         hasDeviceGrokKey = GrokApiClient.hasDeviceApiKey(appContext),
         openAiConfigured = OpenAiApiClient.isConfigured(appContext),
         geminiConfigured = GeminiApiClient.isConfigured(appContext),
+        offlineConfigured = OnDeviceGemma.isConfigured(appContext),
         hasDeviceOpenAiKey = OpenAiApiClient.hasDeviceApiKey(appContext),
         hasDeviceGeminiKey = GeminiApiClient.hasDeviceApiKey(appContext),
         activeProvider = TerrainAiGateway.preferredProvider(appContext),
@@ -1296,7 +1305,7 @@ fun GeminiAssistantScreen(
                         Text("Terrain intelligence", fontWeight = FontWeight.Bold)
                         Text(
                             when (state.activeProvider) {
-                                null -> "Offline analysis ready · add Grok, OpenAI or Gemini for cloud analysis"
+                                null -> "Offline analysis ready · add Grok, OpenAI or Gemini, or download offline AI"
                                 else -> TerrainAiGateway.activeSummary(LocalContext.current)
                             },
                             style = MaterialTheme.typography.bodySmall,

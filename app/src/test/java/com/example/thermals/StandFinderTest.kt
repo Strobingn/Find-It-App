@@ -134,9 +134,13 @@ class StandFinderTest {
     }
 
     @Test
-    fun searchAreaIsHalfAMile() {
-        val acrossFeet = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) * 3.28084
-        assertEquals(2_640.0, acrossFeet, 60.0)
+    fun searchReaches750YardsFromTheCenter() {
+        val yards = StandFinder.SEARCH_RADIUS_M / 0.9144
+        assertEquals(750.0, yards, 0.5)
+        // The elevation square covers the whole circle.
+        val halfAcrossM = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) / 2.0
+        assertTrue(halfAcrossM >= StandFinder.SEARCH_RADIUS_M)
+        assertEquals(StandFinder.SEARCH_RADIUS_M, StandFinder.MAX_PICK_DISTANCE_M, 0.0)
     }
 
     @Test

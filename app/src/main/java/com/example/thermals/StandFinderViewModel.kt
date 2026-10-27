@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.TerrainAiGateway
+import com.example.ai.TerrainAiProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -97,7 +98,13 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                 _state.update { it.copy(aiStartedAtMs = System.currentTimeMillis()) }
                 // A slow provider (or a fallback chain of them) must not leave the spinner up for
                 // minutes: past the budget, keep the on-device picks and say so.
-                val result = withTimeoutOrNull(AI_BUDGET_MS) {
+                // The offline model needs longer (loading it alone can take ~10 s on CPU).
+                val budgetMs = if (TerrainAiProvider.ON_DEVICE in TerrainAiGateway.configuredProviders(getApplication())) {
+                    AI_BUDGET_MS + OFFLINE_EXTRA_MS
+                } else {
+                    AI_BUDGET_MS
+                }
+                val result = withTimeoutOrNull(budgetMs) {
                     service.aiPicks(
                     candidates = candidates,
                     forecast = forecast,
@@ -117,7 +124,7 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
                             running = false,
                             stage = null,
                             aiStartedAtMs = null,
-                            error = "The AI took over ${AI_BUDGET_MS / 1000} s, so these are the on-device picks. Tap Again to retry.",
+                            error = "The AI took over ${budgetMs / 1000} s, so these are the on-device picks. Tap Again to retry.",
                         )
                     }
                     return@launch
@@ -152,6 +159,9 @@ class StandFinderViewModel(application: Application) : AndroidViewModel(applicat
     private companion object {
         /** Total time allowed for the AI step, including any provider fallbacks. */
         const val AI_BUDGET_MS = 75_000L
+
+        /** Extra time when offline Gemma is in the chain (model load + slower phone decode). */
+        const val OFFLINE_EXTRA_MS = 75_000L
 
         /** Extra wait for OpenStreetMap after the terrain is in (they're fetched in parallel). */
         const val OBSTACLE_WAIT_MS = 4_000L

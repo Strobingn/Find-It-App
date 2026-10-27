@@ -42,6 +42,10 @@
         android:usesCleartextTraffic="false"
         android:theme="@style/Theme.FindIt"
         tools:targetApi="36">
+        <!-- LiteRT-LM GPU backend for the on-device Gemma model (optional on phones without them). -->
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+
 
         <uses-library
             android:name="org.apache.http.legacy"
