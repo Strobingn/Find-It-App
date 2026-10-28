@@ -470,7 +470,7 @@ fun ThermalWindMapScreen(
                 IosDivider(startInset = 16.dp)
                 IosRow(title = "3D terrain", trailing = { Switch(checked = terrain3d, onCheckedChange = { terrain3d = it }) })
                 IosDivider(startInset = 16.dp)
-                IosRow(title = "Scent cone", subtitle = "Where scent goes in ~10 minutes", trailing = { Switch(checked = showCone, onCheckedChange = { showCone = it }) })
+                IosRow(title = "Scent cone", subtitle = "Where scent goes in ~10 minutes (stretched to gust reach)", trailing = { Switch(checked = showCone, onCheckedChange = { showCone = it }) })
             }
             IosSection(
                 header = "LiDAR relief",
@@ -884,11 +884,13 @@ private fun cellMotion(cell: GroundCell, flow: ThermalHour, mode: ParticleMode, 
 
 private fun buildCone(lat: Double?, lon: Double?, flow: ThermalHour?): FeatureCollection {
     if (lat == null || lon == null || flow == null) return FeatureCollection.fromFeatures(emptyList())
+    // Gusts carry scent farther than the sustained breeze: stretch the cone to gust drift distance.
+    val reachMph = maxOf(flow.scentSpeedMph, flow.gustMph ?: flow.scentSpeedMph)
     val ring = ThermalMapGeometry.scentCone(
         lat = lat,
         lon = lon,
         towardDeg = flow.scentTowardDegrees,
-        lengthMeters = ThermalMapGeometry.driftMeters(flow.scentSpeedMph),
+        lengthMeters = ThermalMapGeometry.driftMeters(reachMph),
         halfAngleDeg = ThermalMapGeometry.coneHalfAngle(flow.phase, flow.confidence),
     )
     val polygon = Polygon.fromLngLats(listOf(ring.map { (la, lo) -> Point.fromLngLat(lo, la) }))
