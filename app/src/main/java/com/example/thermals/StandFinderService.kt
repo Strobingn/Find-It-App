@@ -38,7 +38,8 @@ class StandFinderService(
 
     suspend fun fetchGrid(lat: Double, lon: Double): ElevationGrid = withContext(Dispatchers.IO) {
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
-        val meters = points.chunked(100).flatMap { chunk ->
+        val meters = points.chunked(100).flatMapIndexed { index, chunk ->
+            if (index > 0) kotlinx.coroutines.delay(400) // don't burst the free elevation service
             val url = String.format(
                 Locale.US,
                 "%s?latitude=%s&longitude=%s",
@@ -46,7 +47,12 @@ class StandFinderService(
                 chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
                 chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
             )
-            val array = JSONObject(getText(url)).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
+            val body = runCatching { getText(url) }.getOrElse { firstError ->
+                if (!firstError.message.orEmpty().contains("429")) throw firstError
+                kotlinx.coroutines.delay(4_000) // rate-limited: back off once, then retry
+                getText(url)
+            }
+            val array = JSONObject(body).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
             (0 until array.length()).map { array.getDouble(it) }
         }
         if (meters.size != points.size) throw IOException("Elevation service returned ${meters.size} of ${points.size} points")
