@@ -28,6 +28,7 @@ import okhttp3.Request
 object MapboxDem {
     const val ZOOM = 14
     const val TILE_PX = 512
+    private const val CACHE_DIR = "mapbox-dem-v2"
     const val SOURCE_LABEL = "Mapbox terrain (USGS ~10 m)"
 
     private val http: OkHttpClient = OkHttpClient.Builder()
@@ -71,11 +72,15 @@ object MapboxDem {
     private fun loadTile(tx: Int, ty: Int, cacheDir: File?): IntArray {
         val k = key(tx, ty)
         synchronized(memory) { memory[k] }?.let { return it }
-        val file = cacheDir?.let { File(File(it, "mapbox-dem"), "${ZOOM}_${tx}_$ty.png") }
-        val bytes = file?.takeIf { it.isFile && it.length() > 0 }?.readBytes() ?: download(tx, ty).also { b ->
-            file?.let { f -> runCatching { f.parentFile?.mkdirs(); f.writeBytes(b) } }
-        }
-        val decoded = decode(bytes)
+        val file = cacheDir?.let { File(File(it, CACHE_DIR), "${ZOOM}_${tx}_$ty.png") }
+        // A cached file that no longer decodes (an older build saved a different tile format) is dropped and re-fetched.
+        val decoded = file?.takeIf { it.isFile && it.length() > 0 }
+            ?.let { f -> runCatching { decode(f.readBytes()) }.getOrElse { f.delete(); null } }
+            ?: download(tx, ty).let { bytes ->
+                decode(bytes).also {
+                    file?.let { f -> runCatching { f.parentFile?.mkdirs(); f.writeBytes(bytes) } }
+                }
+            }
         synchronized(memory) { memory[k] = decoded }
         return decoded
     }
