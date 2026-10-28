@@ -299,32 +299,47 @@ object TerrainViewshedAnalyzer {
         vegetationFilter: Float,
     ): Boolean {
         if (targetDistanceCells < 0.5f) return true
+        val dx = targetCol - observerX
+        val dy = targetRow - observerY
         val steps = ceil(
             maxOf(
-                abs(targetCol - observerX).toDouble(),
-                abs(targetRow - observerY).toDouble(),
+                abs(dx).toDouble(),
+                abs(dy).toDouble(),
             ),
         ).toInt().coerceAtLeast(1)
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
         val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
 
+        val width = grid.width
+        val height = grid.height
+        val validData = grid.validData
+        val bareEarth = grid.bareEarth
+        val canopySpikes = grid.canopySpikes
+        val vegFactor = 1f - vegetationFilter.coerceIn(0f, 1f)
+
+        // Pre-calculated step increments for line-of-sight ray traversal
+        val stepX = dx / steps
+        val stepY = dy / steps
+
         var maxBlockingAngle = Float.NEGATIVE_INFINITY
         for (step in 1 until steps) {
-            val fraction = step.toFloat() / steps
-            val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
-                .coerceIn(0, grid.width - 1)
-            val row = (observerY + (targetRow - observerY) * fraction).roundToInt()
-                .coerceIn(0, grid.height - 1)
-            val index = row * grid.width + col
-            if (!grid.validData[index]) continue
+            val currentX = observerX + stepX * step
+            val currentY = observerY + stepY * step
+            val col = currentX.roundToInt().coerceIn(0, width - 1)
+            val row = currentY.roundToInt().coerceIn(0, height - 1)
             if (col == targetCol && row == targetRow) continue
-            val distanceCells = hypot(
-                (col - observerX).toDouble(),
-                (row - observerY).toDouble(),
-            ).toFloat()
+
+            val index = row * width + col
+            if (!validData[index]) continue
+
+            val dX = (col - observerX).toDouble()
+            val dY = (row - observerY).toDouble()
+            val distanceCells = hypot(dX, dY).toFloat()
             if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
-            val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
-                (distanceCells * cellSize)
+
+            // Direct array elevation lookup avoiding function call overhead during ray march
+            val elevation = bareEarth[index] + canopySpikes[index] * vegFactor
+            val angle = (elevation - eyeElevation) / (distanceCells * cellSize)
             if (angle > maxBlockingAngle) maxBlockingAngle = angle
         }
         return targetAngle > maxBlockingAngle
