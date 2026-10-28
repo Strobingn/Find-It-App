@@ -87,8 +87,8 @@ android {
     applicationId = "com.wildlifewhisperer.findit"
     minSdk = 24
     targetSdk = 36
-    versionCode = versionCodeOverride ?: 3
-    versionName = versionNameOverride ?: "2.0"
+    versionCode = versionCodeOverride ?: 4
+    versionName = versionNameOverride ?: "2.1"
     multiDexEnabled = true
 
     buildConfigField("String", "OPENAI_API_KEY", quotedBuildConfig(openAiApiKey))
