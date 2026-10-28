@@ -254,6 +254,10 @@ class StandFinderTest {
         assertTrue(msg.contains("blocking the AI servers"))
         assertTrue(msg.contains("api.x.ai") && msg.contains("generativelanguage.googleapis.com"))
         assertEquals("HTTP 500", StandFinderService.explainNetworkFailure("HTTP 500"))
+        assertTrue(
+            StandFinderService.explainNetworkFailure("Weather service HTTP 429 (Mapbox terrain failed: Mapbox terrain HTTP 401)")
+                .endsWith("(Mapbox terrain failed: Mapbox terrain HTTP 401)"),
+        )
     }
 
     @Test

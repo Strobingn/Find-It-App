@@ -233,10 +233,11 @@ class StandFinderService(
          * actually failed. Only AI hosts get the DNS-filter advice; any other message is kept.
          */
         fun explainNetworkFailure(message: String): String {
+            val why = Regex("""\(Mapbox terrain failed: [^)]*\)""").find(message)?.value?.let { " $it" }.orEmpty()
             val hosts = UNRESOLVED_HOST.findAll(message).map { it.groupValues[1].trimEnd('.') }.distinct().toList()
             if (hosts.isEmpty()) {
                 return if (Regex("""\b429\b""").containsMatchIn(message)) {
-                    "The free elevation service is rate-limiting your connection (HTTP 429). Wait a minute and tap Find again."
+                    "The free elevation service is rate-limiting your connection (HTTP 429). Wait a minute and tap Find again.$why"
                 } else {
                     message
                 }
