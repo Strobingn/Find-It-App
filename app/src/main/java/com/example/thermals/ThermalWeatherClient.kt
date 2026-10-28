@@ -7,6 +7,7 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -79,6 +80,9 @@ class ThermalWeatherClient(
     )
 
     suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
+        // Terrain doesn't move — reuse a recent result for this spot instead of hammering the
+        // free elevation services on every refresh (they rate-limit bursts with HTTP 429).
+        cachedTerrain(cacheKey(latitude, longitude))?.let { return@withContext it }
         val samples = terrainSamplePoints(latitude, longitude)
         // Prefer the USGS 3DEP point service — 1 m bare-earth LiDAR DEM in most of the eastern US.
         lidarTerrain(samples)?.let { return@withContext it }
@@ -94,13 +98,21 @@ class ThermalWeatherClient(
         val meters = (0 until array.length()).map { array.getDouble(it) }
         if (meters.size != samples.size) throw IOException("Elevation service returned ${meters.size} of ${samples.size} points")
         terrainFromSamples(meters)
+    }.also { terrain ->
+        storeTerrain(cacheKey(latitude, longitude), terrain)
     }
 
-    /** Samples the ring against USGS EPQS; null when 3DEP has no fine-grained coverage here. */
-    private fun lidarTerrain(samples: List<Pair<Double, Double>>): SiteTerrain? = runCatching {
+    /**
+     * Samples the ring against USGS EPQS; null when 3DEP has no fine-grained coverage here or the
+     * service rate-limits us (HTTP 429) — the caller then quietly falls back to the 90 m blend.
+     * Requests are paced so a single refresh never looks like a burst.
+     */
+    private suspend fun lidarTerrain(samples: List<Pair<Double, Double>>): SiteTerrain? = runCatching {
         val meters = mutableListOf<Double>()
         var bestResolution = 0.0
-        for ((lat, lon) in samples) {
+        for ((index, point) in samples.withIndex()) {
+            if (index > 0) delay(EPQS_PACE_MS)
+            val (lat, lon) = point
             val url = String.format(
                 Locale.US,
                 "%s?x=%.5f&y=%.5f&units=Meters&wkid=4326&includeDate=false",
@@ -108,7 +120,13 @@ class ThermalWeatherClient(
                 lon,
                 lat,
             )
-            val json = JSONObject(get(url))
+            val body = runCatching { get(url) }.getOrElse { firstError ->
+                if (!firstError.message.orEmpty().contains("429")) throw firstError
+                // Rate-limited: back off once, then give up on LiDAR for this refresh.
+                delay(EPQS_BACKOFF_MS)
+                runCatching { get(url) }.getOrElse { return null }
+            }
+            val json = JSONObject(body)
             val value = json.optDouble("value", Double.NaN)
             if (value.isNaN() || value <= -1_000_000.0) return null // EPQS nodata
             val resolution = json.optDouble("resolution", Double.NaN)
@@ -193,6 +211,35 @@ class ThermalWeatherClient(
 
         /** NOAA National Weather Service point/grid lookup (free, key-less). */
         const val NWS_POINTS_ENDPOINT = "https://api.weather.gov/points"
+
+        /** Pause between EPQS point queries so one refresh never fires a 17-request burst. */
+        private const val EPQS_PACE_MS = 350L
+
+        /** Single retry wait when EPQS answers HTTP 429. */
+        private const val EPQS_BACKOFF_MS = 4_000L
+
+        /** Terrain cache: ~100 m cells, 24 h TTL. Terrain doesn't move; refreshes shouldn't re-poll. */
+        private const val TERRAIN_CACHE_TTL_MS = 24 * 60 * 60 * 1000L
+        private val terrainCacheEntries = object : LinkedHashMap<String, Pair<Long, SiteTerrain>>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, SiteTerrain>>?) = size > 64
+        }
+
+        private fun cacheKey(latitude: Double, longitude: Double): String =
+            String.format(Locale.US, "%.3f,%.3f", latitude, longitude)
+
+        private fun cachedTerrain(key: String): SiteTerrain? = synchronized(terrainCacheEntries) {
+            val entry = terrainCacheEntries[key] ?: return null
+            if (System.currentTimeMillis() - entry.first > TERRAIN_CACHE_TTL_MS) {
+                terrainCacheEntries.remove(key)
+                null
+            } else {
+                entry.second
+            }
+        }
+
+        private fun storeTerrain(key: String, terrain: SiteTerrain) = synchronized(terrainCacheEntries) {
+            terrainCacheEntries[key] = System.currentTimeMillis() to terrain
+        }
 
         /** NOAA High-Resolution Rapid Refresh, continental US, as exposed by Open-Meteo. */
         private const val HRRR_MODEL = "ncep_hrrr_conus"
