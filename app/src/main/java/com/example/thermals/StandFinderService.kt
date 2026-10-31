@@ -5,6 +5,7 @@ import com.example.BuildConfig
 import com.example.ai.GeminiConversationTurn
 import com.example.ai.GeminiImageInput
 import com.example.ai.TerrainAiGateway
+import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -57,18 +58,25 @@ class StandFinderService(
                 return@withContext ElevationFetch(grid, "LiDAR on this phone")
             }
         }
+        // A grid fetched in the last 24 h is still good terrain — serve it without touching the network.
+        val cacheFile = gridCacheFile(lat, lon)
+        readGridCache(cacheFile)?.let { return@withContext it }
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
         MapboxDem.elevations(points, appContext.cacheDir)?.let { meters ->
-            return@withContext ElevationFetch(
+            val fetch = ElevationFetch(
                 ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
                 MapboxDem.SOURCE_LABEL,
             )
+            writeGridCache(cacheFile, fetch)
+            return@withContext fetch
         }
         runCatching { fetchUsgsGrid(points) }.getOrNull()?.let { meters ->
-            return@withContext ElevationFetch(
+            val fetch = ElevationFetch(
                 ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
                 "USGS 3DEP elevation",
             )
+            writeGridCache(cacheFile, fetch)
+            return@withContext fetch
         }
         val grid = try {
             fetchOpenMeteoGrid(lat, lon)
@@ -76,7 +84,60 @@ class StandFinderService(
             val why = MapboxDem.lastError ?: throw e
             throw IOException("${e.message} (Mapbox terrain failed: $why)", e)
         }
-        ElevationFetch(grid, "Elevation model (90 m)")
+        val fetch = ElevationFetch(grid, "Elevation model (90 m)")
+        writeGridCache(cacheFile, fetch)
+        fetch
+    }
+
+    /** Cached elevation grids live in cacheDir/stand-grid-v1, keyed by rounded center, newest 32 kept. */
+    private fun gridCacheFile(lat: Double, lon: Double): File =
+        File(File(appContext.cacheDir, GRID_CACHE_DIR).apply { mkdirs() },
+            String.format(Locale.US, "%.3f_%.3f.json", lat, lon))
+
+    private fun readGridCache(file: File): ElevationFetch? = runCatching {
+        if (!file.isFile) return null
+        if (System.currentTimeMillis() - file.lastModified() > GRID_CACHE_TTL_MS) return null
+        val o = JSONObject(file.readText())
+        val grid = o.getJSONObject("grid")
+        val meters = grid.getJSONArray("meters")
+        ElevationFetch(
+            ElevationGrid(
+                grid.getDouble("lat"), grid.getDouble("lon"),
+                grid.getInt("size"), grid.getDouble("spacing"),
+                DoubleArray(meters.length()) { meters.getDouble(it) },
+            ),
+            o.getString("source"),
+        )
+    }.getOrNull()
+
+    private fun writeGridCache(file: File, fetch: ElevationFetch) {
+        runCatching {
+            val meters = JSONArray()
+            fetch.grid.meters.forEach { meters.put(it) }
+            val grid = JSONObject()
+                .put("lat", fetch.grid.centerLat).put("lon", fetch.grid.centerLon)
+                .put("size", fetch.grid.size).put("spacing", fetch.grid.spacingMeters)
+                .put("meters", meters)
+            file.writeText(JSONObject().put("source", fetch.sourceLabel).put("grid", grid).toString())
+            // Keep only the newest grids so the cache can't grow forever.
+            file.parentFile?.listFiles()?.sortedByDescending { it.lastModified() }
+                ?.drop(GRID_CACHE_KEEP)?.forEach { it.delete() }
+        }
+    }
+
+    /** GET with real backoff on HTTP 429 — one 3 s retry is not enough when the NAT pool is saturated. */
+    private suspend fun getTextWithRateLimitRetries(url: String): String {
+        var last: IOException? = null
+        for (attempt in 0..RATE_LIMIT_WAITS.size) {
+            try {
+                return getText(url)
+            } catch (e: IOException) {
+                if (e.message?.contains("429") != true) throw e
+                last = e
+                if (attempt < RATE_LIMIT_WAITS.size) kotlinx.coroutines.delay(RATE_LIMIT_WAITS[attempt])
+            }
+        }
+        throw last ?: IOException("Elevation service failed")
     }
 
     /** US-only, key-less: USGS 3DEP samples for the whole grid in one POST. Throws if any point is missing. */
@@ -101,7 +162,7 @@ class StandFinderService(
     private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
         // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, one after another (bursts trip
-        // its per-minute limit), with one retry after a pause when it answers 429.
+        // its per-minute limit), backing off 3 s then 15 s when it answers 429.
         val meters = points.chunked(100).flatMap { chunk ->
             val url = String.format(
                 Locale.US,
@@ -110,13 +171,7 @@ class StandFinderService(
                 chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
                 chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
             )
-            val body = try {
-                getText(url)
-            } catch (e: IOException) {
-                if (e.message?.contains("429") != true) throw e
-                kotlinx.coroutines.delay(RATE_LIMIT_RETRY_MS)
-                getText(url)
-            }
+            val body = getTextWithRateLimitRetries(url)
             val array = JSONObject(body).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
             (0 until array.length()).map { array.getDouble(it) }
         }
@@ -224,7 +279,10 @@ class StandFinderService(
         const val IMAGE_PX = 640
         const val OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter"
         const val OVERPASS_TIMEOUT_S = 8
-        private const val RATE_LIMIT_RETRY_MS = 3_000L
+        private val RATE_LIMIT_WAITS = longArrayOf(3_000L, 15_000L)
+        private const val GRID_CACHE_DIR = "stand-grid-v1"
+        private const val GRID_CACHE_TTL_MS = 24L * 60 * 60 * 1000
+        private const val GRID_CACHE_KEEP = 32
 
         /** Hosts the cloud AI providers are called on. */
         val AI_HOSTS = setOf("api.x.ai", "api.openai.com", "generativelanguage.googleapis.com")

@@ -69,7 +69,7 @@ object MapboxDem {
         }
     }
 
-    private fun loadTile(tx: Int, ty: Int, cacheDir: File?): IntArray {
+    private suspend fun loadTile(tx: Int, ty: Int, cacheDir: File?): IntArray {
         val k = key(tx, ty)
         synchronized(memory) { memory[k] }?.let { return it }
         val file = cacheDir?.let { File(File(it, CACHE_DIR), "${ZOOM}_${tx}_$ty.png") }
@@ -85,17 +85,28 @@ object MapboxDem {
         return decoded
     }
 
-    private fun download(tx: Int, ty: Int): ByteArray {
+    private suspend fun download(tx: Int, ty: Int): ByteArray {
         val token = BuildConfig.MAPBOX_ACCESS_TOKEN.trim()
         val url = String.format(
             Locale.US,
             "https://api.mapbox.com/v4/mapbox.mapbox-terrain-dem-v1/%d/%d/%d.pngraw?access_token=%s",
             ZOOM, tx, ty, token,
         )
-        http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("Mapbox terrain HTTP ${r.code}")
-            return r.body?.bytes() ?: throw IOException("Mapbox terrain returned nothing")
+        // One patient retry when Mapbox throttles the burst of tile requests (HTTP 429).
+        var lastFailure: Throwable? = null
+        repeat(2) { attempt ->
+            val result = runCatching {
+                http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
+                    if (!r.isSuccessful) throw IOException("Mapbox terrain HTTP ${r.code}")
+                    r.body?.bytes() ?: throw IOException("Mapbox terrain returned nothing")
+                }
+            }
+            result.getOrNull()?.let { return it }
+            lastFailure = result.exceptionOrNull()
+            val is429 = (lastFailure as? IOException)?.message?.contains("429") == true
+            if (attempt == 0 && is429) kotlinx.coroutines.delay(5_000)
         }
+        throw lastFailure ?: IOException("Mapbox terrain returned nothing")
     }
 
     /** PNG → RGB ints, untouched by premultiplication or color management (the RGB *is* the elevation). */
