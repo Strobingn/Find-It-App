@@ -64,6 +64,12 @@ class StandFinderService(
                 MapboxDem.SOURCE_LABEL,
             )
         }
+        runCatching { fetchUsgsGrid(points) }.getOrNull()?.let { meters ->
+            return@withContext ElevationFetch(
+                ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
+                "USGS 3DEP elevation",
+            )
+        }
         val grid = try {
             fetchOpenMeteoGrid(lat, lon)
         } catch (e: IOException) {
@@ -71,6 +77,25 @@ class StandFinderService(
             throw IOException("${e.message} (Mapbox terrain failed: $why)", e)
         }
         ElevationFetch(grid, "Elevation model (90 m)")
+    }
+
+    /** US-only, key-less: USGS 3DEP samples for the whole grid in one POST. Throws if any point is missing. */
+    private fun fetchUsgsGrid(points: List<Pair<Double, Double>>): List<Double> {
+        val geometry = JSONObject()
+            .put("points", JSONArray(points.map { JSONArray(listOf(it.second, it.first)) }))
+            .put("spatialReference", JSONObject().put("wkid", 4326))
+        val form = okhttp3.FormBody.Builder()
+            .add("geometry", geometry.toString())
+            .add("geometryType", "esriGeometryMultipoint")
+            .add("returnFirstValueOnly", "true")
+            .add("f", "json")
+            .build()
+        val request = Request.Builder().url(USGS_SAMPLES_URL).post(form).build()
+        val body = httpClient.newCall(request).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("USGS elevation HTTP ${r.code}")
+            r.body?.string().orEmpty()
+        }
+        return parseUsgsSamples(body, points.size)
     }
 
     private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {
@@ -232,6 +257,21 @@ class StandFinderService(
          * Turns "Unable to resolve host" into something actionable, naming the host that
          * actually failed. Only AI hosts get the DNS-filter advice; any other message is kept.
          */
+        const val USGS_SAMPLES_URL = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/getSamples"
+
+        /** ArcGIS getSamples response -> elevations in meters, in request order. */
+        fun parseUsgsSamples(body: String, expected: Int): List<Double> {
+            val samples = JSONObject(body).optJSONArray("samples") ?: throw IOException("USGS returned no samples")
+            val byIndex = HashMap<Int, Double>()
+            for (i in 0 until samples.length()) {
+                val o = samples.getJSONObject(i)
+                val v = o.optString("value").toDoubleOrNull() ?: continue
+                byIndex[o.optInt("locationId", i)] = v
+            }
+            if (byIndex.size != expected) throw IOException("USGS returned ${byIndex.size} of $expected points")
+            return (0 until expected).map { byIndex.getValue(it) }
+        }
+
         fun explainNetworkFailure(message: String): String {
             val why = Regex("""\(Mapbox terrain failed: [^)]*\)""").find(message)?.value?.let { " $it" }.orEmpty()
             val hosts = UNRESOLVED_HOST.findAll(message).map { it.groupValues[1].trimEnd('.') }.distinct().toList()

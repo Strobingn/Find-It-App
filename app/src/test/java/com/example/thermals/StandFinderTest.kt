@@ -455,4 +455,10 @@ class StandFinderTest {
         morningAlign = align,
         eveningAlign = align * 0.5,
     )
+
+    @Test
+    fun usgsSamplesParseInRequestOrder() {
+        val body = """{"samples":[{"locationId":1,"value":"20.5"},{"locationId":0,"value":"10.25"}]}"""
+        assertEquals(listOf(10.25, 20.5), StandFinderService.parseUsgsSamples(body, 2))
+    }
 }
