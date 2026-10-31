@@ -5,6 +5,7 @@ import com.example.BuildConfig
 import com.example.ai.GeminiConversationTurn
 import com.example.ai.GeminiImageInput
 import com.example.ai.TerrainAiGateway
+import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -35,21 +36,27 @@ data class StandSearchResult(
  * picture of the same square (Mapbox Static Images) and the cloud AI that turns terrain + thermals
  * + imagery into ranked stand and hunting-area picks.
  */
-class StandFinderService(
+class StandFinderService internal constructor(
     context: Context,
     private val httpClient: OkHttpClient = defaultHttpClient(),
     /** Overpass is best-effort: a slow public instance must not hold up the search. */
     private val overpassClient: OkHttpClient = httpClient.newBuilder()
         .callTimeout(OVERPASS_TIMEOUT_S + 2L, TimeUnit.SECONDS)
         .build(),
+    elevationCache: ElevationGridCache? = null,
+    private val sleeper: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+    private val randomUnit: () -> Double = { Math.random() },
+    private val mapboxElevations: (suspend (List<Pair<Double, Double>>, File?) -> List<Double?>?)? = null,
 ) {
     private val appContext = context.applicationContext
     private val gateway = TerrainAiGateway(appContext)
+    private val grids = elevationCache ?: ElevationGridCache.inDirectory(File(appContext.cacheDir, ElevationGridCache.DIR_NAME))
 
     /**
      * Elevation for the stand search. Uses [siteDem] when the search center falls inside a
-     * loaded LiDAR / site grid and enough of the square is covered; otherwise Mapbox terrain tiles
-     * (~10 m, ~4 tile downloads, cached on the phone); Open-Meteo only when those can't be had.
+     * loaded LiDAR / site grid and enough of the square is covered; otherwise a cached grid for
+     * this spot; otherwise Mapbox terrain-RGB tiles (~10 m, a handful of tiles, one at a time);
+     * then USGS 3DEP in one request; Open-Meteo only when those can't be had.
      */
     suspend fun fetchGrid(lat: Double, lon: Double, siteDem: SiteDem? = null): ElevationFetch = withContext(Dispatchers.IO) {
         siteDem?.let { dem ->
@@ -57,52 +64,80 @@ class StandFinderService(
                 return@withContext ElevationFetch(grid, "LiDAR on this phone")
             }
         }
+        grids.get(lat, lon)?.let { return@withContext it }
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
-        MapboxDem.elevations(points, appContext.cacheDir)?.let { meters ->
-            return@withContext ElevationFetch(
-                ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
-                MapboxDem.SOURCE_LABEL,
-            )
+        val mapbox = try {
+            if (mapboxElevations != null) {
+                mapboxElevations.invoke(points, appContext.cacheDir)
+            } else {
+                MapboxDem.elevationSamples(points, appContext.cacheDir, sleeper = sleeper, random = randomUnit)
+            }
+        } catch (e: IOException) {
+            MapboxDem.lastError = e.message
+            null
+        }
+        if (mapbox != null) {
+            runCatching { gridFromSamples(lat, lon, mapbox) }.getOrNull()?.let { grid ->
+                val fetch = ElevationFetch(grid, MapboxDem.SOURCE_LABEL)
+                grids.put(lat, lon, fetch)
+                return@withContext fetch
+            }
         }
         runCatching { fetchUsgsGrid(points) }.getOrNull()?.let { meters ->
-            return@withContext ElevationFetch(
-                ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
-                "USGS 3DEP elevation",
-            )
+            runCatching {
+                gridFromSamples(lat, lon, meters.map { z -> if (z.isFinite()) z else null })
+            }.getOrNull()
+        }?.let { grid ->
+            val fetch = ElevationFetch(grid, USGS_SOURCE)
+            grids.put(lat, lon, fetch)
+            return@withContext fetch
         }
         val grid = try {
-            fetchOpenMeteoGrid(lat, lon)
+            fetchOpenMeteoGrid(lat, lon, points)
         } catch (e: IOException) {
             val why = MapboxDem.lastError ?: throw e
             throw IOException("${e.message} (Mapbox terrain failed: $why)", e)
         }
-        ElevationFetch(grid, "Elevation model (90 m)")
+        val fetch = ElevationFetch(grid, "Elevation model (90 m)")
+        grids.put(lat, lon, fetch)
+        fetch
     }
 
-    /** US-only, key-less: USGS 3DEP samples for the whole grid in one POST. Throws if any point is missing. */
-    private fun fetchUsgsGrid(points: List<Pair<Double, Double>>): List<Double> {
-        val geometry = JSONObject()
-            .put("points", JSONArray(points.map { JSONArray(listOf(it.second, it.first)) }))
-            .put("spatialReference", JSONObject().put("wkid", 4326))
-        val form = okhttp3.FormBody.Builder()
-            .add("geometry", geometry.toString())
-            .add("geometryType", "esriGeometryMultipoint")
-            .add("returnFirstValueOnly", "true")
-            .add("f", "json")
-            .build()
-        val request = Request.Builder().url(USGS_SAMPLES_URL).post(form).build()
-        val body = httpClient.newCall(request).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("USGS elevation HTTP ${r.code}")
-            r.body?.string().orEmpty()
+    /**
+     * US-only, key-less: USGS 3DEP samples for the whole grid in one POST.
+     * A 429 is retried; a missing point throws instead of being filled with 0 m.
+     */
+    private suspend fun fetchUsgsGrid(points: List<Pair<Double, Double>>): List<Double> =
+        RateLimitBackoff.withRetries(sleeper, randomUnit) {
+            val geometry = JSONObject()
+                .put("points", JSONArray(points.map { JSONArray(listOf(it.second, it.first)) }))
+                .put("spatialReference", JSONObject().put("wkid", 4326))
+            val form = okhttp3.FormBody.Builder()
+                .add("geometry", geometry.toString())
+                .add("geometryType", "esriGeometryMultipoint")
+                .add("returnFirstValueOnly", "true")
+                .add("f", "json")
+                .build()
+            val request = Request.Builder().url(USGS_SAMPLES_URL).post(form).build()
+            val body = httpClient.newCall(request).execute().use { r ->
+                if (r.code == 429 || r.code == 503) {
+                    throw RateLimitedException("USGS elevation", r.code, r.header("Retry-After"))
+                }
+                if (!r.isSuccessful) throw IOException("USGS elevation HTTP ${r.code}")
+                r.body?.string().orEmpty()
+            }
+            parseUsgsSamples(body, points.size)
         }
-        return parseUsgsSamples(body, points.size)
-    }
 
-    private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {
-        val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
-        // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, one after another (bursts trip
-        // its per-minute limit), with one retry after a pause when it answers 429.
-        val meters = points.chunked(100).flatMap { chunk ->
+    private suspend fun fetchOpenMeteoGrid(
+        lat: Double,
+        lon: Double,
+        points: List<Pair<Double, Double>>,
+    ): ElevationGrid {
+        // 841 points, 100 per call (Open-Meteo's max), one call at a time. A parallel burst of
+        // per-cell requests is what gets the shared carrier IP answered with HTTP 429.
+        val meters = ArrayList<Double?>(points.size)
+        for (chunk in points.chunked(ELEVATION_BATCH_SIZE)) {
             val url = String.format(
                 Locale.US,
                 "%s?latitude=%s&longitude=%s",
@@ -110,18 +145,20 @@ class StandFinderService(
                 chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
                 chunk.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
             )
-            val body = try {
-                getText(url)
-            } catch (e: IOException) {
-                if (e.message?.contains("429") != true) throw e
-                kotlinx.coroutines.delay(RATE_LIMIT_RETRY_MS)
-                getText(url)
-            }
-            val array = JSONObject(body).optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
-            (0 until array.length()).map { array.getDouble(it) }
+            meters.addAll(parseElevationBody(getText(url), chunk.size))
         }
-        if (meters.size != points.size) throw IOException("Elevation service returned ${meters.size} of ${points.size} points")
-        return ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray())
+        return gridFromSamples(lat, lon, meters)
+    }
+
+    private suspend fun getText(url: String): String = RateLimitBackoff.withRetries(sleeper, randomUnit) {
+        httpClient.newCall(Request.Builder().url(url).header("Accept", "application/json").get().build()).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (response.code == 429 || response.code == 503) {
+                throw RateLimitedException("Elevation service", response.code, response.header("Retry-After"))
+            }
+            if (!response.isSuccessful) throw IOException("Elevation service HTTP ${response.code}")
+            body
+        }
     }
 
     /**
@@ -202,13 +239,6 @@ class StandFinderService(
         return picks to "${answer.provider.label} ${TerrainAiGateway.modelFor(answer.provider)}"
     }
 
-    private fun getText(url: String): String {
-        httpClient.newCall(Request.Builder().url(url).header("Accept", "application/json").get().build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw IOException("Elevation service HTTP ${response.code}")
-            return body
-        }
-    }
 
     data class SatelliteImage(
         val bytes: ByteArray,
@@ -224,7 +254,51 @@ class StandFinderService(
         const val IMAGE_PX = 640
         const val OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter"
         const val OVERPASS_TIMEOUT_S = 8
-        private const val RATE_LIMIT_RETRY_MS = 3_000L
+
+        /** Open-Meteo elevation accepts at most this many coordinates in one request. */
+        const val ELEVATION_BATCH_SIZE = 100
+
+        /** Below this (terrain-RGB void is -10_000) the sample is missing, not a height. */
+        private const val VOID_METERS = -9_999.0
+
+        /**
+         * One elevation per requested point. JSON null is a hole, not 0 m.
+         * A short body is an error — it is never padded with zeros.
+         */
+        fun parseElevationBody(body: String, expected: Int): List<Double?> {
+            val array = try {
+                JSONObject(body).optJSONArray("elevation")
+            } catch (_: org.json.JSONException) {
+                null
+            } ?: throw IOException("Elevation service returned no data")
+            if (array.length() != expected) {
+                throw IOException("Elevation service returned ${array.length()} of $expected points")
+            }
+            return List(expected) { i ->
+                if (array.isNull(i)) null else array.optDouble(i, Double.NaN).takeIf { it.isFinite() }
+            }
+        }
+
+        /**
+         * Builds the search grid. Holes stay uncovered (NaN) so they are not scored.
+         * Too few real samples is a failure, not a flat 0 m surface.
+         */
+        fun gridFromSamples(lat: Double, lon: Double, samples: List<Double?>): ElevationGrid {
+            val expected = StandFinder.GRID_SIZE * StandFinder.GRID_SIZE
+            if (samples.size != expected) {
+                throw IOException("Elevation service returned ${samples.size} of $expected points")
+            }
+            val covered = BooleanArray(samples.size) { i ->
+                val z = samples[i]
+                z != null && z.isFinite() && z > VOID_METERS
+            }
+            val center = (StandFinder.GRID_SIZE / 2) * StandFinder.GRID_SIZE + StandFinder.GRID_SIZE / 2
+            if (!covered[center] || covered.count { it } < SiteDemGrids.MIN_HITS) {
+                throw IOException("Elevation service returned no usable terrain")
+            }
+            val meters = DoubleArray(samples.size) { i -> if (covered[i]) samples[i]!! else Double.NaN }
+            return ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters, covered)
+        }
 
         /** Hosts the cloud AI providers are called on. */
         val AI_HOSTS = setOf("api.x.ai", "api.openai.com", "generativelanguage.googleapis.com")
@@ -258,6 +332,7 @@ class StandFinderService(
          * actually failed. Only AI hosts get the DNS-filter advice; any other message is kept.
          */
         const val USGS_SAMPLES_URL = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/getSamples"
+        const val USGS_SOURCE = "USGS 3DEP elevation"
 
         /** ArcGIS getSamples response -> elevations in meters, in request order. */
         fun parseUsgsSamples(body: String, expected: Int): List<Double> {

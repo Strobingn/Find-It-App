@@ -12,18 +12,15 @@ import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.tan
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
 /**
- * Elevation from Mapbox's terrain-DEM tiles (USGS 3DEP-based in the US, ~10 m; z14 tiles are ~9 m a pixel),
- * decoded on the phone. A 750-yard stand search needs about four tiles instead of nine Open-Meteo calls, it doesn't
- * count against Open-Meteo's per-IP limit (which phones on 5G share with everyone behind the same carrier address),
- * and tiles are cached on disk so a repeat search of the same ground needs no network at all.
+ * Elevation from Mapbox terrain-RGB tiles (USGS 3DEP-based in the US, ~10 m; z14 tiles are ~9 m a pixel),
+ * decoded on the phone. A 750-yard stand search needs about four tiles instead of one request per cell.
+ * Each tile is fetched once, one after another (a parallel burst is what draws HTTP 429), cached on disk,
+ * and a 429 is retried with Retry-After or exponential backoff before the search gives up on Mapbox.
  */
 object MapboxDem {
     const val ZOOM = 14
@@ -44,48 +41,112 @@ object MapboxDem {
 
     /** Why the last [elevations] call returned null (shown when the fallback fails too). */
     @Volatile var lastError: String? = null
-        private set
+        internal set
 
     val isAvailable: Boolean get() = BuildConfig.MAPBOX_ACCESS_TOKEN.trim().startsWith("pk.")
 
+    /** Terrain-RGB void (0,0,0). A blend with this pixel is not a real elevation. */
+    const val VOID_METERS = -9_999.0
+
+    internal fun clearMemoryForTests() {
+        synchronized(memory) { memory.clear() }
+        lastError = null
+    }
+
     /** Elevations in meters for [points] (lat, lon), or null without a Mapbox token / when a tile can't be had. */
-    suspend fun elevations(points: List<Pair<Double, Double>>, cacheDir: File? = null): List<Double>? {
+    suspend fun elevations(
+        points: List<Pair<Double, Double>>,
+        cacheDir: File? = null,
+        http: OkHttpClient = this.http,
+        sleeper: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+        random: () -> Double = { Math.random() },
+        /** Unit tests have no pk. token. Production leaves this false. */
+        tokenOptional: Boolean = false,
+    ): List<Double>? {
+        val samples = elevationSamples(points, cacheDir, http, sleeper, random, tokenOptional, rejectVoid = false) ?: return null
+        if (samples.any { it == null }) return null
+        return samples.map { it!! }
+    }
+
+    /**
+     * One sample per point. Null entries are void pixels (not 0 m). The whole call is null only when
+     * a tile still can't be downloaded after retries — callers must not invent elevations for that.
+     */
+    internal suspend fun elevationSamples(
+        points: List<Pair<Double, Double>>,
+        cacheDir: File? = null,
+        http: OkHttpClient = this.http,
+        sleeper: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+        random: () -> Double = { Math.random() },
+        tokenOptional: Boolean = false,
+        rejectVoid: Boolean = true,
+    ): List<Double?>? {
         if (points.isEmpty()) return null
-        if (!isAvailable) { lastError = "no Mapbox token in this build"; return null }
+        if (!tokenOptional && !isAvailable) {
+            lastError = "no Mapbox token in this build"
+            return null
+        }
         lastError = null
         return runCatching {
             val pixels = points.map { (lat, lon) -> globalPixel(lat, lon) }
             val tiles = pixels.flatMap { (x, y) -> neighbourTiles(x, y) }.toSet()
-            val loaded = loadTiles(tiles, cacheDir)
-            pixels.map { (x, y) -> sample(x, y) { tx, ty -> loaded[key(tx, ty)] } ?: throw IOException("missing tile") }
+            val loaded = loadTiles(tiles, cacheDir, http, sleeper, random)
+            pixels.map { (x, y) ->
+                sample(x, y, rejectVoid) { tx, ty -> loaded[key(tx, ty)] }
+            }
         }.onFailure { lastError = it.message ?: it.javaClass.simpleName }.getOrNull()
     }
 
-    private suspend fun loadTiles(tiles: Set<Pair<Int, Int>>, cacheDir: File?): Map<Long, IntArray> = withContext(Dispatchers.IO) {
-        coroutineScope {
-            tiles.map { (tx, ty) ->
-                async { key(tx, ty) to loadTile(tx, ty, cacheDir) }
-            }.awaitAll().toMap()
+    /** Tiles a stand search needs, in a stable order, fetched one at a time. */
+    internal fun tilesFor(points: List<Pair<Double, Double>>): Set<Pair<Int, Int>> =
+        points.flatMap { (lat, lon) ->
+            val (x, y) = globalPixel(lat, lon)
+            neighbourTiles(x, y)
+        }.toSet()
+
+    private suspend fun loadTiles(
+        tiles: Set<Pair<Int, Int>>,
+        cacheDir: File?,
+        http: OkHttpClient,
+        sleeper: suspend (Long) -> Unit,
+        random: () -> Double,
+    ): Map<Long, IntArray> = withContext(Dispatchers.IO) {
+        val out = LinkedHashMap<Long, IntArray>(tiles.size)
+        for ((tx, ty) in tiles) {
+            out[key(tx, ty)] = loadTile(tx, ty, cacheDir, http, sleeper, random)
         }
+        out
     }
 
-    private fun loadTile(tx: Int, ty: Int, cacheDir: File?): IntArray {
+    private suspend fun loadTile(
+        tx: Int,
+        ty: Int,
+        cacheDir: File?,
+        http: OkHttpClient,
+        sleeper: suspend (Long) -> Unit,
+        random: () -> Double,
+    ): IntArray {
         val k = key(tx, ty)
         synchronized(memory) { memory[k] }?.let { return it }
         val file = cacheDir?.let { File(File(it, CACHE_DIR), "${ZOOM}_${tx}_$ty.png") }
         // A cached file that no longer decodes (an older build saved a different tile format) is dropped and re-fetched.
-        val decoded = file?.takeIf { it.isFile && it.length() > 0 }
-            ?.let { f -> runCatching { decode(f.readBytes()) }.getOrElse { f.delete(); null } }
-            ?: download(tx, ty).let { bytes ->
-                decode(bytes).also {
-                    file?.let { f -> runCatching { f.parentFile?.mkdirs(); f.writeBytes(bytes) } }
-                }
+        file?.takeIf { it.isFile && it.length() > 0 }?.let { f ->
+            runCatching { decode(f.readBytes()) }.onSuccess { decoded ->
+                synchronized(memory) { memory[k] = decoded }
+                return decoded
+            }.onFailure { f.delete() }
+        }
+        val decoded = RateLimitBackoff.withRetries(sleeper, random) {
+            val bytes = download(tx, ty, http)
+            decode(bytes).also {
+                file?.let { f -> runCatching { f.parentFile?.mkdirs(); f.writeBytes(bytes) } }
             }
+        }
         synchronized(memory) { memory[k] = decoded }
         return decoded
     }
 
-    private fun download(tx: Int, ty: Int): ByteArray {
+    private fun download(tx: Int, ty: Int, http: OkHttpClient): ByteArray {
         val token = BuildConfig.MAPBOX_ACCESS_TOKEN.trim()
         val url = String.format(
             Locale.US,
@@ -93,6 +154,7 @@ object MapboxDem {
             ZOOM, tx, ty, token,
         )
         http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
+            if (r.code == 429 || r.code == 503) throw RateLimitedException("Mapbox terrain", r.code, r.header("Retry-After"))
             if (!r.isSuccessful) throw IOException("Mapbox terrain HTTP ${r.code}")
             return r.body?.bytes() ?: throw IOException("Mapbox terrain returned nothing")
         }
@@ -150,7 +212,13 @@ object MapboxDem {
     }
 
     /** Bilinear elevation between pixel centers; [tile] gives a tile's pixels (or null when missing). */
-    fun sample(x: Double, y: Double, tile: (Int, Int) -> IntArray?): Double? {
+    fun sample(x: Double, y: Double, tile: (Int, Int) -> IntArray?): Double? = sample(x, y, rejectVoid = false, tile)
+
+    /**
+     * Same bilinear sample. When [rejectVoid] is set, a terrain-RGB void pixel (or a blend with one)
+     * is missing data, not an elevation of -10 km and not 0 m.
+     */
+    fun sample(x: Double, y: Double, rejectVoid: Boolean, tile: (Int, Int) -> IntArray?): Double? {
         val fx = x - 0.5
         val fy = y - 0.5
         val x0 = floor(fx).toLong()
@@ -169,6 +237,9 @@ object MapboxDem {
         val h10 = h(x0 + 1, y0) ?: return null
         val h01 = h(x0, y0 + 1) ?: return null
         val h11 = h(x0 + 1, y0 + 1) ?: return null
+        if (rejectVoid && (h00 <= VOID_METERS || h10 <= VOID_METERS || h01 <= VOID_METERS || h11 <= VOID_METERS)) {
+            return null
+        }
         val top = h00 + (h10 - h00) * ax
         val bottom = h01 + (h11 - h01) * ax
         return top + (bottom - top) * ay

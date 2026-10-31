@@ -49,6 +49,14 @@ class MapboxDemTest {
     }
 
     @Test
+    fun voidPixelIsMissingNotABlendedElevation() {
+        val voidTile = IntArray(MapboxDem.TILE_PX * MapboxDem.TILE_PX) { 0xFF000000.toInt() }
+        val tiles = mapOf((0 to 0) to voidTile)
+        assertNull(MapboxDem.sample(10.0, 10.0, rejectVoid = true) { tx, ty -> tiles[tx to ty] })
+        assertTrue(MapboxDem.sample(10.0, 10.0) { tx, ty -> tiles[tx to ty] }!! <= MapboxDem.VOID_METERS)
+    }
+
+    @Test
     fun rateLimitGetsAPlainExplanation() {
         val msg = StandFinderService.explainNetworkFailure("Elevation service HTTP 429")
         assertTrue(msg.contains("rate-limiting"))

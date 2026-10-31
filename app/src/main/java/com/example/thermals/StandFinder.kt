@@ -73,7 +73,7 @@ class ElevationGrid(
         if (r < 0 || c < 0 || r > size - 1 || c > size - 1) return null
         val r0 = r.toInt().coerceAtMost(size - 2)
         val c0 = c.toInt().coerceAtMost(size - 2)
-        // Uncovered LiDAR cells are stored as 0 m. Don't interpolate those into a fake cliff.
+        // Uncovered cells are stored as NaN, never 0 m. Don't interpolate a hole into a fake cliff.
         if (!isCovered(r0, c0) || !isCovered(r0, c0 + 1) || !isCovered(r0 + 1, c0) || !isCovered(r0 + 1, c0 + 1)) {
             return null
         }
