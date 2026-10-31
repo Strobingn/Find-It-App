@@ -32,7 +32,8 @@ object SiteDemGrids {
         if (values.getOrNull(center) == null) return null
         if (values.count { it != null } < MIN_HITS) return null
         val covered = BooleanArray(values.size) { values[it] != null }
-        val meters = DoubleArray(values.size) { values[it] ?: 0.0 }
+        // A hole is not sea level. 0 m here would be scored as ground if the mask were skipped.
+        val meters = DoubleArray(values.size) { values[it] ?: Double.NaN }
         return ElevationGrid(centerLat, centerLon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters, covered)
     }
 }
