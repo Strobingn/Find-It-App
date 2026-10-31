@@ -4,6 +4,7 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.CancellationException
 
 /** HTTP 429 or 503. [retryAfter] is the raw Retry-After header, when the server sent one. */
 internal class RateLimitedException(
@@ -19,14 +20,23 @@ internal class RateLimitedException(
 internal object RateLimitBackoff {
     const val MAX_ATTEMPTS = 4
     const val BASE_DELAY_MS = 500L
+
+    /** Cap for our own exponential backoff only. A server Retry-After is not shortened to this. */
     const val MAX_DELAY_MS = 20_000L
+
+    /** Longest we will sit on one source. A longer Retry-After means stop, not an early retry. */
+    const val WAIT_BUDGET_MS = 60_000L
 
     /**
      * How long to sleep before attempt number [attempt] (1 = first retry).
      * [random] is uniform in 0..1; 0.5 means no jitter.
+     * Null when the server's Retry-After is past [WAIT_BUDGET_MS]: do not send another request.
      */
-    fun delayMs(attempt: Int, retryAfter: String?, random: () -> Double, nowMs: Long = System.currentTimeMillis()): Long {
-        retryAfterMillis(retryAfter, nowMs)?.let { return it.coerceIn(0L, MAX_DELAY_MS) }
+    fun delayMs(attempt: Int, retryAfter: String?, random: () -> Double, nowMs: Long = System.currentTimeMillis()): Long? {
+        retryAfterMillis(retryAfter, nowMs)?.let { wait ->
+            if (wait > WAIT_BUDGET_MS) return null
+            return wait.coerceAtLeast(0)
+        }
         val shift = (attempt - 1).coerceIn(0, 5)
         val exp = BASE_DELAY_MS shl shift
         val unit = random().let { if (it.isNaN()) 0.5 else it }.coerceIn(0.0, 1.0)
@@ -54,13 +64,19 @@ internal object RateLimitBackoff {
         block: () -> T,
     ): T {
         var attempt = 0
+        var waited = 0L
         while (true) {
             try {
                 return block()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: RateLimitedException) {
                 attempt++
                 if (attempt >= maxAttempts) throw e
-                sleeper(delayMs(attempt, e.retryAfter, random))
+                val wait = delayMs(attempt, e.retryAfter, random) ?: throw e
+                if (waited + wait > WAIT_BUDGET_MS) throw e
+                sleeper(wait)
+                waited += wait
             }
         }
     }

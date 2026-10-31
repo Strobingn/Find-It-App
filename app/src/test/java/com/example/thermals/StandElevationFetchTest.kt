@@ -141,7 +141,11 @@ class StandElevationFetchTest {
         assertEquals(1_000L, RateLimitBackoff.delayMs(2, null, { 0.5 }))
         assertEquals(2_000L, RateLimitBackoff.delayMs(3, null, { 0.5 }))
         assertEquals(400L, RateLimitBackoff.delayMs(1, null, { 0.0 }))
-        assertEquals(RateLimitBackoff.MAX_DELAY_MS, RateLimitBackoff.delayMs(1, "120", { 0.5 }))
+        assertEquals(45_000L, RateLimitBackoff.delayMs(1, "45", { 0.5 }))
+        assertNull(RateLimitBackoff.delayMs(1, "120", { 0.5 }))
+        assertEquals(60_000L, RateLimitBackoff.delayMs(1, "60", { 0.5 }))
+        assertNull(RateLimitBackoff.delayMs(1, "61", { 0.5 }))
+        assertTrue(RateLimitBackoff.delayMs(6, null, { 0.5 })!! <= RateLimitBackoff.MAX_DELAY_MS)
         val whenMs = 1_700_000_000_000L
         val fmt = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("GMT")
@@ -445,6 +449,97 @@ class StandElevationFetchTest {
     }
 
     @Test
+    fun retryAfterPastTheBudgetStopsThatSourceWithoutAnEarlyRequest() = runBlocking {
+        var calls = 0
+        val waits = mutableListOf<Long>()
+        try {
+            RateLimitBackoff.withRetries(sleeper = { waits += it }) {
+                calls++
+                throw RateLimitedException("Elevation service", 429, "120")
+            }
+            fail("expected to stop")
+        } catch (e: RateLimitedException) {
+            assertTrue(e.message!!.contains("429"))
+        }
+        assertEquals(1, calls)
+        assertTrue(waits.isEmpty())
+
+        var usgs = 0
+        var openMeteo = 0
+        val http = fakeHttp(passUsgs = true) { request ->
+            if (request.url.encodedPath.contains("getSamples")) {
+                usgs++
+                json(request, 429, "{}", retryAfter = "120")
+            } else {
+                openMeteo++
+                json(request, 200, elevationJson(coordCount(request, "latitude")))
+            }
+        }
+        val fetched = service(http, waits = waits).fetchGrid(42.75, -75.5)
+        assertEquals(1, usgs)
+        assertEquals(9, openMeteo)
+        assertTrue(waits.isEmpty())
+        assertEquals("Elevation model (90 m)", fetched.sourceLabel)
+    }
+
+    @Test
+    fun retryAfterUnderTheBudgetIsWaitedInFull() = runBlocking {
+        val waits = mutableListOf<Long>()
+        var calls = 0
+        val value = RateLimitBackoff.withRetries<String>(sleeper = { waits += it }) {
+            calls++
+            if (calls == 1) throw RateLimitedException("Elevation service", 429, "45")
+            "ok"
+        }
+        assertEquals("ok", value)
+        assertEquals(listOf(45_000L), waits)
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun cancelledFindDoesNotFallThroughToTheNextElevationSource() = runBlocking {
+        var usgs = 0
+        var openMeteo = 0
+        val http = fakeHttp(passUsgs = true) { request ->
+            if (request.url.encodedPath.contains("getSamples")) {
+                usgs++
+                json(request, 429, "{}", retryAfter = "1")
+            } else {
+                openMeteo++
+                json(request, 200, elevationJson(coordCount(request, "latitude")))
+            }
+        }
+        try {
+            service(http, sleeper = { throw kotlinx.coroutines.CancellationException("stop") }).fetchGrid(42.75, -75.5)
+            fail("cancellation should stop the search")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            assertEquals("stop", e.message)
+        }
+        assertEquals(1, usgs)
+        assertEquals(0, openMeteo)
+
+        var tiles = 0
+        val tileHttp = fakeHttp { request ->
+            tiles++
+            json(request, 429, "{}", retryAfter = "1")
+        }
+        try {
+            MapboxDem.elevationSamples(
+                listOf(42.75 to -75.5),
+                cacheDir = tempDir(),
+                http = tileHttp,
+                sleeper = { throw kotlinx.coroutines.CancellationException("stop mapbox") },
+                tokenOptional = true,
+            )
+            fail("cancellation should leave Mapbox")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            assertEquals("stop mapbox", e.message)
+        }
+        assertEquals(1, tiles)
+        assertNull(MapboxDem.lastError)
+    }
+
+    @Test
     fun mapboxAuthFailureIsNotRetried() = runBlocking {
         var calls = 0
         val http = fakeHttp { request ->
@@ -464,12 +559,13 @@ class StandElevationFetchTest {
         cache: ElevationGridCache = ElevationGridCache(tempDir(), linkedMapOf()),
         waits: MutableList<Long> = mutableListOf(),
         random: () -> Double = { 0.5 },
+        sleeper: (suspend (Long) -> Unit)? = null,
         mapbox: (suspend (List<Pair<Double, Double>>, File?) -> List<Double?>?)? = { _, _ -> null },
     ) = StandFinderService(
         context = context,
         httpClient = http,
         elevationCache = cache,
-        sleeper = { waits.add(it) },
+        sleeper = sleeper ?: { waits.add(it); Unit },
         randomUnit = random,
         mapboxElevations = mapbox,
     )

@@ -11,6 +11,7 @@ import kotlin.math.PI
 import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.tan
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -87,14 +88,19 @@ object MapboxDem {
             return null
         }
         lastError = null
-        return runCatching {
+        return try {
             val pixels = points.map { (lat, lon) -> globalPixel(lat, lon) }
             val tiles = pixels.flatMap { (x, y) -> neighbourTiles(x, y) }.toSet()
             val loaded = loadTiles(tiles, cacheDir, http, sleeper, random)
             pixels.map { (x, y) ->
                 sample(x, y, rejectVoid) { tx, ty -> loaded[key(tx, ty)] }
             }
-        }.onFailure { lastError = it.message ?: it.javaClass.simpleName }.getOrNull()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Throwable) {
+            lastError = e.message ?: e.javaClass.simpleName
+            null
+        }
     }
 
     /** Tiles a stand search needs, in a stable order, fetched one at a time. */

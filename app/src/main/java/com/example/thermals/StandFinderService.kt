@@ -9,6 +9,7 @@ import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
@@ -72,28 +73,31 @@ class StandFinderService internal constructor(
             } else {
                 MapboxDem.elevationSamples(points, appContext.cacheDir, sleeper = sleeper, random = randomUnit)
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: IOException) {
             MapboxDem.lastError = e.message
             null
         }
         if (mapbox != null) {
-            runCatching { gridFromSamples(lat, lon, mapbox) }.getOrNull()?.let { grid ->
+            ignoringFailure { gridFromSamples(lat, lon, mapbox) }?.let { grid ->
                 val fetch = ElevationFetch(grid, MapboxDem.SOURCE_LABEL)
                 grids.put(lat, lon, fetch)
                 return@withContext fetch
             }
         }
-        runCatching { fetchUsgsGrid(points) }.getOrNull()?.let { meters ->
-            runCatching {
-                gridFromSamples(lat, lon, meters.map { z -> if (z.isFinite()) z else null })
-            }.getOrNull()
-        }?.let { grid ->
-            val fetch = ElevationFetch(grid, USGS_SOURCE)
+        val usgs = ignoringFailure { fetchUsgsGrid(points) }?.let { meters ->
+            ignoringFailure { gridFromSamples(lat, lon, meters.map { z -> if (z.isFinite()) z else null }) }
+        }
+        if (usgs != null) {
+            val fetch = ElevationFetch(usgs, USGS_SOURCE)
             grids.put(lat, lon, fetch)
             return@withContext fetch
         }
         val grid = try {
             fetchOpenMeteoGrid(lat, lon, points)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: IOException) {
             val why = MapboxDem.lastError ?: throw e
             throw IOException("${e.message} (Mapbox terrain failed: $why)", e)
@@ -101,6 +105,15 @@ class StandFinderService internal constructor(
         val fetch = ElevationFetch(grid, "Elevation model (90 m)")
         grids.put(lat, lon, fetch)
         fetch
+    }
+
+    /** Source fallback: a failure moves on. Cancellation still stops the search. */
+    private inline fun <T> ignoringFailure(block: () -> T): T? = try {
+        block()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        null
     }
 
     /**
