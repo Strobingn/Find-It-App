@@ -22,6 +22,25 @@ data class ThermalWeatherDay(
     val windSource: String = "",
 )
 
+/** One 15-minute HRRR wind step, in site-local clock time. */
+data class QuarterWind(
+    /** ISO date, e.g. "2026-10-27". */
+    val date: String,
+    val hour: Int,
+    val minute: Int,
+    val windSpeedMph: Double,
+    val windFromDegrees: Double,
+    val gustMph: Double? = null,
+)
+
+/** One NWS gridpoint wind sample covering a UTC interval (speed already in mph). */
+data class NwsWindSample(
+    val utcStartMillis: Long,
+    val utcEndMillis: Long,
+    val speedMph: Double,
+    val fromDegrees: Double,
+)
+
 /** Forecast models, finest first. Each hour takes its values from the first model that has them. */
 enum class WindModel(val id: String, val label: String) {
     /** NOAA National Blend of Models: 2.5 km, bias-corrected, hourly to 36 h then 3-hourly, 11 days. CONUS. */
@@ -99,23 +118,120 @@ class ThermalWeatherClient(
     }
 
     suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
+        // Terrain doesn't move — reuse a recent result for this spot instead of hammering the
+        // free elevation services on every refresh (they rate-limit bursts with HTTP 429).
+        cachedTerrain(cacheKey(latitude, longitude))?.let { return@withContext it }
         val samples = terrainSamplePoints(latitude, longitude)
-        // Mapbox terrain first: ~10 m instead of 90 m, and not subject to Open-Meteo's per-IP limit.
-        MapboxDem.elevations(samples)?.let { meters ->
-            return@withContext terrainFromSamples(meters).copy(source = MapboxDem.SOURCE_LABEL)
+        // Prefer the USGS 3DEP point service — 1 m bare-earth LiDAR DEM in most of the eastern US.
+        // Mapbox terrain next: ~10 m instead of 90 m, and not subject to Open-Meteo's per-IP limit.
+        val terrain = lidarTerrain(samples)
+            ?: MapboxDem.elevations(samples)?.let { meters ->
+                terrainFromSamples(meters).copy(source = MapboxDem.SOURCE_LABEL)
+            }
+            ?: run {
+                val url = String.format(
+                    Locale.US,
+                    "%s?latitude=%s&longitude=%s",
+                    elevationEndpoint,
+                    samples.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
+                    samples.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
+                )
+                val json = JSONObject(get(url))
+                val array = json.optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
+                val meters = (0 until array.length()).map { array.getDouble(it) }
+                if (meters.size != samples.size) throw IOException("Elevation service returned ${meters.size} of ${samples.size} points")
+                terrainFromSamples(meters)
+            }
+        // Cache every source — an early return here used to skip caching for LiDAR/Mapbox results.
+        storeTerrain(cacheKey(latitude, longitude), terrain)
+        terrain
+    }
+
+    /**
+     * Samples the ring against USGS EPQS; null when 3DEP has no fine-grained coverage here or the
+     * service rate-limits us (HTTP 429) — the caller then quietly falls back to coarser sources.
+     * Requests are paced so a single refresh never looks like a burst.
+     */
+    private suspend fun lidarTerrain(samples: List<Pair<Double, Double>>): SiteTerrain? = runCatching {
+        val meters = mutableListOf<Double>()
+        var bestResolution = 0.0
+        for ((index, point) in samples.withIndex()) {
+            if (index > 0) kotlinx.coroutines.delay(EPQS_PACE_MS)
+            val (lat, lon) = point
+            val url = String.format(
+                Locale.US,
+                "%s?x=%.5f&y=%.5f&units=Meters&wkid=4326&includeDate=false",
+                EPQS_ENDPOINT,
+                lon,
+                lat,
+            )
+            val body = runCatching { get(url) }.getOrElse { firstError ->
+                if (!firstError.message.orEmpty().contains("429")) throw firstError
+                // Rate-limited: back off once, then give up on LiDAR for this refresh.
+                kotlinx.coroutines.delay(EPQS_BACKOFF_MS)
+                runCatching { get(url) }.getOrElse { return null }
+            }
+            val json = JSONObject(body)
+            val value = json.optDouble("value", Double.NaN)
+            if (value.isNaN() || value <= -1_000_000.0) return null // EPQS nodata
+            val resolution = json.optDouble("resolution", Double.NaN)
+            if (!resolution.isNaN()) bestResolution = maxOf(bestResolution, resolution)
+            if (bestResolution > 5.0) return null // only 10 m+ coverage here — Mapbox DEM is comparable
+            meters += value
         }
-        val url = String.format(
-            Locale.US,
-            "%s?latitude=%s&longitude=%s",
-            elevationEndpoint,
-            samples.joinToString(",") { String.format(Locale.US, "%.5f", it.first) },
-            samples.joinToString(",") { String.format(Locale.US, "%.5f", it.second) },
+        terrainFromSamples(meters).copy(
+            source = "USGS 3DEP LiDAR (≈%.0f m)".format(bestResolution.coerceAtLeast(1.0)),
         )
-        val json = JSONObject(get(url))
-        val array = json.optJSONArray("elevation") ?: throw IOException("Elevation service returned no data")
-        val meters = (0 until array.length()).map { array.getDouble(it) }
-        if (meters.size != samples.size) throw IOException("Elevation service returned ${meters.size} of ${samples.size} points")
-        terrainFromSamples(meters)
+    }.getOrNull()
+
+    /** HRRR wind at 15-minute steps for roughly the next 24 h (empty when unavailable). */
+    suspend fun fetchQuarterHourly(latitude: Double, longitude: Double): List<QuarterWind> = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = String.format(
+                Locale.US,
+                "%s?latitude=%.5f&longitude=%.5f" +
+                    "&minutely_15=wind_speed_10m,wind_direction_10m,wind_gusts_10m&models=%s" +
+                    "&wind_speed_unit=mph&timezone=auto&forecast_days=2",
+                forecastEndpoint,
+                latitude,
+                longitude,
+                WindModel.HRRR.id,
+            )
+            parseQuarterHourly(get(url))
+        }.getOrDefault(emptyList())
+    }
+
+    /** NWS gridpoint wind (speed + direction) for cross-checking the forecast; empty when unavailable. */
+    suspend fun fetchNwsWind(latitude: Double, longitude: Double): List<NwsWindSample> = withContext(Dispatchers.IO) {
+        runCatching {
+            val points = JSONObject(
+                getNws(String.format(Locale.US, "https://api.weather.gov/points/%.4f,%.4f", latitude, longitude)),
+            ).getJSONObject("properties")
+            val grid = JSONObject(getNws(points.getString("forecastGridData"))).getJSONObject("properties")
+            val speeds = intervalValues(grid.getJSONObject("windSpeed").getJSONArray("values"))
+            val dirs = intervalValues(grid.getJSONObject("windDirection").getJSONArray("values"))
+            dirs.mapNotNull { (start, end, dir) ->
+                // NWS km/h → mph. Pair each direction interval with the speed interval containing it.
+                val speed = speeds.firstOrNull { it.first <= start && it.second > start }?.third ?: return@mapNotNull null
+                NwsWindSample(start, end, speed * 0.621371, dir)
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /** Parses NWS ISO-8601 interval values ("2026-10-27T12:00:00+00:00/PT2H") into (startMs, endMs, value). */
+    private fun intervalValues(values: org.json.JSONArray): List<Triple<Long, Long, Double>> {
+        val out = mutableListOf<Triple<Long, Long, Double>>()
+        val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
+        for (i in 0 until values.length()) {
+            val entry = values.optJSONObject(i) ?: continue
+            if (entry.isNull("value")) continue
+            val parts = entry.optString("validTime").split("/")
+            if (parts.size != 2) continue
+            val start = runCatching { format.parse(parts[0])?.time }.getOrNull() ?: continue
+            val hours = parts[1].removePrefix("PT").removeSuffix("H").toDoubleOrNull() ?: continue
+            out += Triple(start, start + (hours * 3_600_000).toLong(), entry.getDouble("value"))
+        }
+        return out
     }
 
     private fun get(url: String): String {
@@ -133,6 +249,38 @@ class ThermalWeatherClient(
     companion object {
         const val FORECAST_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
         const val ELEVATION_ENDPOINT = "https://api.open-meteo.com/v1/elevation"
+
+        /** USGS 3DEP Elevation Point Query Service — 1 m bare-earth LiDAR where 3DEP covers. */
+        const val EPQS_ENDPOINT = "https://epqs.nationalmap.gov/v1/json"
+
+        /** Pause between EPQS point queries so one refresh never fires a 17-request burst. */
+        private const val EPQS_PACE_MS = 350L
+
+        /** Single retry wait when EPQS answers HTTP 429. */
+        private const val EPQS_BACKOFF_MS = 4_000L
+
+        /** Terrain cache: ~100 m cells, 24 h TTL. Terrain doesn't move; refreshes shouldn't re-poll. */
+        private const val TERRAIN_CACHE_TTL_MS = 24 * 60 * 60 * 1000L
+        private val terrainCacheEntries = object : LinkedHashMap<String, Pair<Long, SiteTerrain>>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, SiteTerrain>>?) = size > 64
+        }
+
+        private fun cacheKey(latitude: Double, longitude: Double): String =
+            String.format(Locale.US, "%.3f,%.3f", latitude, longitude)
+
+        private fun cachedTerrain(key: String): SiteTerrain? = synchronized(terrainCacheEntries) {
+            val entry = terrainCacheEntries[key] ?: return null
+            if (System.currentTimeMillis() - entry.first > TERRAIN_CACHE_TTL_MS) {
+                terrainCacheEntries.remove(key)
+                null
+            } else {
+                entry.second
+            }
+        }
+
+        private fun storeTerrain(key: String, terrain: SiteTerrain) = synchronized(terrainCacheEntries) {
+            terrainCacheEntries[key] = System.currentTimeMillis() to terrain
+        }
 
         /** Inner ring (slope) and outer ring (valley vs ridge) radii in meters. */
         const val INNER_RING_METERS = 150.0
@@ -308,6 +456,32 @@ class ThermalWeatherClient(
             return byDate.filterValues { it.size >= 6 }.map { (date, hours) ->
                 ThermalWeatherDay(date, tz.getOffset(System.currentTimeMillis()) / 60_000, hours, "NWS 2.5 km (fallback)")
             }
+        }
+
+        fun parseQuarterHourly(body: String): List<QuarterWind> {
+            val minutely = JSONObject(body).optJSONObject("minutely_15") ?: return emptyList()
+            val times = minutely.getJSONArray("time")
+            val speeds = minutely.getJSONArray("wind_speed_10m")
+            val dirs = minutely.getJSONArray("wind_direction_10m")
+            val gusts = minutely.optJSONArray("wind_gusts_10m")
+            val out = mutableListOf<QuarterWind>()
+            for (i in 0 until times.length()) {
+                val stamp = times.getString(i) // "2026-10-27T21:15"
+                if (speeds.isNull(i) || dirs.isNull(i)) continue
+                val date = stamp.substringBefore('T')
+                val clock = stamp.substringAfter('T').split(':')
+                val hour = clock.getOrNull(0)?.toIntOrNull() ?: continue
+                val minute = clock.getOrNull(1)?.toIntOrNull() ?: 0
+                out += QuarterWind(
+                    date = date,
+                    hour = hour,
+                    minute = minute,
+                    windSpeedMph = speeds.getDouble(i),
+                    windFromDegrees = dirs.getDouble(i),
+                    gustMph = if (gusts == null || gusts.isNull(i)) null else gusts.getDouble(i),
+                )
+            }
+            return out
         }
 
         private fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()

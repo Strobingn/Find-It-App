@@ -1,6 +1,11 @@
 package com.example.thermals
 
 import android.app.Application
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.TerrainAiGateway
@@ -52,6 +57,10 @@ data class ThermalUiState(
     val locationLabel: String = "",
     val source: ThermalWeatherSource = ThermalWeatherSource.MANUAL,
     val forecastDays: List<ThermalWeatherDay> = emptyList(),
+    /** HRRR 15-minute wind steps for roughly the next 24 h. */
+    val quarterHourly: List<QuarterWind> = emptyList(),
+    /** Set when the NWS grid forecast disagrees with the app forecast beyond the check thresholds. */
+    val nwsBadge: String? = null,
     val selectedDayIndex: Int = 0,
     /** Defaults mirror the classic case: 32 °F at 6 AM warming to 66 °F by noon. */
     val manualReadings: List<ManualReading> = listOf(ManualReading(6, 32.0), ManualReading(12, 66.0)),
@@ -107,6 +116,9 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
 
     private var fetchJob: Job? = null
     private var aiJob: Job? = null
+
+    /** Last NWS-disagreement text already alerted for; null when NWS and the forecast agree. */
+    private var lastNwsBadge: String? = null
 
     init {
         recompute()
@@ -180,12 +192,20 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
                 problems += "Terrain: ${error.localizedMessage ?: "unavailable"}"
                 null
             }
+            val quarters = if (days != null) client.fetchQuarterHourly(lat, lon) else null
+            val nws = if (days != null) client.fetchNwsWind(lat, lon) else null
+            val nwsBadge = if (days != null && !nws.isNullOrEmpty()) nwsDisagreement(days, nws) else null
+            // Alert once per new disagreement; resets to allow a fresh alert when models agree again.
+            if (nwsBadge != null && nwsBadge != lastNwsBadge) notifyNwsDisagreement(nwsBadge)
+            lastNwsBadge = nwsBadge
             _state.update { current ->
                 current.copy(
                     loading = false,
                     status = null,
                     error = problems.takeIf { it.isNotEmpty() }?.joinToString(" · ")?.let { "$it — you can still enter values by hand." },
                     forecastDays = days ?: current.forecastDays,
+                    quarterHourly = quarters ?: current.quarterHourly,
+                    nwsBadge = nwsBadge,
                     selectedDayIndex = 0,
                     source = if (days.isNullOrEmpty()) current.source else ThermalWeatherSource.FORECAST,
                     autoTerrain = terrain ?: current.autoTerrain,
@@ -322,8 +342,74 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
         _state.update { it.copy(forecast = forecast) }
     }
 
+    /** Posts a one-shot heads-up that the NWS grid disagrees with the app forecast. */
+    private fun notifyNwsDisagreement(badge: String) {
+        val app = getApplication<Application>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            app.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val manager = app.getSystemService(NotificationManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            manager.getNotificationChannel(NWS_CHANNEL_ID) == null
+        ) {
+            manager.createNotificationChannel(
+                NotificationChannel(NWS_CHANNEL_ID, "Forecast cross-check", NotificationManager.IMPORTANCE_DEFAULT),
+            )
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(app, NWS_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(app)
+        }
+        val notification = builder
+            .setContentTitle("NWS disagrees with the app forecast")
+            .setContentText(badge)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setAutoCancel(true)
+            .build()
+        runCatching { manager.notify(NWS_NOTIFICATION_ID, notification) }
+    }
+
     companion object {
         const val PLAN_TITLE = "Hunt plan"
+
+        private const val NWS_CHANNEL_ID = "forecast_cross_check"
+        private const val NWS_NOTIFICATION_ID = 4201
+
+        /**
+         * Flags hours where the NWS grid and the app forecast disagree materially:
+         * speed off by more than 4 mph, or direction off by more than 30° while the wind
+         * is strong enough to matter (≥ 2 mph). Returns null when they broadly agree.
+         */
+        fun nwsDisagreement(days: List<ThermalWeatherDay>, nws: List<NwsWindSample>): String? {
+            var compared = 0
+            var speedHits = 0
+            var dirHits = 0
+            var worstSpeed = 0.0
+            var worstDir = 0.0
+            for (day in days) {
+                // Local hour → UTC epoch: local = utc + offset.
+                val date = parseIsoDate(day.date) ?: continue
+                for (hour in day.hourly) {
+                    val localMidnightUtc = date.timeInMillis - day.utcOffsetMinutes * 60_000L
+                    val utcMillis = localMidnightUtc + hour.hour * 3_600_000L
+                    val sample = nws.firstOrNull { it.utcStartMillis <= utcMillis && it.utcEndMillis > utcMillis } ?: continue
+                    compared++
+                    val speedDiff = kotlin.math.abs(sample.speedMph - hour.windSpeedMph)
+                    var dirDiff = kotlin.math.abs(sample.fromDegrees - hour.windFromDegrees) % 360.0
+                    if (dirDiff > 180.0) dirDiff = 360.0 - dirDiff
+                    worstSpeed = maxOf(worstSpeed, speedDiff)
+                    worstDir = maxOf(worstDir, dirDiff)
+                    if (speedDiff > 4.0) speedHits++
+                    if (dirDiff > 30.0 && maxOf(sample.speedMph, hour.windSpeedMph) >= 2.0) dirHits++
+                }
+            }
+            if (compared == 0 || speedHits + dirHits == 0) return null
+            return "NWS disagrees $speedHits+$dirHits of $compared h (worst %.0f mph / %.0f°)".format(worstSpeed, worstDir)
+        }
 
         /** Assemble engine inputs from UI state; null until there is a location. */
         fun buildInputs(s: ThermalUiState, today: Calendar = Calendar.getInstance()): ThermalInputs? {
