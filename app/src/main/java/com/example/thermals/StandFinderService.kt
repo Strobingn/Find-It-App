@@ -35,7 +35,7 @@ data class StandSearchResult(
 )
 
 /**
- * Network side of the stand finder: a 750-yard-radius elevation grid (Open-Meteo, key-less), a satellite
+ * Network side of the stand finder: a 500-yard-radius elevation grid (Open-Meteo, key-less), a satellite
  * picture of the same square (Mapbox Static Images) and the cloud AI that turns terrain + thermals
  * + imagery into ranked stand and hunting-area picks.
  */
@@ -159,7 +159,7 @@ class StandFinderService(
 
     private suspend fun fetchOpenMeteoGrid(lat: Double, lon: Double): ElevationGrid {
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
-        // Open-Meteo takes up to 100 points per call; the 750-yard grid is ~9 calls, one after another (bursts trip
+        // Open-Meteo takes up to 100 points per call; the padded 500-yard grid is ~7 calls, one after another (bursts trip
         // its per-minute limit), backing off 3 s then 15 s when it answers 429.
         val meters = points.chunked(100).flatMap { chunk ->
             val url = String.format(
@@ -203,7 +203,7 @@ class StandFinderService(
     suspend fun fetchSatellite(lat: Double, lon: Double): SatelliteImage? = withContext(Dispatchers.IO) {
         val token = BuildConfig.MAPBOX_ACCESS_TOKEN.trim()
         if (token.isBlank()) return@withContext null
-        val span = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) + 120.0
+        val span = StandFinder.SEARCH_RADIUS_M * 2 + 120.0
         val zoom = StandFinder.zoomForSpan(lat, span, IMAGE_PX)
         val url = String.format(
             Locale.US,
@@ -242,7 +242,7 @@ class StandFinderService(
         val answer = gateway.generate(
             conversation = listOf(GeminiConversationTurn(role = "user", text = prompt.second)),
             systemContext = prompt.first,
-            image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view of the search area (750 yards each way from the center), north up, search center in the middle") },
+            image = image?.let { GeminiImageInput(it.bytes, it.mimeType, "Satellite view around the search center, north up. Place picks only within ${StandFinder.SEARCH_RADIUS_YARDS} yards of the center.") },
             onProviderStage = onStage,
             featureName = "stand_finder",
             // Low reasoning effort + streaming: picks in seconds instead of minutes, and the
@@ -405,7 +405,7 @@ class StandFinderService(
                     appendLine("FORECAST: not loaded — reason from terrain and generic thermals.")
                 }
                 appendLine()
-                appendLine("SEARCH AREA: everything within 750 yards of the center.")
+                appendLine("SEARCH AREA: everything within ${StandFinder.SEARCH_RADIUS_YARDS} yards of the center.")
                 appendLine("CANDIDATES (id | feature | image x%,y% | elev ft | slope° | uphill | AM score, honesty, scent→ | PM score, honesty, scent→ | road ft | house ft):")
                 candidates.forEach { c ->
                     val pos = image?.let {
@@ -463,7 +463,7 @@ class StandFinderService(
                     }
                     else -> continue
                 }
-                // Keep everything near the search square.
+                // Enforce the same circular limit for candidate and photo-based AI picks.
                 if (StandFinder.distanceMeters(centerLat, centerLon, position.first, position.second) > StandFinder.MAX_PICK_DISTANCE_M) continue
                 // Spots placed from the photo never went through findCandidates — keep them off roads and yards too.
                 if (obstacles.tooClose(position.first, position.second)) continue

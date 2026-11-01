@@ -108,7 +108,7 @@ class StandFinderTest {
     fun parsesAiPicksFromCandidatesAndImageSpots() {
         val grid = ridgeWithSaddle()
         val candidates = StandFinder.findCandidates(grid, ThermalWindEngine.flowField(forecastInputs()), 315.0)
-        val image = StandFinderService.SatelliteImage(ByteArray(0), "image/jpeg", 42.75, -75.5, StandFinder.zoomForSpan(42.75, 1_800.0, 640), 640, 640)
+        val image = StandFinderService.SatelliteImage(ByteArray(0), "image/jpeg", 42.75, -75.5, StandFinder.zoomForSpan(42.75, StandFinder.SEARCH_RADIUS_M * 2 + 120.0, 640), 640, 640)
         val text = """
             Here you go:
             [{"rank":2,"kind":"stand","x":60,"y":40,"title":"Field corner","best_time":"Evening sit","wind":"W","why":"Inside corner","entry":"From the road"},
@@ -132,21 +132,22 @@ class StandFinderTest {
     fun promptListsCandidatesWithImagePositions() {
         val grid = ridgeWithSaddle()
         val candidates = StandFinder.findCandidates(grid, null, null)
-        val image = StandFinderService.SatelliteImage(ByteArray(0), "image/jpeg", 42.75, -75.5, StandFinder.zoomForSpan(42.75, 1_800.0, 640), 640, 640)
+        val image = StandFinderService.SatelliteImage(ByteArray(0), "image/jpeg", 42.75, -75.5, StandFinder.zoomForSpan(42.75, StandFinder.SEARCH_RADIUS_M * 2 + 120.0, 640), 640, 640)
         val (system, user) = StandFinderService.buildPrompt(candidates, null, image, 42.75, -75.5, "Back 40", "Mon Oct 26")
         assertTrue(system.contains("JSON array"))
         assertTrue(user.contains("Back 40"))
+        assertTrue(user.contains("SEARCH AREA: everything within 500 yards of the center."))
         assertTrue(user.contains("Saddle"))
         assertTrue(user.lines().any { it.startsWith("1 |") })
     }
 
     @Test
-    fun searchReaches750YardsFromTheCenter() {
+    fun searchReaches500YardsFromTheCenter() {
         val yards = StandFinder.SEARCH_RADIUS_M / 0.9144
-        assertEquals(750.0, yards, 0.5)
-        // The elevation square covers the whole circle.
+        assertEquals(500.0, yards, 1e-6)
+        // Include two extra cells beyond the search circle for terrain classification.
         val halfAcrossM = StandFinder.GRID_SPACING_M * (StandFinder.GRID_SIZE - 1) / 2.0
-        assertTrue(halfAcrossM >= StandFinder.SEARCH_RADIUS_M)
+        assertTrue(halfAcrossM >= StandFinder.SEARCH_RADIUS_M + 2 * spacing)
         assertEquals(StandFinder.SEARCH_RADIUS_M, StandFinder.MAX_PICK_DISTANCE_M, 0.0)
     }
 
@@ -261,7 +262,7 @@ class StandFinderTest {
     }
 
     @Test
-    fun cornerCellsBeyond750YardsAreNotCandidates() {
+    fun cornerCellsBeyond500YardsAreNotCandidates() {
         val n = size
         val meters = DoubleArray(n * n) { 200.0 }
         val r = 2
@@ -269,7 +270,7 @@ class StandFinderTest {
         fun set(row: Int, col: Int, z: Double) {
             meters[row * n + col] = z
         }
-        // Shoulder of a corner hill: steep enough to classify, but outside the 750-yard circle.
+        // Shoulder of a corner hill: steep enough to classify, but outside the 500-yard circle.
         set(r, c, 250.0)
         set(r - 1, c, 240.0)
         set(r + 1, c, 220.0)
@@ -279,13 +280,73 @@ class StandFinderTest {
         assertNotNull(StandFinder.classify(grid, r, c, null))
         val (lat, lon) = grid.latLon(r, c)
         val dist = StandFinder.distanceMeters(grid.centerLat, grid.centerLon, lat, lon)
-        assertTrue("corner cell should sit outside 750 yards, was $dist m", dist > StandFinder.MAX_PICK_DISTANCE_M)
+        assertTrue("corner cell should sit outside 500 yards, was $dist m", dist > StandFinder.MAX_PICK_DISTANCE_M)
         val found = StandFinder.findCandidates(grid, null, null)
         assertTrue(found.none { StandFinder.distanceMeters(it.latitude, it.longitude, lat, lon) < 1.0 })
         found.forEach {
             val d = StandFinder.distanceMeters(grid.centerLat, grid.centerLon, it.latitude, it.longitude)
-            assertTrue("candidate at $d m past 750 yards", d <= StandFinder.MAX_PICK_DISTANCE_M + 1e-6)
+            assertTrue("candidate at $d m past 500 yards", d <= StandFinder.MAX_PICK_DISTANCE_M + 1e-6)
         }
+    }
+
+    @Test
+    fun aiPhotoAndCandidatePicksOutside500YardsAreDropped() {
+        val lat = 42.75
+        val lon = -75.5
+        val image = StandFinderService.SatelliteImage(
+            ByteArray(0), "image/jpeg", lat, lon,
+            StandFinder.zoomForSpan(lat, StandFinder.SEARCH_RADIUS_M * 2 + 120.0, 640), 640, 640,
+        )
+        fun point(yards: Double) = ThermalMapGeometry.destination(lat, lon, 90.0, yards * 0.9144)
+        val inside = point(450.0)
+        val outside = point(550.0)
+        fun photo(yards: Double, rank: Int): org.json.JSONObject {
+            val position = point(yards)
+            val (x, y) = StandFinder.latLonToImagePercent(
+                position.first, position.second, lat, lon, image.zoom, image.widthPx, image.heightPx,
+            )
+            assertTrue("test point must remain inside the image", x in 0.0..100.0 && y in 0.0..100.0)
+            return org.json.JSONObject().put("rank", rank).put("kind", "stand").put("x", x).put("y", y)
+        }
+        val base = StandFinder.findCandidates(ridgeWithSaddle(), null, null).first()
+        val candidates = listOf(
+            base.copy(id = 1, latitude = inside.first, longitude = inside.second),
+            base.copy(id = 2, latitude = outside.first, longitude = outside.second),
+        )
+        val response = org.json.JSONArray()
+            .put(photo(450.0, 1))
+            .put(photo(550.0, 2))
+            .put(org.json.JSONObject().put("rank", 3).put("candidate", 1))
+            .put(org.json.JSONObject().put("rank", 4).put("candidate", 2))
+        val picks = StandFinderService.parsePicks(response.toString(), candidates, image, lat, lon)
+        assertEquals(2, picks.size)
+        assertEquals(listOf<Int?>(null, 1), picks.map { it.candidateId })
+        assertTrue(picks.all {
+            StandFinder.distanceMeters(lat, lon, it.latitude, it.longitude) <= 500 * 0.9144
+        })
+    }
+
+    @Test
+    fun terrainBetween500And750YardsIsNotSentToTheAi() {
+        val n = size
+        val meters = DoubleArray(n * n) { 200.0 }
+        val r = 2
+        val c = n / 2
+        fun set(row: Int, col: Int, elevation: Double) { meters[row * n + col] = elevation }
+        set(r, c, 250.0)
+        set(r - 1, c, 240.0)
+        set(r + 1, c, 220.0)
+        set(r, c - 1, 230.0)
+        set(r, c + 1, 230.0)
+        val grid = ElevationGrid(42.75, -75.5, n, spacing, meters)
+        val position = grid.latLon(r, c)
+        val distance = StandFinder.distanceMeters(grid.centerLat, grid.centerLon, position.first, position.second)
+        assertTrue(distance > 500 * 0.9144 && distance < 750 * 0.9144)
+        assertNotNull(StandFinder.classify(grid, r, c, null))
+        val candidates = StandFinder.findCandidates(grid, null, null)
+        assertTrue(candidates.none {
+            StandFinder.distanceMeters(it.latitude, it.longitude, position.first, position.second) < 1.0
+        })
     }
 
     @Test

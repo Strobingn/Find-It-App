@@ -52,6 +52,11 @@ class StandGridCacheRegressionTest {
         val obsolete = cached()
         obsolete.getJSONObject("grid").put("spacing", StandFinder.GRID_SPACING_M * 2)
         assertNull(StandFinderService.parseCachedGrid(obsolete.toString(), 42.75, -75.5))
+        val old750YardGrid = cached()
+        old750YardGrid.getJSONObject("grid")
+            .put("size", 29)
+            .put("meters", JSONArray().apply { repeat(29 * 29) { put(300.0) } })
+        assertNull(StandFinderService.parseCachedGrid(old750YardGrid.toString(), 42.75, -75.5))
         assertNull(StandFinderService.parseCachedGrid("{broken", 42.75, -75.5))
     }
 }

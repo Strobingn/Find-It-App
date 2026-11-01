@@ -166,11 +166,12 @@ data class StandPick(
 
 object StandFinder {
 
-    /** Search reach from the set location: 750 yards. */
-    const val SEARCH_RADIUS_M = 750 * 0.9144
+    /** Search reach from the set location, shared with the AI prompt and map labels. */
+    const val SEARCH_RADIUS_YARDS = 500
+    const val SEARCH_RADIUS_M = SEARCH_RADIUS_YARDS * 0.9144
 
-    /** 28 × 50 m = 1,400 m across — a square that just covers the 750-yard circle. */
-    const val GRID_SIZE = 29
+    /** 24 × 50 m = 1,200 m across: the search circle plus two cells for terrain classification. */
+    const val GRID_SIZE = 25
 
     const val GRID_SPACING_M = 50.0
 
@@ -183,7 +184,7 @@ object StandFinder {
     /** One-way "away" (~135° from the approach) or a saddle crosswind. */
     const val STRONG_AWAY_ALIGN = 0.999
 
-    /** Anything farther than 750 yards from the search center is ignored. */
+    /** Anything farther than the search radius from the center is ignored. */
     const val MAX_PICK_DISTANCE_M = SEARCH_RADIUS_M
 
     /** Stay this far from mapped roads (~130 ft) and buildings (~200 ft). */

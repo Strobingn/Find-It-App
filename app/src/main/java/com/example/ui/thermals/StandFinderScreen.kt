@@ -279,7 +279,7 @@ fun StandFinderScreen(
             onMapLoaded = { mapLoaded = true },
             onMapLongClick = { latLng -> thermalViewModel.useLocation(latLng.latitude, latLng.longitude, "Map pin") },
         ) {
-            // Search center and the 750-yard reach of the search.
+            // Search center and the reach of the search.
             if (lat != null && lon != null) {
                 Circle(
                     center = LatLng(lat, lon),
@@ -399,7 +399,7 @@ fun StandFinderScreen(
                                         "${finder.picks.size} on-device picks · ${(finder.stage ?: "AI refining…").removeSuffix("…")}${aiElapsed?.let { " ${it}s" } ?: "…"}"
                                     finder.running -> (finder.stage ?: "Working…") + (aiElapsed?.let { " ${it}s" } ?: "")
                                     finder.source != null -> "${finder.picks.size} picks · ${finder.source}"
-                                    else -> "Scans 750 yards around you — terrain, thermals and wind — then the AI picks spots."
+                                    else -> "Scans ${StandFinder.SEARCH_RADIUS_YARDS} yards around you — terrain, thermals and wind — then the AI picks spots."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -629,8 +629,8 @@ private fun dotIcon(color: Color, sizePx: Int): BitmapDescriptor {
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
-/** Fits the 750-yard search circle on a phone screen. */
-private const val SEARCH_ZOOM = 14.6f
+/** Fits the 500-yard search circle on a phone screen. */
+private const val SEARCH_ZOOM = 15.2f
 private const val STAND_FIRST_HOUR = 4f
 private const val STAND_LAST_HOUR = 21f
 private const val STAND_PARTICLES = 260

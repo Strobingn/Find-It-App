@@ -21,7 +21,7 @@ import okhttp3.Request
 
 /**
  * Elevation from Mapbox's terrain-DEM tiles (USGS 3DEP-based in the US, ~10 m; z14 tiles are ~9 m a pixel),
- * decoded on the phone. A 750-yard stand search needs about four tiles instead of nine Open-Meteo calls, it doesn't
+ * decoded on the phone. A stand search needs only a handful of tiles instead of several Open-Meteo calls, it doesn't
  * count against Open-Meteo's per-IP limit (which phones on 5G share with everyone behind the same carrier address),
  * and tiles are cached on disk so a repeat search of the same ground needs no network at all.
  */
