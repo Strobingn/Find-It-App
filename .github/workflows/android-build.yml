@@ -1,7 +1,7 @@
 name: Find-it-appAPK
 
 # Tests and emulator smoke checks run for the branches below.
-# CODEX-ERROR-CHECK uploads a preview APK instead of publishing a GitHub Release.
+# Pushes, including CODEX-ERROR-CHECK, publish a signed APK release after all checks pass.
 on:
   push:
     branches: [main, "perf-*", "jules-*", "perf-historicmapcatalogclient-thread-sleep", CODEX-ERROR-CHECK]
@@ -200,7 +200,7 @@ jobs:
           retention-days: 14
 
   release:
-    if: github.event_name == 'push' && github.ref != 'refs/heads/CODEX-ERROR-CHECK'
+    if: github.event_name == 'push'
     needs: [test, smoke]
     runs-on: ubuntu-latest
     permissions:
@@ -363,9 +363,9 @@ jobs:
             || { echo "::error::Release missing APK asset"; exit 1; }
           echo "First-release style URL: https://github.com/${{ github.repository }}/releases/download/${TAG}/$(basename "$APK")"
 
-  # PR / manual / CODEX-ERROR-CHECK runs: upload an APK artifact without a GitHub Release.
+  # PR / manual runs: upload an APK artifact without a GitHub Release.
   apk-preview:
-    if: github.event_name != 'push' || github.ref == 'refs/heads/CODEX-ERROR-CHECK'
+    if: github.event_name != 'push'
     needs: [test, smoke]
     runs-on: ubuntu-latest
     permissions:
