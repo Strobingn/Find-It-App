@@ -6,6 +6,9 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -82,7 +85,9 @@ class ThermalWeatherClient(
             } catch (e: IOException) {
                 // Open-Meteo's free tier is limited per IP address, and phones on cellular share one. NWS is key-less.
                 if (!isRateLimit(e)) throw e
-                runCatching { fetchNwsForecast(latitude, longitude) }.getOrElse { throw e }
+                runCatching { fetchNwsForecast(latitude, longitude) }
+                    .onFailure { if (it is CancellationException) throw it }
+                    .getOrElse { throw e }
             }
         }
 
@@ -101,14 +106,15 @@ class ThermalWeatherClient(
     }
 
     /** US-only fallback: api.weather.gov gridpoint data (2.5 km NDFD), no key needed. */
-    private fun fetchNwsForecast(latitude: Double, longitude: Double): List<ThermalWeatherDay> {
+    private suspend fun fetchNwsForecast(latitude: Double, longitude: Double): List<ThermalWeatherDay> {
         val point = JSONObject(getNws(String.format(Locale.US, "https://api.weather.gov/points/%.4f,%.4f", latitude, longitude)))
             .getJSONObject("properties")
         val grid = getNws(point.getString("forecastGridData"))
         return parseNwsGrid(grid, point.optString("timeZone", "UTC"))
     }
 
-    private fun getNws(url: String): String {
+    private suspend fun getNws(url: String): String {
+        currentCoroutineContext().ensureActive()
         val request = Request.Builder().url(url).header("Accept", "application/geo+json")
             .header("User-Agent", "FindItApp (wildlife hunting app)").get().build()
         httpClient.newCall(request).execute().use { r ->
@@ -156,6 +162,7 @@ class ThermalWeatherClient(
         val meters = mutableListOf<Double>()
         var bestResolution = 0.0
         for ((index, point) in samples.withIndex()) {
+            currentCoroutineContext().ensureActive()
             if (index > 0) kotlinx.coroutines.delay(EPQS_PACE_MS)
             val (lat, lon) = point
             val url = String.format(
@@ -169,20 +176,16 @@ class ThermalWeatherClient(
                 if (!firstError.message.orEmpty().contains("429")) throw firstError
                 // Rate-limited: back off once, then give up on LiDAR for this refresh.
                 kotlinx.coroutines.delay(EPQS_BACKOFF_MS)
-                runCatching { get(url) }.getOrElse { return null }
+                get(url)
             }
-            val json = JSONObject(body)
-            val value = json.optDouble("value", Double.NaN)
-            if (value.isNaN() || value <= -1_000_000.0) return null // EPQS nodata
-            val resolution = json.optDouble("resolution", Double.NaN)
-            if (!resolution.isNaN()) bestResolution = maxOf(bestResolution, resolution)
-            if (bestResolution > 5.0) return null // only 10 m+ coverage here — Mapbox DEM is comparable
+            val (value, resolution) = parseFineElevation(body) ?: return null
+            bestResolution = maxOf(bestResolution, resolution)
             meters += value
         }
         terrainFromSamples(meters).copy(
             source = "USGS 3DEP LiDAR (≈%.0f m)".format(bestResolution.coerceAtLeast(1.0)),
         )
-    }.getOrNull()
+    }.onFailure { if (it is CancellationException) throw it }.getOrNull()
 
     /** HRRR wind at 15-minute steps for roughly the next 24 h (empty when unavailable). */
     suspend fun fetchQuarterHourly(latitude: Double, longitude: Double): List<QuarterWind> = withContext(Dispatchers.IO) {
@@ -198,7 +201,7 @@ class ThermalWeatherClient(
                 WindModel.HRRR.id,
             )
             parseQuarterHourly(get(url))
-        }.getOrDefault(emptyList())
+        }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
     }
 
     /** NWS gridpoint wind (speed + direction) for cross-checking the forecast; empty when unavailable. */
@@ -207,34 +210,12 @@ class ThermalWeatherClient(
             val points = JSONObject(
                 getNws(String.format(Locale.US, "https://api.weather.gov/points/%.4f,%.4f", latitude, longitude)),
             ).getJSONObject("properties")
-            val grid = JSONObject(getNws(points.getString("forecastGridData"))).getJSONObject("properties")
-            val speeds = intervalValues(grid.getJSONObject("windSpeed").getJSONArray("values"))
-            val dirs = intervalValues(grid.getJSONObject("windDirection").getJSONArray("values"))
-            dirs.mapNotNull { (start, end, dir) ->
-                // NWS km/h → mph. Pair each direction interval with the speed interval containing it.
-                val speed = speeds.firstOrNull { it.first <= start && it.second > start }?.third ?: return@mapNotNull null
-                NwsWindSample(start, end, speed * 0.621371, dir)
-            }
-        }.getOrDefault(emptyList())
+            parseNwsWind(getNws(points.getString("forecastGridData")))
+        }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyList())
     }
 
-    /** Parses NWS ISO-8601 interval values ("2026-10-27T12:00:00+00:00/PT2H") into (startMs, endMs, value). */
-    private fun intervalValues(values: org.json.JSONArray): List<Triple<Long, Long, Double>> {
-        val out = mutableListOf<Triple<Long, Long, Double>>()
-        val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        for (i in 0 until values.length()) {
-            val entry = values.optJSONObject(i) ?: continue
-            if (entry.isNull("value")) continue
-            val parts = entry.optString("validTime").split("/")
-            if (parts.size != 2) continue
-            val start = runCatching { format.parse(parts[0])?.time }.getOrNull() ?: continue
-            val hours = parts[1].removePrefix("PT").removeSuffix("H").toDoubleOrNull() ?: continue
-            out += Triple(start, start + (hours * 3_600_000).toLong(), entry.getDouble("value"))
-        }
-        return out
-    }
-
-    private fun get(url: String): String {
+    private suspend fun get(url: String): String {
+        currentCoroutineContext().ensureActive()
         val request = Request.Builder().url(url).header("Accept", "application/json").get().build()
         httpClient.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
@@ -280,6 +261,58 @@ class ThermalWeatherClient(
 
         private fun storeTerrain(key: String, terrain: SiteTerrain) = synchronized(terrainCacheEntries) {
             terrainCacheEntries[key] = System.currentTimeMillis() to terrain
+        }
+
+        /** Only claim fine LiDAR coverage when EPQS supplies a finite, positive resolution. */
+        internal fun parseFineElevation(body: String): Pair<Double, Double>? {
+            val json = JSONObject(body)
+            val value = json.optDouble("value", Double.NaN)
+            val resolution = json.optDouble("resolution", Double.NaN)
+            if (!value.isFinite() || value <= -1_000_000.0) return null
+            if (!resolution.isFinite() || resolution <= 0.0 || resolution > 5.0) return null
+            return value to resolution
+        }
+
+        /** Intersect independently changing speed and direction intervals before comparing forecasts. */
+        fun parseNwsWind(body: String): List<NwsWindSample> {
+            val grid = JSONObject(body).getJSONObject("properties")
+            val speeds = intervalValues(grid.getJSONObject("windSpeed").getJSONArray("values"))
+            val directions = intervalValues(grid.getJSONObject("windDirection").getJSONArray("values"))
+            val out = mutableListOf<NwsWindSample>()
+            var speedIndex = 0
+            var directionIndex = 0
+            while (speedIndex < speeds.size && directionIndex < directions.size) {
+                val speed = speeds[speedIndex]
+                val direction = directions[directionIndex]
+                val start = maxOf(speed.first, direction.first)
+                val end = minOf(speed.second, direction.second)
+                if (start < end) out += NwsWindSample(start, end, speed.third * 0.621371, direction.third)
+                if (speed.second <= direction.second) speedIndex++ else directionIndex++
+            }
+            return out
+        }
+
+        /** NWS intervals can include days, hours, minutes and seconds, e.g. P1DT2H or PT90M. */
+        private fun intervalValues(values: org.json.JSONArray): List<Triple<Long, Long, Double>> {
+            val out = mutableListOf<Triple<Long, Long, Double>>()
+            val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).apply {
+                isLenient = false
+            }
+            val duration = Regex("P(?:(\\d+)D)?(?:T(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+(?:\\.\\d+)?)S)?)?")
+            for (i in 0 until values.length()) {
+                val entry = values.optJSONObject(i) ?: continue
+                val value = entry.optDouble("value", Double.NaN)
+                if (!value.isFinite()) continue
+                val parts = entry.optString("validTime").split("/")
+                if (parts.size != 2) continue
+                val start = runCatching { format.parse(parts[0])?.time }.getOrNull() ?: continue
+                val match = duration.matchEntire(parts[1]) ?: continue
+                val seconds = match.groupValues.drop(1).map { it.toDoubleOrNull() ?: 0.0 }
+                    .zip(listOf(86_400.0, 3_600.0, 60.0, 1.0)).sumOf { (value, unit) -> value * unit }
+                if (!seconds.isFinite() || seconds <= 0.0) continue
+                out += Triple(start, start + (seconds * 1_000).toLong(), value)
+            }
+            return out.sortedBy { it.first }
         }
 
         /** Inner ring (slope) and outer ring (valley vs ridge) radii in meters. */

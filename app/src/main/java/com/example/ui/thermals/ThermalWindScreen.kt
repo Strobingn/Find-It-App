@@ -160,6 +160,10 @@ fun ThermalWindScreen(
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
 
+        state.nwsBadge?.takeIf { state.source == ThermalWeatherSource.FORECAST }?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+
         SetupSection(state = state, onOpen = { openSheet = it.name })
 
         val forecast = state.forecast
@@ -187,6 +191,23 @@ fun ThermalWindScreen(
                 onSelectHour = viewModel::selectHour,
             )
             forecast.hour(state.selectedHour)?.let { HourSection(it) }
+            val quarterSteps = state.quarterHourly.filter {
+                state.source == ThermalWeatherSource.FORECAST &&
+                    it.date == state.selectedDay?.date && it.hour == state.selectedHour
+            }.sortedBy { it.minute }
+            if (quarterSteps.isNotEmpty()) {
+                IosSection(header = "15-minute wind", footer = "NOAA HRRR · forecast wind before terrain and ground-cover adjustments") {
+                    quarterSteps.forEachIndexed { index, step ->
+                        if (index > 0) IosDivider()
+                        IosRow(
+                            title = "%02d:%02d".format(step.hour, step.minute),
+                            value = ThermalWindEngine.compass(step.windFromDegrees) +
+                                " %.0f mph".format(step.windSpeedMph) +
+                                (step.gustMph?.let { " · gusts %.0f".format(it) } ?: ""),
+                        )
+                    }
+                }
+            }
             SummarySection(forecast)
             AiSection(state = state, onPlan = { viewModel.askAi(null) }, onOpenChat = { openSheet = ThermalSheet.AI.name })
         }

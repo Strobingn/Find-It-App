@@ -11,10 +11,10 @@ import kotlin.math.PI
 import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.tan
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -58,15 +58,19 @@ object MapboxDem {
             val tiles = pixels.flatMap { (x, y) -> neighbourTiles(x, y) }.toSet()
             val loaded = loadTiles(tiles, cacheDir)
             pixels.map { (x, y) -> sample(x, y) { tx, ty -> loaded[key(tx, ty)] } ?: throw IOException("missing tile") }
-        }.onFailure { lastError = it.message ?: it.javaClass.simpleName }.getOrNull()
+        }.onFailure {
+            if (it is CancellationException) throw it
+            lastError = it.message ?: it.javaClass.simpleName
+        }.getOrNull()
     }
 
     private suspend fun loadTiles(tiles: Set<Pair<Int, Int>>, cacheDir: File?): Map<Long, IntArray> = withContext(Dispatchers.IO) {
-        coroutineScope {
-            tiles.map { (tx, ty) ->
-                async { key(tx, ty) to loadTile(tx, ty, cacheDir) }
-            }.awaitAll().toMap()
+        val loaded = LinkedHashMap<Long, IntArray>(tiles.size)
+        for ((tx, ty) in tiles) {
+            currentCoroutineContext().ensureActive()
+            loaded[key(tx, ty)] = loadTile(tx, ty, cacheDir)
         }
+        loaded
     }
 
     private suspend fun loadTile(tx: Int, ty: Int, cacheDir: File?): IntArray {
@@ -95,6 +99,7 @@ object MapboxDem {
         // One patient retry when Mapbox throttles the burst of tile requests (HTTP 429).
         var lastFailure: Throwable? = null
         repeat(2) { attempt ->
+            currentCoroutineContext().ensureActive()
             val result = runCatching {
                 http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
                     if (!r.isSuccessful) throw IOException("Mapbox terrain HTTP ${r.code}")
@@ -103,8 +108,10 @@ object MapboxDem {
             }
             result.getOrNull()?.let { return it }
             lastFailure = result.exceptionOrNull()
+            if (lastFailure is CancellationException) throw lastFailure!!
             val is429 = (lastFailure as? IOException)?.message?.contains("429") == true
-            if (attempt == 0 && is429) kotlinx.coroutines.delay(5_000)
+            if (!is429) throw lastFailure ?: IOException("Mapbox terrain returned nothing")
+            if (attempt == 0) kotlinx.coroutines.delay(5_000)
         }
         throw lastFailure ?: IOException("Mapbox terrain returned nothing")
     }

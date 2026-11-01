@@ -9,6 +9,9 @@ import java.io.File
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
@@ -60,7 +63,7 @@ class StandFinderService(
         }
         // A grid fetched in the last 24 h is still good terrain — serve it without touching the network.
         val cacheFile = gridCacheFile(lat, lon)
-        readGridCache(cacheFile)?.let { return@withContext it }
+        readGridCache(cacheFile, lat, lon)?.let { return@withContext it }
         val points = ElevationGrid.samplePoints(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M)
         MapboxDem.elevations(points, appContext.cacheDir)?.let { meters ->
             val fetch = ElevationFetch(
@@ -70,7 +73,10 @@ class StandFinderService(
             writeGridCache(cacheFile, fetch)
             return@withContext fetch
         }
-        runCatching { fetchUsgsGrid(points) }.getOrNull()?.let { meters ->
+        currentCoroutineContext().ensureActive()
+        runCatching { fetchUsgsGrid(points) }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrNull()?.let { meters ->
             val fetch = ElevationFetch(
                 ElevationGrid(lat, lon, StandFinder.GRID_SIZE, StandFinder.GRID_SPACING_M, meters.toDoubleArray()),
                 "USGS 3DEP elevation",
@@ -78,6 +84,7 @@ class StandFinderService(
             writeGridCache(cacheFile, fetch)
             return@withContext fetch
         }
+        currentCoroutineContext().ensureActive()
         val grid = try {
             fetchOpenMeteoGrid(lat, lon)
         } catch (e: IOException) {
@@ -89,25 +96,15 @@ class StandFinderService(
         fetch
     }
 
-    /** Cached elevation grids live in cacheDir/stand-grid-v1, keyed by rounded center, newest 32 kept. */
+    /** Cache each exact search center; rounding can return terrain displaced by an entire grid cell. */
     private fun gridCacheFile(lat: Double, lon: Double): File =
         File(File(appContext.cacheDir, GRID_CACHE_DIR).apply { mkdirs() },
-            String.format(Locale.US, "%.3f_%.3f.json", lat, lon))
+            gridCacheName(lat, lon))
 
-    private fun readGridCache(file: File): ElevationFetch? = runCatching {
+    private fun readGridCache(file: File, lat: Double, lon: Double): ElevationFetch? = runCatching {
         if (!file.isFile) return null
         if (System.currentTimeMillis() - file.lastModified() > GRID_CACHE_TTL_MS) return null
-        val o = JSONObject(file.readText())
-        val grid = o.getJSONObject("grid")
-        val meters = grid.getJSONArray("meters")
-        ElevationFetch(
-            ElevationGrid(
-                grid.getDouble("lat"), grid.getDouble("lon"),
-                grid.getInt("size"), grid.getDouble("spacing"),
-                DoubleArray(meters.length()) { meters.getDouble(it) },
-            ),
-            o.getString("source"),
-        )
+        parseCachedGrid(file.readText(), lat, lon)
     }.getOrNull()
 
     private fun writeGridCache(file: File, fetch: ElevationFetch) {
@@ -141,7 +138,8 @@ class StandFinderService(
     }
 
     /** US-only, key-less: USGS 3DEP samples for the whole grid in one POST. Throws if any point is missing. */
-    private fun fetchUsgsGrid(points: List<Pair<Double, Double>>): List<Double> {
+    private suspend fun fetchUsgsGrid(points: List<Pair<Double, Double>>): List<Double> {
+        currentCoroutineContext().ensureActive()
         val geometry = JSONObject()
             .put("points", JSONArray(points.map { JSONArray(listOf(it.second, it.first)) }))
             .put("spatialReference", JSONObject().put("wkid", 4326))
@@ -257,7 +255,8 @@ class StandFinderService(
         return picks to "${answer.provider.label} ${TerrainAiGateway.modelFor(answer.provider)}"
     }
 
-    private fun getText(url: String): String {
+    private suspend fun getText(url: String): String {
+        currentCoroutineContext().ensureActive()
         httpClient.newCall(Request.Builder().url(url).header("Accept", "application/json").get().build()).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IOException("Elevation service HTTP ${response.code}")
@@ -283,6 +282,24 @@ class StandFinderService(
         private const val GRID_CACHE_DIR = "stand-grid-v1"
         private const val GRID_CACHE_TTL_MS = 24L * 60 * 60 * 1000
         private const val GRID_CACHE_KEEP = 32
+
+        internal fun gridCacheName(lat: Double, lon: Double): String =
+            "${lat.toBits().toString(16)}_${lon.toBits().toString(16)}.json"
+
+        /** Reject corrupt, obsolete, or differently centered cache entries rather than misplacing picks. */
+        internal fun parseCachedGrid(body: String, lat: Double, lon: Double): ElevationFetch? = runCatching {
+            val o = JSONObject(body)
+            val grid = o.getJSONObject("grid")
+            if (grid.getDouble("lat") != lat || grid.getDouble("lon") != lon) return null
+            val size = grid.getInt("size")
+            val spacing = grid.getDouble("spacing")
+            if (size != StandFinder.GRID_SIZE || spacing != StandFinder.GRID_SPACING_M) return null
+            val values = grid.getJSONArray("meters")
+            if (values.length() != size * size) return null
+            val meters = DoubleArray(values.length()) { values.getDouble(it) }
+            if (meters.any { !it.isFinite() }) return null
+            ElevationFetch(ElevationGrid(lat, lon, size, spacing, meters), o.getString("source"))
+        }.getOrNull()
 
         /** Hosts the cloud AI providers are called on. */
         val AI_HOSTS = setOf("api.x.ai", "api.openai.com", "generativelanguage.googleapis.com")

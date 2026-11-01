@@ -141,6 +141,8 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
                 longitudeText = String.format(Locale.US, "%.5f", longitude),
                 locationLabel = label,
                 forecastDays = emptyList(),
+                quarterHourly = emptyList(),
+                nwsBadge = null,
                 autoTerrain = null,
             )
         }
@@ -204,7 +206,7 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
                     status = null,
                     error = problems.takeIf { it.isNotEmpty() }?.joinToString(" · ")?.let { "$it — you can still enter values by hand." },
                     forecastDays = days ?: current.forecastDays,
-                    quarterHourly = quarters ?: current.quarterHourly,
+                    quarterHourly = quarters.orEmpty(),
                     nwsBadge = nwsBadge,
                     selectedDayIndex = 0,
                     source = if (days.isNullOrEmpty()) current.source else ThermalWeatherSource.FORECAST,
@@ -388,13 +390,20 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
             var compared = 0
             var speedHits = 0
             var dirHits = 0
+            var disagreementHours = 0
             var worstSpeed = 0.0
             var worstDir = 0.0
             for (day in days) {
                 // Local hour → UTC epoch: local = utc + offset.
                 val date = parseIsoDate(day.date) ?: continue
+                // Treat the site's calendar date as midnight in UTC before applying its offset.
+                // parseIsoDate uses device-local noon for UI labels, which is not an epoch anchor.
+                val midnight = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                    clear()
+                    set(date.get(Calendar.YEAR), date.get(Calendar.MONTH), date.get(Calendar.DAY_OF_MONTH), 0, 0, 0)
+                }.timeInMillis
+                val localMidnightUtc = midnight - day.utcOffsetMinutes * 60_000L
                 for (hour in day.hourly) {
-                    val localMidnightUtc = date.timeInMillis - day.utcOffsetMinutes * 60_000L
                     val utcMillis = localMidnightUtc + hour.hour * 3_600_000L
                     val sample = nws.firstOrNull { it.utcStartMillis <= utcMillis && it.utcEndMillis > utcMillis } ?: continue
                     compared++
@@ -403,12 +412,15 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
                     if (dirDiff > 180.0) dirDiff = 360.0 - dirDiff
                     worstSpeed = maxOf(worstSpeed, speedDiff)
                     worstDir = maxOf(worstDir, dirDiff)
-                    if (speedDiff > 4.0) speedHits++
-                    if (dirDiff > 30.0 && maxOf(sample.speedMph, hour.windSpeedMph) >= 2.0) dirHits++
+                    val speedDisagrees = speedDiff > 4.0
+                    val directionDisagrees = dirDiff > 30.0 && maxOf(sample.speedMph, hour.windSpeedMph) >= 2.0
+                    if (speedDisagrees) speedHits++
+                    if (directionDisagrees) dirHits++
+                    if (speedDisagrees || directionDisagrees) disagreementHours++
                 }
             }
             if (compared == 0 || speedHits + dirHits == 0) return null
-            return "NWS disagrees $speedHits+$dirHits of $compared h (worst %.0f mph / %.0f°)".format(worstSpeed, worstDir)
+            return "NWS disagrees in $disagreementHours of $compared h ($speedHits speed, $dirHits direction; worst %.0f mph / %.0f°)".format(worstSpeed, worstDir)
         }
 
         /** Assemble engine inputs from UI state; null until there is a location. */
