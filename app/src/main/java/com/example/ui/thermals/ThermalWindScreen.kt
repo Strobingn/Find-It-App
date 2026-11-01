@@ -160,8 +160,15 @@ fun ThermalWindScreen(
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
 
-        state.nwsBadge?.takeIf { state.source == ThermalWeatherSource.FORECAST }?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        state.nwsBadge?.takeIf { state.source == ThermalWeatherSource.FORECAST }?.let { comparison ->
+            IosSection(header = "Wind forecast comparison") {
+                Text(
+                    comparison,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
         }
 
         SetupSection(state = state, onOpen = { openSheet = it.name })

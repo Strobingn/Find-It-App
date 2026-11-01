@@ -101,7 +101,7 @@ object MapboxDem {
         repeat(2) { attempt ->
             currentCoroutineContext().ensureActive()
             val result = runCatching {
-                http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
+                http.newCall(Request.Builder().url(url).get().build()).awaitResult { r ->
                     if (!r.isSuccessful) throw IOException("Mapbox terrain HTTP ${r.code}")
                     r.body?.bytes() ?: throw IOException("Mapbox terrain returned nothing")
                 }

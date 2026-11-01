@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.ai.TerrainAiGateway
 import com.example.geospatial.DaylightPlanner
 import com.example.geospatial.LocationTracker
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -104,8 +105,11 @@ data class ThermalUiState(
         }
 }
 
-class ThermalWindViewModel(application: Application) : AndroidViewModel(application) {
-    private val client = ThermalWeatherClient()
+class ThermalWindViewModel internal constructor(
+    application: Application,
+    private val client: ThermalWeatherProvider,
+) : AndroidViewModel(application) {
+    constructor(application: Application) : this(application, ThermalWeatherClient())
     private val advisor = ThermalAiAdvisor(application)
     private val locationTracker = LocationTracker(application)
 
@@ -135,6 +139,7 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun useLocation(latitude: Double, longitude: Double, label: String) {
+        lastNwsBadge = null
         edit {
             copy(
                 latitudeText = String.format(Locale.US, "%.5f", latitude),
@@ -176,45 +181,93 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
         }
         fetchJob?.cancel()
         fetchJob = viewModelScope.launch {
-            _state.update { it.copy(loading = true, status = "Loading forecast and terrain…", error = null) }
+            _state.update {
+                it.copy(loading = true, status = "Loading forecast and terrain…", error = null,
+                    quarterHourly = emptyList(), nwsBadge = null)
+            }
             val problems = mutableListOf<String>()
-            val days = try {
-                client.fetchForecast(lat, lon)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                problems += "Forecast: ${error.localizedMessage ?: "unavailable"}"
-                null
+            var forecastPending = true
+            var terrainPending = true
+            fun updateProgress() {
+                _state.update {
+                    it.copy(
+                        loading = forecastPending || terrainPending,
+                        status = when {
+                            forecastPending && terrainPending -> "Loading forecast and terrain…"
+                            forecastPending -> "Loading forecast…"
+                            terrainPending -> "Loading terrain…"
+                            else -> null
+                        },
+                        error = problems.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                            ?.let { problem -> "$problem — you can still enter values by hand." },
+                    )
+                }
             }
-            val terrain = try {
-                client.fetchTerrain(lat, lon)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                problems += "Terrain: ${error.localizedMessage ?: "unavailable"}"
-                null
+
+            launch {
+                val terrain = try {
+                    withTimeoutOrNull(TERRAIN_TIMEOUT_MS) { client.fetchTerrain(lat, lon) }
+                        ?: throw IOException("Terrain request timed out")
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    problems += "Terrain: ${error.localizedMessage ?: "unavailable"}"
+                    null
+                }
+                if (terrain != null) {
+                    _state.update { it.copy(autoTerrain = terrain, terrainMode = ThermalTerrainMode.AUTO) }
+                    recompute()
+                }
+                terrainPending = false
+                updateProgress()
             }
-            val quarters = if (days != null) client.fetchQuarterHourly(lat, lon) else null
-            val nws = if (days != null) client.fetchNwsWind(lat, lon) else null
-            val nwsBadge = if (days != null && !nws.isNullOrEmpty()) nwsDisagreement(days, nws) else null
-            // Alert once per new disagreement; resets to allow a fresh alert when models agree again.
-            if (nwsBadge != null && nwsBadge != lastNwsBadge) notifyNwsDisagreement(nwsBadge)
-            lastNwsBadge = nwsBadge
-            _state.update { current ->
-                current.copy(
-                    loading = false,
-                    status = null,
-                    error = problems.takeIf { it.isNotEmpty() }?.joinToString(" · ")?.let { "$it — you can still enter values by hand." },
-                    forecastDays = days ?: current.forecastDays,
-                    quarterHourly = quarters.orEmpty(),
-                    nwsBadge = nwsBadge,
-                    selectedDayIndex = 0,
-                    source = if (days.isNullOrEmpty()) current.source else ThermalWeatherSource.FORECAST,
-                    autoTerrain = terrain ?: current.autoTerrain,
-                    terrainMode = if (terrain != null) ThermalTerrainMode.AUTO else current.terrainMode,
-                )
+
+            launch {
+                val days = try {
+                    val fetched = withTimeoutOrNull(FORECAST_TIMEOUT_MS) { client.fetchForecast(lat, lon) }
+                        ?: throw IOException("Forecast request timed out")
+                    fetched.takeIf { it.isNotEmpty() } ?: throw IOException("Forecast returned no usable hours")
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    problems += "Forecast: ${error.localizedMessage ?: "unavailable"}"
+                    null
+                }
+                if (days != null) {
+                    // Publish immediately; terrain and optional cross-checks finish independently.
+                    _state.update {
+                        it.copy(forecastDays = days, selectedDayIndex = 0, source = ThermalWeatherSource.FORECAST)
+                    }
+                    recompute()
+                }
+                forecastPending = false
+                updateProgress()
+                if (days == null) return@launch
+
+                launch {
+                    val quarters = try {
+                        withTimeoutOrNull(SUPPLEMENT_TIMEOUT_MS) { client.fetchQuarterHourly(lat, lon) }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    _state.update { it.copy(quarterHourly = quarters.orEmpty()) }
+                }
+                launch {
+                    val nws = try {
+                        withTimeoutOrNull(SUPPLEMENT_TIMEOUT_MS) { client.fetchNwsWind(lat, lon) }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val badge = nws?.takeIf { it.isNotEmpty() }?.let { nwsDisagreement(days, it) }
+                    _state.update { it.copy(nwsBadge = badge) }
+                    if (badge != null && badge != lastNwsBadge) notifyNwsDisagreement(badge)
+                    lastNwsBadge = badge
+                }
             }
-            recompute()
         }
     }
 
@@ -367,7 +420,7 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
             Notification.Builder(app)
         }
         val notification = builder
-            .setContentTitle("NWS disagrees with the app forecast")
+            .setContentTitle("Wind forecast comparison")
             .setContentText(badge)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setAutoCancel(true)
@@ -380,11 +433,14 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
 
         private const val NWS_CHANNEL_ID = "forecast_cross_check"
         private const val NWS_NOTIFICATION_ID = 4201
+        internal const val FORECAST_TIMEOUT_MS = 45_000L
+        internal const val TERRAIN_TIMEOUT_MS = 35_000L
+        internal const val SUPPLEMENT_TIMEOUT_MS = 10_000L
 
         /**
          * Flags hours where the NWS grid and the app forecast disagree materially:
          * speed off by more than 4 mph, or direction off by more than 30° while the wind
-         * is strong enough to matter (≥ 2 mph). Returns null when they broadly agree.
+         * is at least 2 mph in both models. Returns null when they broadly agree.
          */
         fun nwsDisagreement(days: List<ThermalWeatherDay>, nws: List<NwsWindSample>): String? {
             var compared = 0
@@ -411,16 +467,17 @@ class ThermalWindViewModel(application: Application) : AndroidViewModel(applicat
                     var dirDiff = kotlin.math.abs(sample.fromDegrees - hour.windFromDegrees) % 360.0
                     if (dirDiff > 180.0) dirDiff = 360.0 - dirDiff
                     worstSpeed = maxOf(worstSpeed, speedDiff)
-                    worstDir = maxOf(worstDir, dirDiff)
+                    val directionMeaningful = minOf(sample.speedMph, hour.windSpeedMph) >= 2.0
+                    if (directionMeaningful) worstDir = maxOf(worstDir, dirDiff)
                     val speedDisagrees = speedDiff > 4.0
-                    val directionDisagrees = dirDiff > 30.0 && maxOf(sample.speedMph, hour.windSpeedMph) >= 2.0
+                    val directionDisagrees = dirDiff > 30.0 && directionMeaningful
                     if (speedDisagrees) speedHits++
                     if (directionDisagrees) dirHits++
                     if (speedDisagrees || directionDisagrees) disagreementHours++
                 }
             }
             if (compared == 0 || speedHits + dirHits == 0) return null
-            return "NWS disagrees in $disagreementHours of $compared h ($speedHits speed, $dirHits direction; worst %.0f mph / %.0f°)".format(worstSpeed, worstDir)
+            return "NWS wind differs in $disagreementHours of $compared hours: speed in $speedHits, direction in $dirHits. Largest differences: %.0f mph and %.0f°. The forecast is available; local wind may vary.".format(worstSpeed, worstDir)
         }
 
         /** Assemble engine inputs from UI state; null until there is a location. */

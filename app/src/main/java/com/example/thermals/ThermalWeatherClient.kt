@@ -61,13 +61,21 @@ enum class WindModel(val id: String, val label: String) {
  *  - Open-Meteo elevation (Copernicus 90 m DEM) sampled around the stand to estimate slope,
  *    the uphill direction and whether the spot sits in a draw/valley or on a ridge.
  */
+/** Weather operations consumed independently so a slow secondary source cannot hide a forecast. */
+interface ThermalWeatherProvider {
+    suspend fun fetchForecast(latitude: Double, longitude: Double, days: Int = 3): List<ThermalWeatherDay>
+    suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain
+    suspend fun fetchQuarterHourly(latitude: Double, longitude: Double): List<QuarterWind>
+    suspend fun fetchNwsWind(latitude: Double, longitude: Double): List<NwsWindSample>
+}
+
 class ThermalWeatherClient(
     private val httpClient: OkHttpClient = defaultHttpClient(),
     private val forecastEndpoint: String = FORECAST_ENDPOINT,
     private val elevationEndpoint: String = ELEVATION_ENDPOINT,
-) {
+) : ThermalWeatherProvider {
 
-    suspend fun fetchForecast(latitude: Double, longitude: Double, days: Int = 3): List<ThermalWeatherDay> =
+    override suspend fun fetchForecast(latitude: Double, longitude: Double, days: Int): List<ThermalWeatherDay> =
         withContext(Dispatchers.IO) {
             val url = String.format(
                 Locale.US,
@@ -117,13 +125,13 @@ class ThermalWeatherClient(
         currentCoroutineContext().ensureActive()
         val request = Request.Builder().url(url).header("Accept", "application/geo+json")
             .header("User-Agent", "FindItApp (wildlife hunting app)").get().build()
-        httpClient.newCall(request).execute().use { r ->
+        return httpClient.newCall(request).awaitResult { r ->
             if (!r.isSuccessful) throw IOException("NWS HTTP ${r.code}")
-            return r.body?.string().orEmpty()
+            r.body?.string().orEmpty()
         }
     }
 
-    suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
+    override suspend fun fetchTerrain(latitude: Double, longitude: Double): SiteTerrain = withContext(Dispatchers.IO) {
         // Terrain doesn't move — reuse a recent result for this spot instead of hammering the
         // free elevation services on every refresh (they rate-limit bursts with HTTP 429).
         cachedTerrain(cacheKey(latitude, longitude))?.let { return@withContext it }
@@ -188,7 +196,7 @@ class ThermalWeatherClient(
     }.onFailure { if (it is CancellationException) throw it }.getOrNull()
 
     /** HRRR wind at 15-minute steps for roughly the next 24 h (empty when unavailable). */
-    suspend fun fetchQuarterHourly(latitude: Double, longitude: Double): List<QuarterWind> = withContext(Dispatchers.IO) {
+    override suspend fun fetchQuarterHourly(latitude: Double, longitude: Double): List<QuarterWind> = withContext(Dispatchers.IO) {
         runCatching {
             val url = String.format(
                 Locale.US,
@@ -205,7 +213,7 @@ class ThermalWeatherClient(
     }
 
     /** NWS gridpoint wind (speed + direction) for cross-checking the forecast; empty when unavailable. */
-    suspend fun fetchNwsWind(latitude: Double, longitude: Double): List<NwsWindSample> = withContext(Dispatchers.IO) {
+    override suspend fun fetchNwsWind(latitude: Double, longitude: Double): List<NwsWindSample> = withContext(Dispatchers.IO) {
         runCatching {
             val points = JSONObject(
                 getNws(String.format(Locale.US, "https://api.weather.gov/points/%.4f,%.4f", latitude, longitude)),
@@ -217,13 +225,13 @@ class ThermalWeatherClient(
     private suspend fun get(url: String): String {
         currentCoroutineContext().ensureActive()
         val request = Request.Builder().url(url).header("Accept", "application/json").get().build()
-        httpClient.newCall(request).execute().use { response ->
+        return httpClient.newCall(request).awaitResult { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 val reason = runCatching { JSONObject(body).optString("reason") }.getOrNull().orEmpty()
                 throw IOException(reason.ifBlank { "Weather service HTTP ${response.code}" })
             }
-            return body
+            body
         }
     }
 

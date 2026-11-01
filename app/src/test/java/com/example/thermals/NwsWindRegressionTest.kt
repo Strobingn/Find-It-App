@@ -77,7 +77,7 @@ class NwsWindRegressionTest {
                     val sample = NwsWindSample(epoch(start), epoch(start) + 3_600_000, 12.0, 90.0)
                     val badge = ThermalWindViewModel.nwsDisagreement(days, listOf(sample))
                     assertNotNull("$deviceZone, $date: the hour must be compared", badge)
-                    assertTrue(badge!!.contains("1 of 1 h"))
+                    assertTrue(badge!!.contains("1 of 1 hours"))
                 }
             }
         } finally {
@@ -94,6 +94,17 @@ class NwsWindRegressionTest {
             NwsWindSample(start + 3_600_000, start + 86_400_000, 30.0, 180.0),
         )
         assertNull(ThermalWindViewModel.nwsDisagreement(days, samples))
+    }
+
+    @Test
+    fun directionIsNotComparedWhenEitherModelPredictsCalmWind() {
+        val start = epoch("2026-10-27T10:00:00Z")
+        for ((appSpeed, nwsSpeed) in listOf(0.5 to 4.0, 4.0 to 0.5)) {
+            val days = listOf(ThermalWeatherDay("2026-10-27", -240,
+                listOf(HourlyWeather(6, 45.0, appSpeed, 0.0, 0.0))))
+            val sample = NwsWindSample(start, start + 3_600_000, nwsSpeed, 160.0)
+            assertNull(ThermalWindViewModel.nwsDisagreement(days, listOf(sample)))
+        }
     }
 
     @Test
