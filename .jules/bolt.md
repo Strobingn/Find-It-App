@@ -1,3 +1,7 @@
 ## 2025-02-14 - HuntZoneClusterer group aggregation allocations
 **Learning:** Using functional Kotlin idioms (`members.map { ... }.average()`, `groupBy`, `maxWith`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`) for each cluster. Replacing these with single-pass primitive arrays (`DoubleArray`, `BooleanArray`) eliminates thousands of allocations in dense target sets.
 **Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations.
+
+## 2026-11-01 - FindSiteClusterer haversine pairwise filtering and group metric allocations
+**Learning:** In geographic clustering of targets (`FindSiteClusterer`), evaluating full haversine formulas across all $O(N^2)$ candidate pairs is CPU intensive due to repeated trigonometric calls (`sin`, `cos`, `atan2`, `sqrt`). A simple bounding-box delta check on latitude (`|lat1 - lat2| > radius / 111_000.0`) filters out distant pairs in $O(1)$ cheap arithmetic before invoking haversine. Furthermore, sorting groups with `.thenBy { group.map { ... }.average() }` causes redundant collection allocations during every comparator invocation; computing group metrics once into summary objects prevents repeated allocation spikes.
+**Action:** Pairwise spatial loops should always fast-reject with bounding-box delta checks before spherical distance formulas, and group metrics should be aggregated once rather than inside comparator lambdas.
