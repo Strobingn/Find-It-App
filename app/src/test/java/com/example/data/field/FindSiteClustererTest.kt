@@ -95,4 +95,58 @@ class FindSiteClustererTest {
         assertEquals(MetalType.IRON.label, site.topTypes.first())
         assertTrue(site.centerLatitude in 41.0..41.0002)
     }
+
+    @Test
+    fun boundingBoxRejectionMaintainsGroupingAcrossDenseGrid() {
+        // Create multiple clusters across different latitudes and longitudes
+        val signals = mutableListOf<TargetSignal>()
+        var id = 1L
+        // Cluster 1: near (41.0, -74.0), 5 finds within 20m of each other
+        for (i in 0 until 5) {
+            signals += find(id++, 41.0000 + i * 0.00005, -74.0000 + i * 0.00005)
+        }
+        // Cluster 2: near (41.005, -74.005), 3 finds (~550m away from cluster 1)
+        for (i in 0 until 3) {
+            signals += find(id++, 41.0050 + i * 0.00004, -74.0050 + i * 0.00004)
+        }
+        // Cluster 3: isolated find near (42.0, -75.0) (>100 km away)
+        signals += find(id++, 42.0000, -75.0000)
+
+        val sites = FindSiteClusterer.cluster(signals, radiusMeters = 50f)
+        assertEquals(3, sites.size)
+
+        // Ordered by size descending
+        assertEquals("Site A", sites[0].label)
+        assertEquals(5, sites[0].signals.size)
+        assertEquals((1L..5L).toSet(), sites[0].signals.map { it.id }.toSet())
+        assertEquals(41.0001, sites[0].centerLatitude, 1e-6)
+        assertEquals(-73.9999, sites[0].centerLongitude, 1e-6)
+
+        assertEquals("Site B", sites[1].label)
+        assertEquals(3, sites[1].signals.size)
+        assertEquals((6L..8L).toSet(), sites[1].signals.map { it.id }.toSet())
+        assertEquals(41.00504, sites[1].centerLatitude, 1e-6)
+        assertEquals(-74.00496, sites[1].centerLongitude, 1e-6)
+
+        assertEquals("Site C", sites[2].label)
+        assertEquals(1, sites[2].signals.size)
+        assertEquals(listOf(9L), sites[2].signals.map { it.id })
+        assertEquals(42.0, sites[2].centerLatitude, 1e-6)
+        assertEquals(-75.0, sites[2].centerLongitude, 1e-6)
+    }
+
+    @Test
+    fun tieBreakingByLatitudeOrdersIdenticallySizedSites() {
+        val signals = listOf(
+            find(1L, 42.0000, -74.0000), // Site with higher latitude
+            find(2L, 40.0000, -74.0000), // Site with lower latitude
+        )
+        val sites = FindSiteClusterer.cluster(signals, radiusMeters = 50f)
+        assertEquals(2, sites.size)
+        // Tie-breaker in sortedWith: .thenBy { it.centerLat }
+        assertEquals("Site A", sites[0].label)
+        assertEquals(40.0000, sites[0].centerLatitude, 1e-6)
+        assertEquals("Site B", sites[1].label)
+        assertEquals(42.0000, sites[1].centerLatitude, 1e-6)
+    }
 }

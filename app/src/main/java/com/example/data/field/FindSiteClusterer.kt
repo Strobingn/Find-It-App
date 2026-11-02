@@ -60,34 +60,75 @@ object FindSiteClusterer {
             if (rootFirst != rootSecond) parent[maxOf(rootFirst, rootSecond)] = minOf(rootFirst, rootSecond)
         }
 
-        for (first in positioned.indices) {
-            val a = positioned[first]
-            for (second in first + 1 until positioned.size) {
-                val b = positioned[second]
-                val distance = FieldNavigation.distanceMeters(
-                    a.latitude!!, a.longitude!!, b.latitude!!, b.longitude!!,
-                )
+        val count = positioned.size
+        // Pre-extract primitive coordinates to avoid repeated unboxing and non-null checks.
+        val lats = DoubleArray(count) { positioned[it].latitude!! }
+        val lons = DoubleArray(count) { positioned[it].longitude!! }
+
+        // Bounding-box fast reject: 1 degree of latitude is ~111,195 m.
+        // If |lat1 - lat2| exceeds this conservative threshold, the great-circle distance
+        // is guaranteed to exceed radiusMeters, skipping the expensive haversine computation.
+        val maxLatDelta = radiusMeters / 111_000.0
+
+        for (first in 0 until count) {
+            val lat1 = lats[first]
+            val lon1 = lons[first]
+            for (second in first + 1 until count) {
+                val lat2 = lats[second]
+                val dLat = if (lat1 > lat2) lat1 - lat2 else lat2 - lat1
+                if (dLat > maxLatDelta) continue
+
+                val distance = FieldNavigation.distanceMeters(lat1, lon1, lat2, lons[second])
                 if (distance <= radiusMeters) union(first, second)
             }
         }
 
-        val groups = positioned.indices.groupBy { root(it) }.values
-        val ordered = groups.sortedWith(
-            compareByDescending<List<Int>> { it.size }.thenBy { group ->
-                group.map { positioned[it].latitude!! }.average()
-            },
+        val groups = positioned.indices.groupBy { root(it) }
+
+        // Precompute group metrics in a single pass to eliminate intermediate collection allocations
+        // from repeated .map { ... }.average() during sorting and centroid computation.
+        class GroupSummary(
+            val members: List<Int>,
+            val centerLat: Double,
+            val centerLon: Double,
         )
-        return ordered.mapIndexed { index, group ->
-            val members = group.map { positioned[it] }
+
+        val summaries = groups.values.map { memberIndices ->
+            var sumLat = 0.0
+            var sumLon = 0.0
+            val size = memberIndices.size
+            for (idx in memberIndices) {
+                sumLat += lats[idx]
+                sumLon += lons[idx]
+            }
+            GroupSummary(
+                members = memberIndices,
+                centerLat = sumLat / size,
+                centerLon = sumLon / size,
+            )
+        }
+
+        val ordered = summaries.sortedWith(
+            compareByDescending<GroupSummary> { it.members.size }
+                .thenBy { it.centerLat },
+        )
+
+        return ordered.mapIndexed { index, summary ->
+            val members = ArrayList<TargetSignal>(summary.members.size)
+            for (idx in summary.members) {
+                members.add(positioned[idx])
+            }
+            members.sortBy { it.id }
+
             FindSite(
                 label = if (index < MAX_LABELLED_SITES) {
                     "Site ${'A' + index}"
                 } else {
                     "Site ${index + 1}"
                 },
-                centerLatitude = members.map { it.latitude!! }.average(),
-                centerLongitude = members.map { it.longitude!! }.average(),
-                signals = members.sortedBy { it.id },
+                centerLatitude = summary.centerLat,
+                centerLongitude = summary.centerLon,
+                signals = members,
             )
         }
     }
