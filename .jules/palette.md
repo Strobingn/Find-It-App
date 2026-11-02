@@ -1,0 +1,3 @@
+## 2026-03-30 - Accessible Stepper Semantics in Jetpack Compose
+**Learning:** Stepper buttons that render single punctuation symbols (e.g., `Text("–")` or `Text("+")`) inside an `IconButton` are announced verbatim by TalkBack as "minus/dash" and "plus", omitting what is changing and which direction. Adding `Modifier.semantics { contentDescription = "..." }` and bounding the `enabled` state (e.g. `reading.hour > 0`) provides screen readers with context and properly announces disabled state at bounds.
+**Action:** When implementing steppers or decrement/increment controls with text symbols, apply descriptive `semantics { contentDescription = "..." }` and explicit `enabled` boundary conditions on the `IconButton`.
