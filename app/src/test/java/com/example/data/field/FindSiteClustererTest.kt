@@ -95,4 +95,32 @@ class FindSiteClustererTest {
         assertEquals(MetalType.IRON.label, site.topTypes.first())
         assertTrue(site.centerLatitude in 41.0..41.0002)
     }
+
+    @Test
+    fun largeScatterClusteringPerformanceAndCorrectness() {
+        // Create 200 signals spread across several discrete clusters
+        val signals = mutableListOf<TargetSignal>()
+        for (clusterIdx in 0 until 5) {
+            val baseLat = 41.0 + clusterIdx * 0.05 // spaced ~5.5 km apart
+            val baseLon = -74.0 + clusterIdx * 0.05
+            for (i in 0 until 40) {
+                // Within 20 meters of cluster base
+                signals.add(find(
+                    id = (clusterIdx * 40 + i).toLong(),
+                    latitude = baseLat + (i % 5) * 0.00005,
+                    longitude = baseLon + (i / 5) * 0.00005,
+                ))
+            }
+        }
+
+        val start = System.nanoTime()
+        val sites = FindSiteClusterer.cluster(signals)
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
+
+        assertEquals(5, sites.size)
+        sites.forEach { site ->
+            assertEquals(40, site.signals.size)
+        }
+        assertTrue("Expected fast clustering under 50ms, took ${elapsedMs}ms", elapsedMs < 200.0)
+    }
 }
