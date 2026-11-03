@@ -58,6 +58,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -449,13 +451,25 @@ private fun ReadingRow(
         } else {
             Spacer(Modifier.width(12.dp))
         }
-        IconButton(onClick = { onChange(reading.copy(hour = (reading.hour - 1).coerceAtLeast(0))) }) { Text("–") }
+        IconButton(
+            onClick = { onChange(reading.copy(hour = (reading.hour - 1).coerceAtLeast(0))) },
+            enabled = reading.hour > 0,
+            modifier = Modifier.semantics { contentDescription = "Decrease hour" },
+        ) {
+            Text("–")
+        }
         Text(
             ThermalWindEngine.formatHour(reading.hour.toDouble()),
             modifier = Modifier.width(72.dp),
             style = MaterialTheme.typography.bodyLarge,
         )
-        IconButton(onClick = { onChange(reading.copy(hour = (reading.hour + 1).coerceAtMost(23))) }) { Text("+") }
+        IconButton(
+            onClick = { onChange(reading.copy(hour = (reading.hour + 1).coerceAtMost(23))) },
+            enabled = reading.hour < 23,
+            modifier = Modifier.semantics { contentDescription = "Increase hour" },
+        ) {
+            Text("+")
+        }
         OutlinedTextField(
             value = tempText,
             onValueChange = { text ->
