@@ -1,0 +1,3 @@
+## 2025-02-14 - Stepper buttons with symbol text in Jetpack Compose
+**Learning:** Stepper controls or incremental buttons using symbol text (e.g. `Text("–")` or `Text("+")`) inside an `IconButton` are read out by screen readers (like TalkBack) as punctuation rather than their functional intent, and lack disabled semantics at bounds. Adding `Modifier.semantics { contentDescription = "..." }` and bounding the `enabled` state (`enabled = value > min / value < max`) ensures screen readers announce actionable intent and prevents pointless interaction at boundary conditions.
+**Action:** Always provide explicit semantic content descriptions and bounded enabled states for symbol-only increment/decrement buttons in Compose.
