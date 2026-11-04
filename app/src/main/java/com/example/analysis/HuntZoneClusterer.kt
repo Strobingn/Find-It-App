@@ -66,25 +66,59 @@ object HuntZoneClusterer {
             }
         }
 
-        val groups = targets.indices.groupBy { find(it) }
+        // Group cluster members using an IntArray-backed linked list per root instead of
+        // targets.indices.groupBy { find(it) } to eliminate LinkedHashMap, Map.Entry, boxed Integers,
+        // and intermediate ArrayList allocations.
+        val n = targets.size
+        val head = IntArray(n) { -1 }
+        val next = IntArray(n) { -1 }
+        val roots = IntArray(n)
+        val memberCounts = IntArray(n)
+        var rootCount = 0
+
+        // Traverse in reverse so prepend results in elements appearing in ascending target index order
+        for (i in n - 1 downTo 0) {
+            val root = find(i)
+            if (head[root] == -1) {
+                roots[rootCount++] = root
+            }
+            next[i] = head[root]
+            head[root] = i
+            memberCounts[root]++
+        }
+
         val targetTypes = MetalDetectingTargetType.values()
         val numTypes = targetTypes.size
         val typeScoreSums = DoubleArray(numTypes)
         val hasType = BooleanArray(numTypes)
 
+        val memberIndices = IntArray(n)
+        val zones = ArrayList<HuntZone>(rootCount)
+
         // Single pass per cluster group to compute metrics without extra object allocations.
-        return groups.values.map { members ->
+        for (r in 0 until rootCount) {
+            val root = roots[r]
+            val count = memberCounts[root]
+
+            var curr = head[root]
+            var m = 0
+            while (curr != -1) {
+                memberIndices[m++] = curr
+                curr = next[curr]
+            }
+
             var sumX = 0.0
             var sumY = 0.0
-            var bestIdx = members[0]
+            var bestIdx = memberIndices[0]
             var bestScore = targets[bestIdx].score
 
             typeScoreSums.fill(0.0)
             hasType.fill(false)
 
-            val memberTargets = ArrayList<MetalDetectingTarget>(members.size)
+            val memberTargets = ArrayList<MetalDetectingTarget>(count)
 
-            for (idx in members) {
+            for (k in 0 until count) {
+                val idx = memberIndices[k]
                 val t = targets[idx]
                 sumX += t.xPercent
                 sumY += t.yPercent
@@ -98,8 +132,8 @@ object HuntZoneClusterer {
                 memberTargets.add(t)
             }
 
-            val centroidX = (sumX / members.size).toFloat()
-            val centroidY = (sumY / members.size).toFloat()
+            val centroidX = (sumX / count).toFloat()
+            val centroidY = (sumY / count).toFloat()
 
             // Find dominant type with highest sum score (break ties with highest ordinal to match comparator)
             var maxTypeScore = Double.NEGATIVE_INFINITY
@@ -117,11 +151,10 @@ object HuntZoneClusterer {
 
             // Calculate max pairwise distance span in O(M^2) indexing without object allocation
             var maxPairSq = 0f
-            val count = members.size
             for (i in 0 until count) {
-                val a = members[i]
+                val a = memberIndices[i]
                 for (j in i + 1 until count) {
-                    val b = members[j]
+                    val b = memberIndices[j]
                     val dx = xs[a] - xs[b]
                     val dy = ys[a] - ys[b]
                     val dSq = dx * dx + dy * dy
@@ -131,17 +164,21 @@ object HuntZoneClusterer {
 
             memberTargets.sortByDescending { it.score }
 
-            HuntZone(
-                id = 0, // assigned after sorting
-                centerXPercent = centroidX,
-                centerYPercent = centroidY,
-                targetCount = members.size,
-                bestScore = bestScore,
-                dominantType = dominantType,
-                spanMeters = sqrt(maxPairSq),
-                targets = memberTargets,
+            zones.add(
+                HuntZone(
+                    id = 0, // assigned after sorting
+                    centerXPercent = centroidX,
+                    centerYPercent = centroidY,
+                    targetCount = count,
+                    bestScore = bestScore,
+                    dominantType = dominantType,
+                    spanMeters = sqrt(maxPairSq),
+                    targets = memberTargets,
+                )
             )
         }
+
+        return zones
             .sortedByDescending { it.bestScore }
             .mapIndexed { index, zone -> zone.copy(id = index + 1) }
     }
