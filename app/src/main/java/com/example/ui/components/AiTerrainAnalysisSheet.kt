@@ -142,7 +142,7 @@ private fun AnalysisContent(
                 Icon(Icons.Default.PushPin, contentDescription = "Pin finding")
             }
             IconButton(onClick = { clipboard.setText(AnnotatedString(text)) }) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "Copy")
+                Icon(Icons.Default.ContentCopy, contentDescription = "Copy analysis to clipboard")
             }
         }
     }
