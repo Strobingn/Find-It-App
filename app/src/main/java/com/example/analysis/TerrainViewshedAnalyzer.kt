@@ -7,9 +7,9 @@ import kotlin.math.abs
 import kotlin.math.atan
 import kotlin.math.ceil
 import kotlin.math.cos
-import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 data class TerrainViewshed(
     val observerXPercent: Float,
@@ -104,10 +104,9 @@ object TerrainViewshedAnalyzer {
                     break
                 }
                 for (col in 0 until grid.width) {
-                    val distanceCells = hypot(
-                        (col - observerX).toDouble(),
-                        (row - observerY).toDouble(),
-                    ).toFloat()
+                    val dx = (col - observerX).toDouble()
+                    val dy = (row - observerY).toDouble()
+                    val distanceCells = sqrt(dx * dx + dy * dy).toFloat()
                     if (distanceCells > maxRadiusCells) continue
                     val index = row * grid.width + col
                     if (!grid.validData[index]) continue
@@ -207,14 +206,15 @@ object TerrainViewshedAnalyzer {
         } else {
             Float.POSITIVE_INFINITY
         }
+        val x0 = observerX.toDouble()
+        val y0 = observerY.toDouble()
+        val x1 = (grid.width - 1 - observerX).toDouble()
+        val y1 = (grid.height - 1 - observerY).toDouble()
         val edgeDistance = maxOf(
-            hypot(observerX.toDouble(), observerY.toDouble()),
-            hypot((grid.width - 1 - observerX).toDouble(), observerY.toDouble()),
-            hypot(observerX.toDouble(), (grid.height - 1 - observerY).toDouble()),
-            hypot(
-                (grid.width - 1 - observerX).toDouble(),
-                (grid.height - 1 - observerY).toDouble(),
-            ),
+            sqrt(x0 * x0 + y0 * y0),
+            sqrt(x1 * x1 + y0 * y0),
+            sqrt(x0 * x0 + y1 * y1),
+            sqrt(x1 * x1 + y1 * y1),
         ).toFloat()
         val walkLimit = minOf(maxRadiusCells, edgeDistance)
 
@@ -299,34 +299,39 @@ object TerrainViewshedAnalyzer {
         vegetationFilter: Float,
     ): Boolean {
         if (targetDistanceCells < 0.5f) return true
+        val deltaX = targetCol - observerX
+        val deltaY = targetRow - observerY
         val steps = ceil(
             maxOf(
-                abs(targetCol - observerX).toDouble(),
-                abs(targetRow - observerY).toDouble(),
+                abs(deltaX).toDouble(),
+                abs(deltaY).toDouble(),
             ),
         ).toInt().coerceAtLeast(1)
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
-        val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
+        // Slope = (elevation - eyeElevation) / distance.
+        // cellSize cancels out in comparison, so slope comparison is exact.
+        val targetSlope = (targetElevation - eyeElevation) / targetDistanceCells
 
-        var maxBlockingAngle = Float.NEGATIVE_INFINITY
+        var lastIndex = -1
         for (step in 1 until steps) {
             val fraction = step.toFloat() / steps
-            val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
+            val col = (observerX + deltaX * fraction).roundToInt()
                 .coerceIn(0, grid.width - 1)
-            val row = (observerY + (targetRow - observerY) * fraction).roundToInt()
+            val row = (observerY + deltaY * fraction).roundToInt()
                 .coerceIn(0, grid.height - 1)
             val index = row * grid.width + col
+            if (index == lastIndex) continue
+            lastIndex = index
             if (!grid.validData[index]) continue
             if (col == targetCol && row == targetRow) continue
-            val distanceCells = hypot(
-                (col - observerX).toDouble(),
-                (row - observerY).toDouble(),
-            ).toFloat()
+            val dx = (col - observerX).toDouble()
+            val dy = (row - observerY).toDouble()
+            val distanceCells = sqrt(dx * dx + dy * dy).toFloat()
             if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
-            val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
-                (distanceCells * cellSize)
-            if (angle > maxBlockingAngle) maxBlockingAngle = angle
+            val slope = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) / distanceCells
+            // Early exit: any intermediate cell meeting/exceeding targetSlope blocks line-of-sight
+            if (slope >= targetSlope) return false
         }
-        return targetAngle > maxBlockingAngle
+        return true
     }
 }
