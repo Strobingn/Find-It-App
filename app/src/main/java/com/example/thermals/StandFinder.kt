@@ -358,17 +358,24 @@ object StandFinder {
         val tol = 1.0 // meters; at DEM noise
 
         // Saddle: higher on both ends of one axis, lower on both ends of the perpendicular axis.
-        val pairs = listOf((n to s) to (e to w), (ne to sw) to (nw to se))
-        for ((up, down) in pairs) {
-            if (up.first > z + tol && up.second > z + tol && down.first < z - tol && down.second < z - tol) return StandFeature.SADDLE
-            if (down.first > z + tol && down.second > z + tol && up.first < z - tol && up.second < z - tol) return StandFeature.SADDLE
+        // Direct scalar checks avoid allocating nested Pair/List tuples per cell.
+        if ((n > z + tol && s > z + tol && e < z - tol && w < z - tol) ||
+            (e > z + tol && w > z + tol && n < z - tol && s < z - tol) ||
+            (ne > z + tol && sw > z + tol && nw < z - tol && se < z - tol) ||
+            (nw > z + tol && se > z + tol && ne < z - tol && sw < z - tol)
+        ) {
+            return StandFeature.SADDLE
         }
 
         val (uphill, slope) = ThermalMapGeometry.slopeFromSamples(n, s, e, w, spacing)
-        // Topographic position: center vs the ring two cells out.
-        val ring = mutableListOf<Double>()
-        for (dr in -2..2) for (dc in -2..2) if (abs(dr) == 2 || abs(dc) == 2) ring += grid.at(r + dr, c + dc)
-        val tpi = z - ring.average()
+        // Topographic position: center vs the 16 perimeter cells of the ring two cells out.
+        // Summing primitive doubles directly avoids allocating an ArrayList<Double> and 16 boxed Doubles per cell.
+        val ringSum = grid.at(r - 2, c - 2) + grid.at(r - 2, c - 1) + grid.at(r - 2, c) + grid.at(r - 2, c + 1) + grid.at(r - 2, c + 2) +
+            grid.at(r + 2, c - 2) + grid.at(r + 2, c - 1) + grid.at(r + 2, c) + grid.at(r + 2, c + 1) + grid.at(r + 2, c + 2) +
+            grid.at(r - 1, c - 2) + grid.at(r - 1, c + 2) +
+            grid.at(r, c - 2) + grid.at(r, c + 2) +
+            grid.at(r + 1, c - 2) + grid.at(r + 1, c + 2)
+        val tpi = z - (ringSum / 16.0)
 
         // Bench: flat here, with the fall line steep both uphill and downhill — not one cliff nearby.
         // A level shelf has no local uphill, so the fall line comes from the ground two cells out.
@@ -442,14 +449,29 @@ object StandFinder {
     /** Bearing of a saddle's low side (deer cross along this axis), from which neighbor pair is lower. */
     internal fun saddleLowAxis(grid: ElevationGrid, r: Int, c: Int): Double? {
         val z = grid.at(r, c)
-        val axes = listOf(
-            0.0 to ((grid.at(r - 1, c) + grid.at(r + 1, c)) / 2.0),
-            90.0 to ((grid.at(r, c + 1) + grid.at(r, c - 1)) / 2.0),
-            45.0 to ((grid.at(r - 1, c + 1) + grid.at(r + 1, c - 1)) / 2.0),
-            135.0 to ((grid.at(r + 1, c + 1) + grid.at(r - 1, c - 1)) / 2.0),
-        )
-        val lowest = axes.minByOrNull { it.second } ?: return null
-        return if (lowest.second < z) lowest.first else null
+        // Direct scalar comparison avoids allocating List/Pair objects per saddle candidate.
+        val ns = (grid.at(r - 1, c) + grid.at(r + 1, c)) * 0.5
+        val ew = (grid.at(r, c + 1) + grid.at(r, c - 1)) * 0.5
+        val neSw = (grid.at(r - 1, c + 1) + grid.at(r + 1, c - 1)) * 0.5
+        val nwSe = (grid.at(r + 1, c + 1) + grid.at(r - 1, c - 1)) * 0.5
+
+        var minVal = ns
+        var minBearing = 0.0
+
+        if (ew < minVal) {
+            minVal = ew
+            minBearing = 90.0
+        }
+        if (neSw < minVal) {
+            minVal = neSw
+            minBearing = 45.0
+        }
+        if (nwSe < minVal) {
+            minVal = nwSe
+            minBearing = 135.0
+        }
+
+        return if (minVal < z) minBearing else null
     }
 
     /** Offline picks when no AI is configured (or it fails): the top spots with plain-language notes. */
@@ -619,41 +641,53 @@ class MappedObstacles(
         private const val FEET_PER_METER = 3.28084
         private const val M_PER_DEG_LAT = 111_320.0
 
-        /** Local east/north metres of [p] relative to ([lat], [lon]) — exact enough over a mile. */
-        private fun project(lat: Double, lon: Double, p: Pair<Double, Double>): Pair<Double, Double> {
-            val x = (p.second - lon) * M_PER_DEG_LAT * kotlin.math.cos(Math.toRadians(lat))
-            val y = (p.first - lat) * M_PER_DEG_LAT
-            return x to y
-        }
-
-        /** Distance from the origin to segment a-b, in metres. */
-        private fun segmentDistance(a: Pair<Double, Double>, b: Pair<Double, Double>): Double {
-            val dx = b.first - a.first
-            val dy = b.second - a.second
+        /** Distance from the origin to segment (ax, ay)-(bx, by), in metres. */
+        private fun segmentDistance(ax: Double, ay: Double, bx: Double, by: Double): Double {
+            val dx = bx - ax
+            val dy = by - ay
             val len2 = dx * dx + dy * dy
-            val t = if (len2 == 0.0) 0.0 else ((-a.first * dx - a.second * dy) / len2).coerceIn(0.0, 1.0)
-            return kotlin.math.hypot(a.first + t * dx, a.second + t * dy)
+            val t = if (len2 == 0.0) 0.0 else ((-ax * dx - ay * dy) / len2).coerceIn(0.0, 1.0)
+            return kotlin.math.hypot(ax + t * dx, ay + t * dy)
         }
 
         fun polylineDistance(lat: Double, lon: Double, line: List<Pair<Double, Double>>, closed: Boolean): Double {
             if (line.isEmpty()) return Double.MAX_VALUE
-            val pts = line.map { project(lat, lon, it) }
-            if (pts.size == 1) return kotlin.math.hypot(pts[0].first, pts[0].second)
+            val n = line.size
+            val cosLat = kotlin.math.cos(Math.toRadians(lat))
+            // Project initial point on-the-fly without allocating intermediate List<Pair>
+            var prevX = (line[0].second - lon) * M_PER_DEG_LAT * cosLat
+            var prevY = (line[0].first - lat) * M_PER_DEG_LAT
+            if (n == 1) return kotlin.math.hypot(prevX, prevY)
+
             var best = Double.MAX_VALUE
-            for (i in 1 until pts.size) best = minOf(best, segmentDistance(pts[i - 1], pts[i]))
-            if (closed && pts.first() != pts.last()) best = minOf(best, segmentDistance(pts.last(), pts.first()))
+            val firstX = prevX
+            val firstY = prevY
+
+            for (i in 1 until n) {
+                val currX = (line[i].second - lon) * M_PER_DEG_LAT * cosLat
+                val currY = (line[i].first - lat) * M_PER_DEG_LAT
+                best = minOf(best, segmentDistance(prevX, prevY, currX, currY))
+                prevX = currX
+                prevY = currY
+            }
+            if (closed && line.first() != line.last()) {
+                best = minOf(best, segmentDistance(prevX, prevY, firstX, firstY))
+            }
             return best
         }
 
-        /** Ray-casting point-in-polygon test. */
+        /** Ray-casting point-in-polygon test with on-the-fly projections. */
         fun contains(lat: Double, lon: Double, ring: List<Pair<Double, Double>>): Boolean {
-            if (ring.size < 3) return false
-            val pts = ring.map { project(lat, lon, it) }
+            val n = ring.size
+            if (n < 3) return false
+            val cosLat = kotlin.math.cos(Math.toRadians(lat))
             var inside = false
-            var j = pts.size - 1
-            for (i in pts.indices) {
-                val (xi, yi) = pts[i]
-                val (xj, yj) = pts[j]
+            var j = n - 1
+            for (i in 0 until n) {
+                val xi = (ring[i].second - lon) * M_PER_DEG_LAT * cosLat
+                val yi = (ring[i].first - lat) * M_PER_DEG_LAT
+                val xj = (ring[j].second - lon) * M_PER_DEG_LAT * cosLat
+                val yj = (ring[j].first - lat) * M_PER_DEG_LAT
                 if ((yi > 0) != (yj > 0) && 0 < (xj - xi) * (0 - yi) / (yj - yi) + xi) inside = !inside
                 j = i
             }
