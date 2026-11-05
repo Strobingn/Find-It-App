@@ -98,4 +98,61 @@ class IosComponentsTest {
         rule.onNodeWithText("SETUP").assertExists()
         rule.onNodeWithText("Not set").assertExists()
     }
+
+    @Test
+    fun iosToolbarItemRendersLabelAndAction() {
+        var clicked = false
+        rule.setContent {
+            MyApplicationTheme(darkTheme = true) {
+                IosToolbarItem(
+                    label = "Tools",
+                    icon = Icons.Default.Home,
+                    onClick = { clicked = true },
+                )
+            }
+        }
+        rule.onNodeWithText("Tools").assertExists().performClick()
+        assertTrue("Toolbar item click should be triggered", clicked)
+    }
+
+    @Test
+    fun lidarControlPanelOptionGridHasSelectionSemantics() {
+        var selectedMode = 0
+        rule.setContent {
+            MyApplicationTheme(darkTheme = true) {
+                com.example.ui.components.LidarControlPanel(
+                    sunAzimuth = 315f,
+                    onSunAzimuthChanged = {},
+                    sunAltitude = 45f,
+                    onSunAltitudeChanged = {},
+                    vegetationFilter = 1f,
+                    onVegetationFilterChanged = {},
+                    paletteType = 0,
+                    onPaletteTypeChanged = {},
+                    contrast = 1.5f,
+                    onContrastChanged = {},
+                    visualizationMode = selectedMode,
+                    onVisualizationModeChanged = { selectedMode = it },
+                    overlayType = 0,
+                    onOverlayTypeChanged = {},
+                    overlayOpacity = 0.5f,
+                    onOverlayOpacityChanged = {},
+                    gridSpacing = 0f,
+                    onGridSpacingChanged = {},
+                    zScale = 1.5f,
+                    onZScaleChanged = {},
+                    featureScaleMeters = 10f,
+                    onFeatureScaleChanged = {},
+                    analysisSensitivity = 1f,
+                    onAnalysisSensitivityChanged = {},
+                    contourIntervalMeters = 0f,
+                    onContourIntervalChanged = {},
+                )
+            }
+        }
+        rule.onNodeWithTag("visualization_0").assertIsSelected()
+        rule.onNodeWithTag("visualization_1").assertIsNotSelected()
+        rule.onNodeWithTag("visualization_1").performClick()
+        assertEquals(1, selectedMode)
+    }
 }
