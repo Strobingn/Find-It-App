@@ -95,4 +95,66 @@ class FindSiteClustererTest {
         assertEquals(MetalType.IRON.label, site.topTypes.first())
         assertTrue(site.centerLatitude in 41.0..41.0002)
     }
+
+    @Test
+    fun highLatitudePointsWithinRadiusFormClusterCorrectly() {
+        // At 70°N, 1 degree of longitude is only ~38 km, so points within 50m have larger degree delta in longitude
+        // than at equator. Verify that bounding box threshold correctly clusters them without false pruning.
+        val signals = listOf(
+            find(1L, 70.0000, 20.0000),
+            find(2L, 70.0000, 20.0008), // ~30 meters apart at 70°N
+            find(3L, 0.0000, 0.0000),   // Far away point at equator in the same dataset
+        )
+        val sites = FindSiteClusterer.cluster(signals)
+        assertEquals(2, sites.size)
+        assertEquals("Site A", sites[0].label)
+        assertEquals(2, sites[0].signals.size)
+        assertEquals(setOf(1L, 2L), sites[0].signals.map { it.id }.toSet())
+    }
+
+    @Test
+    fun boundingBoxRejectionHandlesDistantLongitudesAndLatitudes() {
+        // Signals far apart across latitude or longitude should be pruned cleanly without grouping.
+        val distant = listOf(
+            find(1L, 41.0000, -74.0000),
+            find(2L, 41.0000, -73.5000), // ~42 km east
+            find(3L, 41.5000, -74.0000), // ~55 km north
+        )
+        val sites = FindSiteClusterer.cluster(distant)
+        assertEquals(3, sites.size)
+        assertEquals(1, sites[0].signals.size)
+        assertEquals(1, sites[1].signals.size)
+        assertEquals(1, sites[2].signals.size)
+    }
+
+    @Test
+    fun largeDenseSetCalculatesAccurateCentroidsAndOrdering() {
+        // 50 points in cluster 1 around (42.0, -73.0), 30 points in cluster 2 around (43.0, -73.0)
+        val list = mutableListOf<TargetSignal>()
+        for (i in 0 until 50) {
+            list.add(find(i.toLong(), 42.0000 + i * 0.00001, -73.0000 + i * 0.00001))
+        }
+        for (i in 50 until 80) {
+            list.add(find(i.toLong(), 43.0000 + (i - 50) * 0.00001, -73.0000 + (i - 50) * 0.00001))
+        }
+        val sites = FindSiteClusterer.cluster(list)
+        assertEquals(2, sites.size)
+        assertEquals("Site A", sites[0].label)
+        assertEquals(50, sites[0].signals.size)
+        assertEquals("Site B", sites[1].label)
+        assertEquals(30, sites[1].signals.size)
+        assertTrue(sites[0].centerLatitude in 42.0..42.001)
+        assertTrue(sites[1].centerLatitude in 43.0..43.001)
+    }
+
+    @Test
+    fun singleElementAndEmptyListsAreHandledGracefully() {
+        assertTrue(FindSiteClusterer.cluster(emptyList()).isEmpty())
+        val single = listOf(find(42L, 45.0, -70.0))
+        val sites = FindSiteClusterer.cluster(single)
+        assertEquals(1, sites.size)
+        assertEquals("Site A", sites[0].label)
+        assertEquals(45.0, sites[0].centerLatitude, 1e-6)
+        assertEquals(-70.0, sites[0].centerLongitude, 1e-6)
+    }
 }

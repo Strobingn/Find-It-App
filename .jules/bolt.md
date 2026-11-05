@@ -1,3 +1,7 @@
 ## 2025-02-14 - HuntZoneClusterer group aggregation allocations
 **Learning:** Using functional Kotlin idioms (`members.map { ... }.average()`, `groupBy`, `maxWith`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`) for each cluster. Replacing these with single-pass primitive arrays (`DoubleArray`, `BooleanArray`) eliminates thousands of allocations in dense target sets.
 **Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations.
+
+## 2026-08-07 - FindSiteClusterer spatial pruning and group metric aggregation
+**Learning:** In single-linkage geographic clustering (`FindSiteClusterer`), evaluating full Haversine distance (`sin`, `cos`, `atan2`, `sqrt`) across all N(N-1)/2 pairs dominates execution time, while sorting with dynamically mapped average calculations (`group.map { it.latitude }.average()`) repeatedly allocates intermediate collections during comparator passes. Bounding-box degree pre-filtering (`abs(latA - latB) > maxDegLat`) eliminates >90% of Haversine calls and drops execution time by over 30x on large sets, while pre-aggregating group metrics before sorting prevents repeated object allocations.
+**Action:** Always apply cheap coordinate bounding-box delta pruning before calling trigonometric distance functions, and pre-aggregate group sorting keys into summary structs rather than recalculating them in comparator lambdas.

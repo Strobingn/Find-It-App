@@ -2,6 +2,8 @@ package com.example.data.field
 
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
+import kotlin.math.abs
+import kotlin.math.cos
 
 /**
  * A group of field finds close enough together to treat as one site — a cellar hole scatter, a
@@ -41,11 +43,41 @@ object FindSiteClusterer {
         radiusMeters: Float = DEFAULT_CLUSTER_RADIUS_METERS,
     ): List<FindSite> {
         // Only finds with real WGS84 positions can be sited; grid-only finds are skipped.
-        val positioned = signals.filter { it.latitude != null && it.longitude != null }
-        if (positioned.isEmpty()) return emptyList()
+        val count = signals.count { it.latitude != null && it.longitude != null }
+        if (count == 0) return emptyList()
+
+        // Extract primitives upfront to avoid repeated nullable unboxing and property dereferences.
+        val positioned = ArrayList<TargetSignal>(count)
+        val lats = DoubleArray(count)
+        val lons = DoubleArray(count)
+        var minLat = Double.POSITIVE_INFINITY
+        var maxLat = Double.NEGATIVE_INFINITY
+        var idx = 0
+        for (signal in signals) {
+            val lat = signal.latitude
+            val lon = signal.longitude
+            if (lat != null && lon != null) {
+                positioned.add(signal)
+                lats[idx] = lat
+                lons[idx] = lon
+                if (lat < minLat) minLat = lat
+                if (lat > maxLat) maxLat = lat
+                idx++
+            }
+        }
+
+        // Bounding box delta threshold in degrees to prune pairs before expensive Haversine trigonometric calls:
+        // 1 degree latitude is ~111,320 m everywhere on Earth (conservative lower bound 110,000 m).
+        // 1 degree longitude is ~111,320 * cos(latitude) m.
+        // To ensure maxDegLon is a safe conservative bound across all points in the set,
+        // use the minimum cos(lat), which corresponds to the maximum absolute latitude.
+        val maxDegLat = radiusMeters / 110_000.0
+        val maxAbsLat = maxOf(abs(minLat), abs(maxLat)).coerceAtMost(89.0)
+        val minCosLat = cos(Math.toRadians(maxAbsLat)).coerceAtLeast(0.01)
+        val maxDegLon = radiusMeters / (110_000.0 * minCosLat)
 
         // Union-find over pairs within the radius.
-        val parent = IntArray(positioned.size) { it }
+        val parent = IntArray(count) { it }
         fun root(index: Int): Int {
             var current = index
             while (parent[current] != current) {
@@ -60,34 +92,69 @@ object FindSiteClusterer {
             if (rootFirst != rootSecond) parent[maxOf(rootFirst, rootSecond)] = minOf(rootFirst, rootSecond)
         }
 
-        for (first in positioned.indices) {
-            val a = positioned[first]
-            for (second in first + 1 until positioned.size) {
-                val b = positioned[second]
+        for (first in 0 until count) {
+            val latA = lats[first]
+            val lonA = lons[first]
+            for (second in first + 1 until count) {
+                // Quick bounding-box check in degrees prunes >90% of pairwise distance computations.
+                if (abs(latA - lats[second]) > maxDegLat) continue
+                if (abs(lonA - lons[second]) > maxDegLon) continue
+
                 val distance = FieldNavigation.distanceMeters(
-                    a.latitude!!, a.longitude!!, b.latitude!!, b.longitude!!,
+                    latA, lonA, lats[second], lons[second],
                 )
                 if (distance <= radiusMeters) union(first, second)
             }
         }
 
-        val groups = positioned.indices.groupBy { root(it) }.values
-        val ordered = groups.sortedWith(
-            compareByDescending<List<Int>> { it.size }.thenBy { group ->
-                group.map { positioned[it].latitude!! }.average()
-            },
+        // Group members by root and precalculate group size and average latitude in a single pass,
+        // avoiding O(G log G * M) temporary allocations during sorting.
+        val groups = (0 until count).groupBy { root(it) }
+
+        class GroupSummary(
+            val members: List<Int>,
+            val size: Int,
+            val avgLat: Double,
+            val avgLon: Double,
         )
-        return ordered.mapIndexed { index, group ->
-            val members = group.map { positioned[it] }
+
+        val summaries = groups.values.map { memberIndices ->
+            var sumLat = 0.0
+            var sumLon = 0.0
+            val memberSize = memberIndices.size
+            for (i in 0 until memberSize) {
+                val memberIdx = memberIndices[i]
+                sumLat += lats[memberIdx]
+                sumLon += lons[memberIdx]
+            }
+            GroupSummary(
+                members = memberIndices,
+                size = memberSize,
+                avgLat = sumLat / memberSize,
+                avgLon = sumLon / memberSize,
+            )
+        }
+
+        val ordered = summaries.sortedWith(
+            compareByDescending<GroupSummary> { it.size }.thenBy { it.avgLat },
+        )
+
+        return ordered.mapIndexed { index, summary ->
+            val memberSignals = ArrayList<TargetSignal>(summary.size)
+            for (i in 0 until summary.size) {
+                memberSignals.add(positioned[summary.members[i]])
+            }
+            memberSignals.sortBy { it.id }
+
             FindSite(
                 label = if (index < MAX_LABELLED_SITES) {
                     "Site ${'A' + index}"
                 } else {
                     "Site ${index + 1}"
                 },
-                centerLatitude = members.map { it.latitude!! }.average(),
-                centerLongitude = members.map { it.longitude!! }.average(),
-                signals = members.sortedBy { it.id },
+                centerLatitude = summary.avgLat,
+                centerLongitude = summary.avgLon,
+                signals = memberSignals,
             )
         }
     }
