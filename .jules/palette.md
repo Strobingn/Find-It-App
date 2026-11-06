@@ -1,0 +1,3 @@
+## 2025-02-14 - Jetpack Compose Steppers with Symbol Characters
+**Learning:** In Jetpack Compose, using an `IconButton` that wraps bare symbol characters like `Text("–")` or `Text("+")` causes screen readers (TalkBack) to announce the raw glyph ("dash" or "plus") rather than the semantic action. Additionally, lacking an `enabled` condition allows continuous triggering past logical bounds with no disabled visual or auditory feedback.
+**Action:** When implementing steppers or increment/decrement buttons with text glyphs, always add explicit semantics (`modifier = Modifier.semantics { contentDescription = "..." }`) and bound the `enabled` state (e.g. `reading.hour > minHour`) to ensure proper accessibility announcements and disabled states.
