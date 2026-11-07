@@ -308,7 +308,10 @@ object TerrainViewshedAnalyzer {
         val targetElevation = grid.getElevationAt(targetCol, targetRow, vegetationFilter)
         val targetAngle = (targetElevation - eyeElevation) / (targetDistanceCells * cellSize)
 
-        var maxBlockingAngle = Float.NEGATIVE_INFINITY
+        // Early exit optimization: An intermediate cell blocks line-of-sight if its elevation
+        // angle meets or exceeds targetAngle. Because max blocking angle only monotonically
+        // increases along the ray, encountering any angle >= targetAngle guarantees the target
+        // cannot be seen. Exiting immediately skips hundreds of ray steps on occluded terrain.
         for (step in 1 until steps) {
             val fraction = step.toFloat() / steps
             val col = (observerX + (targetCol - observerX) * fraction).roundToInt()
@@ -325,8 +328,8 @@ object TerrainViewshedAnalyzer {
             if (distanceCells < 0.5f || distanceCells >= targetDistanceCells) continue
             val angle = (grid.getElevationAt(col, row, vegetationFilter) - eyeElevation) /
                 (distanceCells * cellSize)
-            if (angle > maxBlockingAngle) maxBlockingAngle = angle
+            if (angle >= targetAngle) return false
         }
-        return targetAngle > maxBlockingAngle
+        return true
     }
 }

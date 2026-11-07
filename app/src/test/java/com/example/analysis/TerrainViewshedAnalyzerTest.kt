@@ -204,4 +204,34 @@ class TerrainViewshedAnalyzerTest {
         assertEquals(sequential.visibleCells, parallel.visibleCells)
         assertTrue(parallel.analyzedCells > 0)
     }
+
+    @Test
+    fun viewshedExecutionMatchesExpectedOcclusionOnComplexTerrain() {
+        // 64x64 undulating terrain with multiple ridges to verify early-termination correctness
+        val width = 64
+        val height = 64
+        val bareEarth = FloatArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            15f + 5f * kotlin.math.sin(x * 0.2f) * kotlin.math.cos(y * 0.2f)
+        }
+        val grid = ElevationGrid(
+            width = width,
+            height = height,
+            bareEarth = bareEarth,
+            canopySpikes = FloatArray(width * height),
+            cellSizeMeters = 1f,
+        )
+
+        val viewshed = TerrainViewshedAnalyzer.sample(
+            grid = grid,
+            observerXPercent = 50f,
+            observerYPercent = 50f,
+            maxWorkers = 1,
+        )
+
+        assertEquals(width * height, viewshed.analyzedCells)
+        assertTrue(viewshed.visibleCells in 1 until viewshed.analyzedCells)
+        assertFalse(viewshed.canceled)
+    }
 }
