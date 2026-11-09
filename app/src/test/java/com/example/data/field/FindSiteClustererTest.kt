@@ -95,4 +95,23 @@ class FindSiteClustererTest {
         assertEquals(MetalType.IRON.label, site.topTypes.first())
         assertTrue(site.centerLatitude in 41.0..41.0002)
     }
+
+    @Test
+    fun largeDispersedFindSetClusteringPerformance() {
+        // 200 finds arranged in 5 spaced clusters of 40 finds each
+        val signals = (0 until 200).map { i ->
+            val clusterIdx = i % 5
+            val offset = (i / 5) * 0.00005 // within cluster spacing (< 50m)
+            find(
+                id = i.toLong(),
+                latitude = 41.0 + clusterIdx * 0.05 + offset,
+                longitude = -74.0 + clusterIdx * 0.05 + offset,
+            )
+        }
+        val sites = FindSiteClusterer.cluster(signals, radiusMeters = 50f)
+        assertEquals(5, sites.size)
+        for (site in sites) {
+            assertEquals(40, site.signals.size)
+        }
+    }
 }

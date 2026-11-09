@@ -2,6 +2,8 @@ package com.example.data.field
 
 import com.example.data.TargetSignal
 import com.example.data.VerificationOutcome
+import kotlin.math.PI
+import kotlin.math.abs
 
 /**
  * A group of field finds close enough together to treat as one site — a cellar hole scatter, a
@@ -35,6 +37,14 @@ data class FindSite(
 object FindSiteClusterer {
     const val DEFAULT_CLUSTER_RADIUS_METERS = 50f
     private const val MAX_LABELLED_SITES = 26
+    private const val EARTH_RADIUS_METERS = 6_371_008.8
+
+    private class SiteGroupSummary(
+        val size: Int,
+        val centerLat: Double,
+        val centerLon: Double,
+        val members: List<TargetSignal>,
+    )
 
     fun cluster(
         signals: List<TargetSignal>,
@@ -44,8 +54,17 @@ object FindSiteClusterer {
         val positioned = signals.filter { it.latitude != null && it.longitude != null }
         if (positioned.isEmpty()) return emptyList()
 
+        val n = positioned.size
+        // Pre-extract primitive arrays to avoid repeated boxing / property accesses on the hot path
+        val lats = DoubleArray(n) { positioned[it].latitude!! }
+        val lons = DoubleArray(n) { positioned[it].longitude!! }
+
+        // Maximum delta latitude in degrees for the given radius:
+        // arcDistance >= |lat1 - lat2|, so if |lat1 - lat2| > maxLatDeltaDeg, the points cannot be within radius.
+        val maxLatDeltaDeg = (radiusMeters / EARTH_RADIUS_METERS) * (180.0 / PI)
+
         // Union-find over pairs within the radius.
-        val parent = IntArray(positioned.size) { it }
+        val parent = IntArray(n) { it }
         fun root(index: Int): Int {
             var current = index
             while (parent[current] != current) {
@@ -60,34 +79,57 @@ object FindSiteClusterer {
             if (rootFirst != rootSecond) parent[maxOf(rootFirst, rootSecond)] = minOf(rootFirst, rootSecond)
         }
 
-        for (first in positioned.indices) {
-            val a = positioned[first]
-            for (second in first + 1 until positioned.size) {
-                val b = positioned[second]
+        // Fast bounding-box check: skips expensive Haversine computation (sin/cos/atan2/sqrt)
+        // for candidate pairs whose latitude difference alone exceeds the search radius.
+        for (first in 0 until n) {
+            val latA = lats[first]
+            val lonA = lons[first]
+            for (second in first + 1 until n) {
+                if (abs(latA - lats[second]) > maxLatDeltaDeg) continue
                 val distance = FieldNavigation.distanceMeters(
-                    a.latitude!!, a.longitude!!, b.latitude!!, b.longitude!!,
+                    latA, lonA, lats[second], lons[second],
                 )
                 if (distance <= radiusMeters) union(first, second)
             }
         }
 
-        val groups = positioned.indices.groupBy { root(it) }.values
-        val ordered = groups.sortedWith(
-            compareByDescending<List<Int>> { it.size }.thenBy { group ->
-                group.map { positioned[it].latitude!! }.average()
-            },
+        val groups = (0 until n).groupBy { root(it) }.values
+
+        // Single pass per group: precompute center coordinates and sort member signals once,
+        // avoiding repeated list transformations and allocations inside sortedWith's comparator.
+        val siteSummaries = groups.map { groupIndices ->
+            var sumLat = 0.0
+            var sumLon = 0.0
+            val memberSignals = ArrayList<TargetSignal>(groupIndices.size)
+            for (idx in groupIndices) {
+                sumLat += lats[idx]
+                sumLon += lons[idx]
+                memberSignals.add(positioned[idx])
+            }
+            memberSignals.sortBy { it.id }
+            val count = groupIndices.size
+            SiteGroupSummary(
+                size = count,
+                centerLat = sumLat / count,
+                centerLon = sumLon / count,
+                members = memberSignals,
+            )
+        }
+
+        val ordered = siteSummaries.sortedWith(
+            compareByDescending<SiteGroupSummary> { it.size }.thenBy { it.centerLat },
         )
-        return ordered.mapIndexed { index, group ->
-            val members = group.map { positioned[it] }
+
+        return ordered.mapIndexed { index, summary ->
             FindSite(
                 label = if (index < MAX_LABELLED_SITES) {
                     "Site ${'A' + index}"
                 } else {
                     "Site ${index + 1}"
                 },
-                centerLatitude = members.map { it.latitude!! }.average(),
-                centerLongitude = members.map { it.longitude!! }.average(),
-                signals = members.sortedBy { it.id },
+                centerLatitude = summary.centerLat,
+                centerLongitude = summary.centerLon,
+                signals = summary.members,
             )
         }
     }
