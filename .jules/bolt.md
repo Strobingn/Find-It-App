@@ -1,3 +1,7 @@
 ## 2025-02-14 - HuntZoneClusterer group aggregation allocations
 **Learning:** Using functional Kotlin idioms (`members.map { ... }.average()`, `groupBy`, `maxWith`) during cluster group metric calculation allocates numerous temporary objects (`ArrayList`, `Map.Entry`, `Double`, `Pair`) for each cluster. Replacing these with single-pass primitive arrays (`DoubleArray`, `BooleanArray`) eliminates thousands of allocations in dense target sets.
 **Action:** When computing per-group metrics over collections, favor single-pass loops with reused primitive arrays and explicit tracking over chained collection transformations.
+
+## 2026-08-07 - FindSiteClusterer primitive coordinate extraction and zero-allocation grouping
+**Learning:** In spatial clustering algorithms that perform $O(N^2)$ pairwise distance comparisons on domain entities with boxed coordinates (`Double?`), property dispatch and autoboxing occur inside the innermost loop ($N(N-1)/2$ iterations). Furthermore, sorting clusters with Kotlin's `.average()` calls allocates intermediate `List<Double>` collections per group. Pre-extracting coordinate arrays into primitive `DoubleArray`s and accumulating cluster centroid sums in a single pass eliminates all intermediate boxing and collection allocations without modifying public API or behavior.
+**Action:** Always pre-extract primitive arrays before nested $O(N^2)$ distance or spatial operations, and compute group aggregations (sums, counts, centroids) in a single loop rather than chaining collection `.map { }.average()` operators.
