@@ -44,15 +44,24 @@ object FindSiteClusterer {
         val positioned = signals.filter { it.latitude != null && it.longitude != null }
         if (positioned.isEmpty()) return emptyList()
 
-        // Union-find over pairs within the radius.
-        val parent = IntArray(positioned.size) { it }
+        val count = positioned.size
+        // Pre-extract primitive coordinates to avoid repeated property lookups, null checks,
+        // and unboxing of Double? inside the O(N^2) pairwise distance comparison loops.
+        val lats = DoubleArray(count) { positioned[it].latitude!! }
+        val lons = DoubleArray(count) { positioned[it].longitude!! }
+
+        // Union-find over pairs within the radius with full path compression.
+        val parent = IntArray(count) { it }
         fun root(index: Int): Int {
+            var root = index
+            while (parent[root] != root) root = parent[root]
             var current = index
-            while (parent[current] != current) {
-                parent[current] = parent[parent[current]]
-                current = parent[current]
+            while (parent[current] != root) {
+                val next = parent[current]
+                parent[current] = root
+                current = next
             }
-            return current
+            return root
         }
         fun union(first: Int, second: Int) {
             val rootFirst = root(first)
@@ -60,35 +69,80 @@ object FindSiteClusterer {
             if (rootFirst != rootSecond) parent[maxOf(rootFirst, rootSecond)] = minOf(rootFirst, rootSecond)
         }
 
-        for (first in positioned.indices) {
-            val a = positioned[first]
-            for (second in first + 1 until positioned.size) {
-                val b = positioned[second]
+        for (first in 0 until count) {
+            val lat1 = lats[first]
+            val lon1 = lons[first]
+            for (second in first + 1 until count) {
                 val distance = FieldNavigation.distanceMeters(
-                    a.latitude!!, a.longitude!!, b.latitude!!, b.longitude!!,
+                    lat1, lon1, lats[second], lons[second],
                 )
                 if (distance <= radiusMeters) union(first, second)
             }
         }
 
-        val groups = positioned.indices.groupBy { root(it) }.values
-        val ordered = groups.sortedWith(
-            compareByDescending<List<Int>> { it.size }.thenBy { group ->
-                group.map { positioned[it].latitude!! }.average()
-            },
+        // Group members by cluster root without chained collection allocations.
+        // LinkedHashMap preserves encounter order for tie-breaking determinism.
+        val groups = LinkedHashMap<Int, ArrayList<Int>>()
+        for (i in 0 until count) {
+            val r = root(i)
+            var list = groups[r]
+            if (list == null) {
+                list = ArrayList()
+                groups[r] = list
+            }
+            list.add(i)
+        }
+
+        // Single-pass computation of group metrics (sumLat, sumLon) avoids intermediate
+        // List<Double> allocations and multiple collection traversals.
+        class ClusterGroup(
+            val members: ArrayList<Int>,
+            val sumLat: Double,
+            val sumLon: Double,
+        ) {
+            val size: Int get() = members.size
+            val avgLat: Double get() = sumLat / size
+            val avgLon: Double get() = sumLon / size
+        }
+
+        val clusterGroups = ArrayList<ClusterGroup>(groups.size)
+        for (members in groups.values) {
+            var sumLat = 0.0
+            var sumLon = 0.0
+            for (idx in members) {
+                sumLat += lats[idx]
+                sumLon += lons[idx]
+            }
+            clusterGroups.add(ClusterGroup(members, sumLat, sumLon))
+        }
+
+        // Sort by size descending, then by average latitude ascending.
+        clusterGroups.sortWith(
+            compareByDescending<ClusterGroup> { it.size }.thenBy { it.avgLat },
         )
-        return ordered.mapIndexed { index, group ->
-            val members = group.map { positioned[it] }
-            FindSite(
-                label = if (index < MAX_LABELLED_SITES) {
-                    "Site ${'A' + index}"
-                } else {
-                    "Site ${index + 1}"
-                },
-                centerLatitude = members.map { it.latitude!! }.average(),
-                centerLongitude = members.map { it.longitude!! }.average(),
-                signals = members.sortedBy { it.id },
+
+        val result = ArrayList<FindSite>(clusterGroups.size)
+        for (index in clusterGroups.indices) {
+            val cg = clusterGroups[index]
+            val memberSignals = ArrayList<TargetSignal>(cg.size)
+            for (idx in cg.members) {
+                memberSignals.add(positioned[idx])
+            }
+            memberSignals.sortBy { it.id }
+
+            result.add(
+                FindSite(
+                    label = if (index < MAX_LABELLED_SITES) {
+                        "Site ${'A' + index}"
+                    } else {
+                        "Site ${index + 1}"
+                    },
+                    centerLatitude = cg.avgLat,
+                    centerLongitude = cg.avgLon,
+                    signals = memberSignals,
+                ),
             )
         }
+        return result
     }
 }
