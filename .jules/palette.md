@@ -1,0 +1,3 @@
+## 2025-02-14 - Stepper buttons with text glyphs accessibility
+**Learning:** In Jetpack Compose, stepper controls using `IconButton` containing raw punctuation glyphs like `Text("–")` or `Text("+")` are read verbatim by TalkBack/screen readers as raw punctuation or confusing characters. In addition, failing to specify bounded `enabled` conditions allows invisible overshoots beyond domain boundaries (e.g., hours < 0 or > 23).
+**Action:** Always provide explicit semantics via `Modifier.semantics { contentDescription = "..." }` (e.g. "Earlier hour" / "Later hour") and explicitly bind `enabled = ...` on decrement/increment `IconButton`s to convey state and action clearly to assistive technologies.
